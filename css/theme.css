@@ -1,0 +1,315 @@
+/*!
+ * Cae'sWorld — theme.css
+ * 主题色 #FCF3E8 + 方格纸纹。只放“底层语言”：色板、纸面、笔触、字体、通用动效。
+ * 页面结构样式见 loading.css / menu.css / pet.css。
+ */
+
+/* ---------- 色板（全部从主题色推导，保持同一纸张的色温） ---------- */
+:root {
+  /* 主题 */
+  --paper: #FCF3E8;
+  --paper-hi: #FFFBF4;
+  --paper-lo: #F5E8D8;
+  --paper-deep: #EFDFCB;
+
+  /* 墨色（暖棕，不用纯黑） */
+  --ink: #3B3128;
+  --ink-soft: #6E5E4D;
+  --ink-faint: #A08D76;
+  --ink-hair: #C9B79F;
+
+  /* 网格线：与主题同色系，一格 22px 细线，五格一条主格线 */
+  --grid-minor: rgba(150, 122, 92, 0.13);
+  --grid-major: rgba(150, 122, 92, 0.22);
+  --grid-unit: 22px;
+
+  /* 强调：朱砂 + 蓝墨，像手账上的红章/蓝笔 */
+  --seal: #C2563C;
+  --seal-soft: rgba(194, 86, 60, 0.12);
+  --pen-blue: #4E6C8A;
+  --pen-blue-soft: rgba(78, 108, 138, 0.12);
+  --leaf: #6E8B57;
+  --leaf-soft: rgba(110, 139, 87, 0.14);
+  --amber: #C99A3E;
+  --amber-soft: rgba(201, 154, 62, 0.14);
+
+  /* 纸边与投影：一层很轻的暖灰 */
+  --edge: rgba(112, 88, 62, 0.18);
+  --edge-strong: rgba(112, 88, 62, 0.3);
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 2px 6px rgba(94, 72, 48, 0.08);
+  --shadow-2: 0 10px 30px -14px rgba(74, 54, 34, 0.32), 0 2px 0 rgba(255, 255, 255, 0.55) inset;
+  --shadow-lift: 0 18px 44px -18px rgba(74, 54, 34, 0.42), 0 0 0 1px var(--edge) inset;
+
+  /* 圆角：手绘风尽量小 */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+
+  /* 动效 */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-soft: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-back: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-1: 140ms;
+  --dur-2: 260ms;
+  --dur-3: 460ms;
+  --dur-4: 760ms;
+
+  /* 布局 */
+  --side-w: clamp(212px, 25vw, 286px);
+  --gutter: clamp(12px, 2.4vw, 22px);
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+
+  /* 字体：系统中文字体优先，标题用手写感的衬线/楷体族 */
+  --font-ui: "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-hand: "Kaiti SC", "STKaiti", "KaiTi", "楷体", "LXGW WenKai", "Noto Serif SC", "Songti SC", var(--font-ui);
+  --font-logo: "Snell Roundhand", "Segoe Script", "Bradley Hand", "Kaiti SC", "STKaiti", "楷体", var(--font-hand);
+
+  --text-xs: 11.5px;
+  --text-sm: 13px;
+  --text-md: 15px;
+  --text-lg: 17px;
+
+  color-scheme: light;
+}
+
+/* 触屏：去掉点击高亮与 300ms 延迟 */
+* { -webkit-tap-highlight-color: transparent; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  line-height: 1.55;
+  color: var(--ink);
+  background-color: var(--paper);
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------- 方格纸：三层叠加 ----------
+ * 1) 细网格 + 每五条的主格线（渐变绘制，随视口铺满）
+ * 2) 纸张纤维噪点（内联 SVG data-uri，避免额外请求）
+ * 3) 四周一圈暖色暗角，让纸“有厚度”
+ * 注意：所有“纸”容器都用 ::before 叠同样的网格，保证风格统一。
+ */
+.grid-paper,
+body::before {
+  background-image:
+    linear-gradient(to right, var(--grid-major) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-major) 1px, transparent 1px),
+    linear-gradient(to right, var(--grid-minor) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-minor) 1px, transparent 1px);
+  background-size:
+    calc(var(--grid-unit) * 5) calc(var(--grid-unit) * 5),
+    calc(var(--grid-unit) * 5) calc(var(--grid-unit) * 5),
+    var(--grid-unit) var(--grid-unit),
+    var(--grid-unit) var(--grid-unit);
+  background-position: -1px -1px, -1px -1px, -1px -1px, -1px -1px;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+}
+
+/* 纤维噪点 + 暗角（固定层，不随滚动移动，像纸本身） */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' seed='11' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .42 0 0 0 0 .33 0 0 0 0 .22 0 0 0 .05 0'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>"),
+    radial-gradient(130% 100% at 50% 0%, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0) 42%),
+    radial-gradient(120% 90% at 50% 110%, rgba(146, 112, 76, 0.1) 0%, rgba(146, 112, 76, 0) 55%);
+}
+
+/* ---------- 纸张/便签 ---------- */
+.paper {
+  position: relative;
+  background-color: var(--paper-hi);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+  isolation: isolate;
+}
+.paper::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  opacity: 0.55;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--grid-minor) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-minor) 1px, transparent 1px);
+  background-size: var(--grid-unit) var(--grid-unit);
+  -webkit-mask-image: linear-gradient(to bottom, #000, transparent 85%);
+  mask-image: linear-gradient(to bottom, #000, transparent 85%);
+}
+
+/* ---------- 文字 ---------- */
+h1, h2, h3, h4, p { margin: 0; }
+
+.cw-muted { color: var(--ink-faint); }
+
+/* 品牌字：Cae's 手写 + World 衬线，下划线像红笔划的 */
+.cw-logo {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.14em;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  font-weight: 600;
+}
+.cw-logo-cae {
+  font-family: var(--font-logo);
+  font-style: italic;
+  color: var(--ink);
+  letter-spacing: 0.005em;
+}
+.cw-logo-world {
+  font-family: var(--font-hand);
+  font-weight: 700;
+  color: var(--seal);
+  letter-spacing: 0.01em;
+}
+.cw-slogan {
+  color: var(--ink-soft);
+  font-family: var(--font-hand);
+  letter-spacing: 0.14em;
+}
+
+/* “你知道吗”纸条：左侧虚线边 + 手写体 */
+.cw-tip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  letter-spacing: 0.18em;
+  color: var(--ink-faint);
+  text-transform: none;
+}
+.cw-tip-bulb {
+  color: var(--amber);
+  transform: translateY(-1px);
+  animation: twinkle 3.6s var(--ease-soft) infinite;
+}
+.cw-tip-text {
+  font-family: var(--font-hand);
+  color: var(--ink);
+  font-size: var(--text-md);
+  letter-spacing: 0.04em;
+  text-wrap: balance;
+}
+.cw-tip-text.is-swap {
+  animation: tip-swap var(--dur-3) var(--ease-out);
+}
+.cw-tip-card {
+  position: relative;
+  padding: 12px 16px 14px 20px;
+  background: var(--paper-hi);
+  border: 1px solid var(--edge);
+  border-left: 2px dashed var(--ink-hair);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset;
+}
+
+@keyframes tip-swap {
+  0% { opacity: 0; transform: translateY(5px) rotate(-0.25deg); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes twinkle {
+  0%, 70%, 100% { opacity: 0.55; transform: translateY(-1px) scale(0.92); }
+  78% { opacity: 1; transform: translateY(-2px) scale(1.12) rotate(12deg); }
+}
+
+/* 小角标 */
+.chip {
+  appearance: none;
+  border: 1px solid var(--edge);
+  background: var(--paper-hi);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 6px 12px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  transition: transform var(--dur-1) var(--ease-out), background-color var(--dur-1), color var(--dur-1), border-color var(--dur-1);
+}
+.chip:active { transform: translateY(1px) scale(0.985); }
+.chip.ink { color: var(--paper-hi); background: var(--ink); border-color: var(--ink); }
+.chip:hover { border-color: var(--edge-strong); }
+
+/* 状态圆点 */
+.cw-pet-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+  box-shadow: 0 0 0 3px rgba(160, 141, 118, 0.16);
+  vertical-align: 1px;
+  flex: 0 0 auto;
+}
+
+/* 进场/出场通用：弹一下（位移+轻微缩放）。
+ * 刻意不在关键帧里写 opacity：一旦内核不推进动画，元素会永久停在首帧不可见，
+ * 表现为“DOM 在、就是看不见”。透明度交给入场容器（可被移除）处理。
+ */
+.pop { animation: pop var(--dur-3) var(--ease-back); }
+@keyframes pop {
+  0% { transform: translateY(8px) scale(0.985); }
+  60% { transform: translateY(-2px) scale(1.008); }
+  100% { transform: none; }
+}
+
+/* 焦点环：所有可交互元素统一用“蓝笔圈一圈” */
+:where(button, [tabindex], a):focus-visible {
+  outline: 2px solid var(--pen-blue);
+  outline-offset: 2px;
+}
+
+/* 滚动条：细，暖色 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-hair) transparent;
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-thumb { background: var(--ink-hair); border-radius: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* 图标 */
+.ico, .ico svg, svg.ico {
+  width: 1em;
+  height: 1em;
+  display: block;
+}
+.ico { width: 20px; height: 20px; }
+
+/* 系统开启“减少动态效果”时统一降级 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    /* 动画结束后回落到正常样式，避免定格在不可见的起始帧 */
+    animation-fill-mode: none !important;
+  }
+}
