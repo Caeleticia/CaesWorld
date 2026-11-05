@@ -2,102 +2,88 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <!-- 资源基准：本项目所有 js/css/data/vendor 路径都以此为准（页面放在子目录或被 CDN 挂载时也不跑偏） -->
   <base href="./" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
-  <meta name="theme-color" content="#FCF3E8" />
+  <meta name="theme-color" content="#E5FFFF" />
   <meta name="color-scheme" content="light" />
-  <meta name="description" content="Cae'sWorld —— 每个人都能做卡牌。动态 UI 骨架。" />
-  <meta name="cw-tips-source" content="fallback" />
+  <meta name="description" content="Cae'sWorld —— 每个人都能做卡牌。动态 UI，不含玩法。" />
   <title>Cae'sWorld · 每个人都能做卡牌</title>
-
-  <!-- LIVE2D: 依赖在 js/live2d.js 中按需加载（CDN 优先，vendor/ 兜底），此处不阻塞首屏 -->
+  <!-- data/tips.txt 在 file:// 下会被浏览器按 CORS 拦住，此时走内置兜底字符库 -->
+  <meta name="cw-tips-source" content="fallback" />
 
   <link rel="stylesheet" href="css/theme.css" />
   <link rel="stylesheet" href="css/loading.css" />
   <link rel="stylesheet" href="css/menu.css" />
-  <link rel="stylesheet" href="css/pet.css" />
 </head>
-<body class="is-booting">
+<body class="is-loading">
 
-  <!-- ============ 载入页 ============ -->
+  <!-- ======================= 载入页面 ======================= -->
   <section id="loading-screen" class="loading-screen" aria-labelledby="loading-title">
-    <div class="loading-paper" aria-hidden="true">
-      <svg class="loading-paper-svg" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg>
-    </div>
+    <div class="loading-note">
+      <div class="pushpin" aria-hidden="true"></div>
 
-    <div class="loading-inner">
-      <header class="loading-head">
-        <h1 class="cw-logo" id="loading-title">
-          <span class="cw-logo-cae">Cae's</span><span class="cw-logo-world">World</span>
-        </h1>
+      <header class="cw-head">
+        <h1 class="cw-title" id="loading-title"><span class="cw-title-a">Cae's</span><span class="cw-title-b">World</span></h1>
         <p class="cw-slogan">每个人都能做卡牌</p>
       </header>
 
-      <div class="cw-tip-card" aria-label="你知道吗">
-        <span class="cw-tip-label"><span class="cw-tip-bulb" aria-hidden="true">✦</span> 你知道吗</span>
+      <div class="cw-tip" aria-label="你知道吗">
+        <span class="cw-tip-label"><span class="cw-tip-star" aria-hidden="true">✦</span>你知道吗</span>
         <p class="cw-tip-text" id="loading-tip" aria-live="polite">正在翻开小纸条…</p>
       </div>
 
       <div class="loading-progress" role="group" aria-label="加载进度">
-        <div class="loading-bar-track">
-          <div class="loading-bar" id="loading-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+        <div class="bar-track">
+          <div class="bar-fill" id="loading-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
         </div>
-        <div class="loading-meta">
-          <span class="loading-status" id="loading-status">正在加载数据…</span>
-          <span class="loading-pct" id="loading-pct">0%</span>
+        <div class="bar-meta">
+          <span class="bar-status" id="loading-status">正在加载数据</span>
+          <span class="bar-pct" id="loading-pct">0%</span>
         </div>
       </div>
-
-      <p class="loading-hint">正在加载数据</p>
     </div>
 
     <footer class="loading-foot">
-      <span class="loading-dotline" aria-hidden="true"></span>
-      <span class="loading-version">动态 UI 预览 · 不含玩法</span>
+      <span class="loading-version">动态 UI · 不含玩法</span>
     </footer>
   </section>
 
-  <!-- ============ 主菜单 ============ -->
-  <section id="main-screen" class="main-screen" hidden>
-    <!-- 左侧边栏 -->
-    <aside class="sidebar" aria-label="主导航">
+  <!-- ======================= 主菜单 ======================= -->
+  <main id="main-menu" class="main-menu" hidden>
+    <!-- 左侧边栏：品牌 + 你知道吗 + 标签（每个标签带弹出选项） -->
+    <aside class="sidebar" aria-label="主菜单导航">
       <div class="sidebar-brand">
-        <h1 class="cw-logo cw-logo-sm">
-          <span class="cw-logo-cae">Cae's</span><span class="cw-logo-world">World</span>
-        </h1>
-        <p class="cw-slogan cw-slogan-sm">每个人都能做卡牌</p>
+        <h1 class="cw-title cw-title--small"><span class="cw-title-a">Cae's</span><span class="cw-title-b">World</span></h1>
+        <p class="cw-slogan">每个人都能做卡牌</p>
       </div>
 
-      <div class="sidebar-tip" aria-label="你知道吗">
-        <button class="sidebar-tip-swap" type="button" title="换一条" aria-label="换一条你知道吗">↻</button>
-        <span class="cw-tip-label"><span class="cw-tip-bulb" aria-hidden="true">✦</span> 你知道吗</span>
-        <p class="cw-tip-text">正在翻开小纸条…</p>
+      <div class="cw-tip cw-tip--side" aria-label="你知道吗">
+        <span class="cw-tip-label">
+          <span class="cw-tip-star" aria-hidden="true">✦</span>你知道吗
+          <button class="cw-tip-refresh" type="button" aria-label="换一条你知道吗" title="换一条">↻</button>
+        </span>
+        <p class="cw-tip-text" id="menu-tip" aria-live="polite"></p>
       </div>
 
-      <div class="sidebar-list" id="sidebar-list"></div>
+      <nav class="tab-nav" id="tab-nav" aria-label="功能">
+        <!-- 由 js/menus.js 渲染 -->
+      </nav>
 
-      <div class="sidebar-foot">
-        <span class="sidebar-foot-line" aria-hidden="true"></span>
-        <span>v0.1 · UI 骨架</span>
-      </div>
+      <footer class="sidebar-foot">
+        <span>动态 UI · 不含玩法</span>
+      </footer>
     </aside>
 
-    <!-- 右侧内容（桌宠舞台 + 演示卡） -->
-    <main class="content" id="content" aria-label="主内容">
-      <div class="content-spine" aria-hidden="true"></div>
-      <div class="cw-pet-layer" id="pet-layer"></div>
-    </main>
-  </section>
+    <!-- 右侧：空白区域 + 一张随机图片 -->
+    <section class="stage" id="stage" aria-label="展示区">
+      <div class="stage-picture">
+        <img id="stage-picture" class="stage-picture-img" alt="" draggable="false" />
+        <span class="stage-picture-tag" id="stage-picture-tag" hidden></span>
+      </div>
+      <div class="stage-toast" id="stage-toast" role="status" aria-live="polite" hidden></div>
+    </section>
+  </main>
 
-  <script src="js/dev-preview.js"></script>
-  <script src="js/utils.js"></script>
-  <script src="js/storage.js"></script>
-  <script src="js/icons.js"></script>
-  <script src="js/menus.js"></script>
-  <script src="js/tips.js"></script>
-  <script src="js/live2d.js"></script>
-  <script src="js/pet.js"></script>
-  <script src="js/app.js"></script>
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>
