@@ -5,7 +5,7 @@
  * 本文件只做界面；不含任何玩法逻辑。
  */
 import { loadTips, mountTip } from "./tips.js";
-import { MENUS, findItem, toggleTab } from "./menus.js";
+import { MENUS, toggleTab } from "./menus.js";
 import { icon } from "./icons.js";
 import { PICTURES, mountPicture } from "./pictures.js";
 import { STAGES, createLoader, mountProgress, nextFrame, preloadImage } from "./loading.js";
@@ -50,8 +50,7 @@ function renderTabs(nav) {
           .map(
             (it, j) =>
               `<button type="button" class="pop-item" style="--j:${j}" data-item="${it.id}">` +
-              `<span class="pop-label">${it.label}</span>` +
-              `<span class="pop-note">待实现</span></button>`
+              `<span class="pop-label">${it.label}</span></button>`
           )
           .join("")}</div>
       </div>`;
@@ -85,37 +84,13 @@ function initTabs(nav, onPick) {
       return;
     }
     const item = event.target.closest(".pop-item");
-    if (item) {
-      const found = findItem(item.dataset.item);
-      if (found) onPick(found);
-    }
+    if (item && onPick) onPick(item.dataset.item);
   });
 
   // 键盘：Esc 收起当前展开的标签
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && nav.dataset.open) setOpenTab(nav, null);
   });
-}
-
-/* ------------------------------------------------------------------ */
-/* 右上/中央的提示气泡（无玩法，只告诉用户点了什么）                    */
-/* ------------------------------------------------------------------ */
-function initToast(el) {
-  let timer = 0;
-  function show(text) {
-    if (!el) return;
-    el.textContent = text;
-    el.hidden = false;
-    requestAnimationFrame(() => el.classList.add("is-show"));
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      el.classList.remove("is-show");
-      setTimeout(() => {
-        el.hidden = true;
-      }, 260);
-    }, 1800);
-  }
-  return { show };
 }
 
 /* ------------------------------------------------------------------ */
@@ -172,16 +147,14 @@ async function boot() {
   const tip = mountTip(tipEl, tips, { interval: params.get("tips") === "0" ? 0 : 9000 });
   $("#loading-tip").textContent = tips[Math.floor(Math.random() * tips.length)] || "";
 
-  const toast = initToast($("#stage-toast"));
-  initTabs(nav, ({ tab, item }) => {
-    toast.show(`${tab.label} · ${item.label} —— 界面占位，玩法待开发`);
+  initTabs(nav, (itemId) => {
+    if (itemId === "editor") openEditor();
   });
 
   $(".cw-tip-refresh")?.addEventListener("click", () => tip.refresh());
 
   mountPicture(
     $("#stage-picture"),
-    $("#stage-picture-tag"),
     { pool: loadedPictures.length ? loadedPictures : PICTURES }
   );
 
@@ -194,9 +167,11 @@ async function boot() {
 
   /* —— 进入主菜单 —— */
   if (params.get("freeze") === "1") return;
+  if (params.get("freeze") === "menu") loadingScreen.remove();
 
   const hold = params.get("freeze") === "menu" || reduceMotion ? 0 : 520;
   setTimeout(() => {
+    const leaving = loadingScreen.classList.contains("is-gone") ? 0 : 480;
     loadingScreen.classList.add("is-leaving");
     setTimeout(() => {
       loadingScreen.classList.add("is-gone");
@@ -204,12 +179,43 @@ async function boot() {
       mainMenu.hidden = false;
       document.body.classList.remove("is-loading");
       document.title = "Cae'sWorld · 主菜单";
-    }, reduceMotion ? 0 : 480);
+    }, leaving);
   }, hold);
 
   // 暴露给调试/测试：?debug=title 把状态写进标题
   window.__cw = { tips, source, loadedPictures, loader };
 }
+
+/* ------------------------------------------------------------------ */
+/* 编辑器                                                              */
+/* ------------------------------------------------------------------ */
+let editorLoaded = false;
+
+async function openEditor() {
+  const page = $("#editor-page");
+  const menu = $("#main-menu");
+  if (!page) return;
+  page.hidden = false;
+  if (menu) menu.hidden = true;
+  location.hash = "#editor";
+  if (!editorLoaded) {
+    const mod = await import("./editor-view.js");
+    mod.initEditor();
+    editorLoaded = true;
+  }
+}
+
+function closeEditor() {
+  const page = $("#editor-page");
+  const menu = $("#main-menu");
+  if (page) page.hidden = true;
+  if (menu) menu.hidden = false;
+  history.replaceState(null, "", location.pathname + location.search);
+}
+
+window.addEventListener("hashchange", () => {
+  if (location.hash !== "#editor") closeEditor();
+});
 
 boot().catch((err) => {
   console.error(err);

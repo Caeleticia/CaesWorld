@@ -1,5 +1,5 @@
 /**
- * pictures.js —— 右侧空白区域的随机图片池
+ * pictures.js —— 右侧展示区的随机图片池
  *
  * 目前只有 castorice / hyacine 两张，随机取一张；刷新不连抽同一张（>1 张时）。
  */
@@ -25,10 +25,9 @@ export function pickPicture(pool = PICTURES, lastId = "", rng = Math.random) {
 /**
  * 把随机图片挂到 <img> 上。换图时先播退出动画再换 src。
  * @param {HTMLImageElement|null} img
- * @param {HTMLElement|null} tag 图片下方的名字标签
  * @param {{pool?: typeof PICTURES}} [options]
  */
-export function mountPicture(img, tag, options = {}) {
+export function mountPicture(img, options = {}) {
   const pool = options.pool || PICTURES;
   let lastId = "";
 
@@ -38,10 +37,6 @@ export function mountPicture(img, tag, options = {}) {
       img.src = entry.src;
       img.alt = entry.name;
       img.dataset.picId = entry.id;
-    }
-    if (tag) {
-      tag.textContent = entry.name;
-      tag.hidden = false;
     }
     return entry;
   }
