@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
   <meta name="theme-color" content="#E5FFFF" />
   <meta name="color-scheme" content="light" />
-  <meta name="description" content="Cae'sWorld —— 每个人都能做卡牌。动态 UI，不含玩法。" />
+  <meta name="description" content="Cae'sWorld —— 每个人都能做卡牌。" />
   <title>Cae'sWorld · 每个人都能做卡牌</title>
   <!-- data/tips.txt 在 file:// 下会被浏览器按 CORS 拦住，此时走内置兜底字符库 -->
   <meta name="cw-tips-source" content="fallback" />
@@ -14,6 +14,7 @@
   <link rel="stylesheet" href="css/theme.css" />
   <link rel="stylesheet" href="css/loading.css" />
   <link rel="stylesheet" href="css/menu.css" />
+  <link rel="stylesheet" href="css/editor.css" />
 </head>
 <body class="is-loading">
 
@@ -42,10 +43,6 @@
         </div>
       </div>
     </div>
-
-    <footer class="loading-foot">
-      <span class="loading-version">动态 UI · 不含玩法</span>
-    </footer>
   </section>
 
   <!-- ======================= 主菜单 ======================= -->
@@ -68,19 +65,142 @@
       <nav class="tab-nav" id="tab-nav" aria-label="功能">
         <!-- 由 js/menus.js 渲染 -->
       </nav>
-
-      <footer class="sidebar-foot">
-        <span>动态 UI · 不含玩法</span>
-      </footer>
     </aside>
 
-    <!-- 右侧：空白区域 + 一张随机图片 -->
+    <!-- 右侧：一张随机图片 -->
     <section class="stage" id="stage" aria-label="展示区">
       <div class="stage-picture">
         <img id="stage-picture" class="stage-picture-img" alt="" draggable="false" />
-        <span class="stage-picture-tag" id="stage-picture-tag" hidden></span>
       </div>
-      <div class="stage-toast" id="stage-toast" role="status" aria-live="polite" hidden></div>
+    </section>
+  </main>
+
+  <!-- ======================= 编辑器 ======================= -->
+  <main id="editor-page" class="editor-page" hidden>
+    <header class="editor-topbar">
+      <a class="btn small" id="btn-back" href="#menu">← 返回</a>
+      <div class="editor-title">编辑器 <span id="ed-status" class="ed-status"></span></div>
+      <div class="editor-actions">
+        <button class="btn small" id="btn-save" type="button">保存</button>
+        <button class="btn small" id="btn-export" type="button">导出</button>
+        <button class="btn small" id="btn-import" type="button">导入</button>
+        <input type="file" id="import-file" accept="application/json" hidden />
+      </div>
+    </header>
+
+    <nav class="ed-tabs" role="tablist">
+      <button class="ed-tab is-active" data-tab="character" type="button">设计角色</button>
+      <button class="ed-tab" data-tab="skills" type="button">设计技能</button>
+      <button class="ed-tab" data-tab="effects" type="button">设计效果</button>
+    </nav>
+
+    <!-- 角色 -->
+    <section class="ed-panel" data-panel="character">
+      <div class="ed-columns">
+        <div class="ed-col ed-col-form">
+          <h2>角色数据</h2>
+          <div class="form-grid">
+            <label class="form-field"><span>名字</span><input id="f-name" /></label>
+            <label class="form-field"><span>id</span><input id="f-id" placeholder="custom_unit_xxx" /><em>扩展包_类型_标识</em></label>
+            <label class="form-field"><span>品质</span>
+              <select id="f-quality">
+                <option value="white">白</option><option value="blue">蓝</option><option value="gold">金</option><option value="rainbow">彩</option>
+              </select>
+            </label>
+            <label class="form-field"><span>等级</span><input id="f-level" type="number" /></label>
+            <label class="form-field"><span>基础生命值</span><input id="f-hp" type="number" /></label>
+            <label class="form-field"><span>基础攻击力</span><input id="f-atk" type="number" /></label>
+            <label class="form-field"><span>基础防御力</span><input id="f-def" type="number" /></label>
+            <label class="form-field"><span>暴击率</span><input id="f-crit" type="number" step="0.01" /></label>
+            <label class="form-field"><span>暴击伤害</span><input id="f-critdmg" type="number" step="0.1" /></label>
+            <label class="form-field"><span>速度</span><input id="f-speed" type="number" /></label>
+            <label class="form-field"><span>标签</span><input id="f-label" placeholder="可选，一个单位一个标签" /></label>
+            <label class="form-field"><span>卡面图片路径</span><input id="f-image" placeholder="assets/pictures/xxx.png 或留空用占位图" /></label>
+          </div>
+          <div class="form-row">
+            <label class="form-check"><input id="f-occupy" type="checkbox" /> 占位</label>
+            <label class="form-check"><input id="f-count" type="checkbox" /> 计数</label>
+            <label class="form-check"><input id="f-invincible" type="checkbox" /> 无敌</label>
+          </div>
+          <fieldset class="resist-box">
+            <legend>各属性抗性</legend>
+            <label>物理 <input id="f-res-physical" type="number" step="0.01" /></label>
+            <label>魔法 <input id="f-res-magic" type="number" step="0.01" /></label>
+            <label>精神 <input id="f-res-spirit" type="number" step="0.01" /></label>
+            <label>本源 <input id="f-res-origin" type="number" step="0.01" /></label>
+          </fieldset>
+          <div class="form-row">
+            <label class="btn small">选择图片<input id="f-image-file" type="file" accept="image/*" hidden /></label>
+            <button class="btn small" id="btn-placeholder" type="button">用占位图</button>
+          </div>
+        </div>
+
+        <div class="ed-col ed-col-preview">
+          <h2>卡面预览</h2>
+          <div class="card-preview" id="ed-card-preview"></div>
+          <p class="muted" id="ed-unit-stats"></p>
+          <h2>挂载技能</h2>
+          <div class="mount-list" id="ed-mount-skills"></div>
+          <h2>挂载效果</h2>
+          <div class="mount-list" id="ed-mount-effects"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 技能 / 效果 共用的「数据 + 流程」布局 -->
+    <section class="ed-panel" data-panel="skills">
+      <div class="ed-columns ed-columns-skill">
+        <div class="ed-col ed-col-form">
+          <div id="ed-skill-col">
+            <div class="list-head">
+              <select id="ed-skill-list" class="grow"></select>
+              <button class="btn small" id="btn-new-skill" type="button">新建技能</button>
+            </div>
+            <div id="ed-skill-form" class="form-form"></div>
+          </div>
+          <div id="ed-effect-col" hidden>
+            <div class="list-head">
+              <select id="ed-effect-list" class="grow"></select>
+              <button class="btn small" id="btn-new-effect" type="button">新建效果</button>
+            </div>
+            <div id="ed-effect-form" class="form-form"></div>
+          </div>
+        </div>
+        <div class="ed-col ed-col-flow">
+          <div class="flow-head">
+            <strong id="flow-title">流程</strong>
+            <div class="flow-tools">
+              <button class="btn tiny" id="btn-zoom-out" type="button">－</button>
+              <span id="zoom-label">100%</span>
+              <button class="btn tiny" id="btn-zoom-in" type="button">＋</button>
+              <button class="btn tiny" id="btn-fit" type="button">适应</button>
+              <button class="btn tiny danger" id="btn-delete-block" type="button" disabled>删除积木</button>
+              <button class="btn tiny danger" id="btn-clear-flow" type="button">清空</button>
+            </div>
+          </div>
+          <div class="flow-layout">
+            <aside class="palette" id="ed-palette"></aside>
+            <div class="canvas-wrap">
+              <div class="blocks-canvas" id="blocks-canvas">
+                <div class="blocks-world" id="blocks-world"></div>
+                <div class="cut-marker" id="cut-marker"></div>
+                <div class="flow-empty" id="flow-empty"></div>
+              </div>
+            </div>
+          </div>
+          <div class="flow-errors" id="flow-errors" hidden></div>
+          <div class="json-panel">
+            <div class="json-head"><strong>执行流程 JSON（实时）</strong><button class="btn tiny" id="btn-copy-flow" type="button">复制</button></div>
+            <pre id="json-flow">{}</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 实时存档 JSON -->
+    <section class="json-save-panel">
+      <div class="json-head"><strong>存档 JSON（积木 / 填写 / 连接 / 位置）</strong><button class="btn tiny" id="btn-copy-save" type="button">复制内容包</button></div>
+      <pre id="json-save">{}</pre>
     </section>
   </main>
 
