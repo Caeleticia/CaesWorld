@@ -1,7 +1,7 @@
 /**
  * app.js —— 启动流程与界面编排
  *
- * 流程：随机抽一张开屏头图 → 载入页（字符库 → 图片 → 装配菜单）→ 主菜单。
+ * 流程：载入页（字符库 → 头图 → 装配菜单）→ 主菜单（右侧随机头图）。
  * 本文件只做界面；不含任何玩法逻辑。
  */
 import { loadTips, mountTip } from "./tips.js";
@@ -21,11 +21,11 @@ const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").match
 const params = new URLSearchParams(window.location.search);
 
 /* ------------------------------------------------------------------ */
-/* 开屏头图                                                            */
+/* 头图（主菜单右侧）                                                   */
 /* ------------------------------------------------------------------ */
 /**
- * 头图放在载入页便签上方（顶部），主菜单时淡出，不遮挡任何控件。
- * 数据来自 assets/banner/index.txt：每行一个文件名，开屏随机抽一张。
+ * 头图只出现在主菜单右侧，载入页不显示。
+ * 数据来自 assets/banner/index.txt：每行一个文件名，每次进入随机抽一张。
  */
 function applyBanner(el, entry) {
   if (!el) return;
@@ -150,19 +150,13 @@ async function boot() {
   document.querySelector('meta[name="cw-tips-source"]')?.setAttribute("content", source);
   finish(1);
 
-  /* —— 阶段 2：开屏头图（随机一张）+ 图片资源 —— */
+  /* —— 阶段 2：头图（随机一张）+ 图片资源 —— */
   stage(2);
   await nextFrame();
   const { banners, source: bannerSource } = await loadBanners();
-  // banner/index.txt：每行一个文件名，开屏从里面随机抽一张
+  // banner/index.txt：每行一个文件名，进入时随机抽一张（只用在主菜单右侧）
   const picked = findBanner(banners, params.get("banner")) || pickBanner(banners, "") || banners[0] || null;
-  const loadingBanner = $("#loading-banner");
-  const menuBanner = $("#menu-banner");
-  if (picked) {
-    applyBanner(loadingBanner, picked);
-    applyBanner(menuBanner, picked);
-    await preloadImage(picked.src);
-  }
+  if (picked) await preloadImage(picked.src);
   finish(2);
 
   /* —— 阶段 3：装配界面（先做，再播最后一小段进度） —— */
@@ -201,6 +195,7 @@ async function boot() {
       loadingScreen.classList.add("is-gone");
       loadingScreen.setAttribute("aria-hidden", "true");
       mainMenu.hidden = false;
+      applyBanner($("#stage-picture"), picked);
       document.body.classList.remove("is-loading");
       document.title = "Cae'sWorld · 主菜单";
     }, leaving);
