@@ -1,13 +1,13 @@
 /**
  * app.js —— 启动流程与界面编排
  *
- * 流程：载入页（字符库 → 图片 → 装配菜单）→ 主菜单。
+ * 流程：随机抽一张开屏头图 → 载入页（字符库 → 图片 → 装配菜单）→ 主菜单。
  * 本文件只做界面；不含任何玩法逻辑。
  */
 import { loadTips, mountTip } from "./tips.js";
 import { MENUS, toggleTab } from "./menus.js";
 import { icon } from "./icons.js";
-import { PICTURES, mountPicture } from "./pictures.js";
+import { loadBanners, pickBanner, findBanner } from "./pictures.js";
 import { STAGES, createLoader, mountProgress, nextFrame, preloadImage } from "./loading.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -16,8 +16,29 @@ const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").match
 /* 调试参数（不影响正常使用）：
    ?freeze=1      载入完成后停在载入页（看载入页视觉）
    ?freeze=menu   跳过载入页直接看主菜单
-   ?tips=0        「你知道吗」不自动轮换 */
+   ?tips=0        「你知道吗」不自动轮换
+   ?banner=文件名 指定开屏头图（对应 banner/index.txt 里的一行，如 ?banner=peach.png） */
 const params = new URLSearchParams(window.location.search);
+
+/* ------------------------------------------------------------------ */
+/* 开屏头图                                                            */
+/* ------------------------------------------------------------------ */
+/**
+ * 头图放在载入页便签上方（顶部），主菜单时淡出，不遮挡任何控件。
+ * 数据来自 assets/banner/index.txt：每行一个文件名，开屏随机抽一张。
+ */
+function applyBanner(el, entry) {
+  if (!el) return;
+  if (!entry) {
+    el.hidden = true;
+    el.removeAttribute("src");
+    return;
+  }
+  el.hidden = false;
+  el.src = entry.src;
+  el.alt = "";
+  el.dataset.banner = entry.id;
+}
 
 /* ------------------------------------------------------------------ */
 /* 主菜单：侧栏标签 + 弹出选项                                          */
@@ -129,11 +150,19 @@ async function boot() {
   document.querySelector('meta[name="cw-tips-source"]')?.setAttribute("content", source);
   finish(1);
 
-  /* —— 阶段 2：图片资源 —— */
+  /* —— 阶段 2：开屏头图（随机一张）+ 图片资源 —— */
   stage(2);
   await nextFrame();
-  const results = await Promise.all(PICTURES.map((p) => preloadImage(p.src)));
-  const loadedPictures = PICTURES.filter((_, i) => results[i]);
+  const { banners, source: bannerSource } = await loadBanners();
+  // banner/index.txt：每行一个文件名，开屏从里面随机抽一张
+  const picked = findBanner(banners, params.get("banner")) || pickBanner(banners, "") || banners[0] || null;
+  const loadingBanner = $("#loading-banner");
+  const menuBanner = $("#menu-banner");
+  if (picked) {
+    applyBanner(loadingBanner, picked);
+    applyBanner(menuBanner, picked);
+    await preloadImage(picked.src);
+  }
   finish(2);
 
   /* —— 阶段 3：装配界面（先做，再播最后一小段进度） —— */
@@ -152,11 +181,6 @@ async function boot() {
   });
 
   $(".cw-tip-refresh")?.addEventListener("click", () => tip.refresh());
-
-  mountPicture(
-    $("#stage-picture"),
-    { pool: loadedPictures.length ? loadedPictures : PICTURES }
-  );
 
   finish(3);
 
@@ -182,8 +206,8 @@ async function boot() {
     }, leaving);
   }, hold);
 
-  // 暴露给调试/测试：?debug=title 把状态写进标题
-  window.__cw = { tips, source, loadedPictures, loader };
+  // 调试信息：当前头图与字符库来源
+  window.__cw = { tips, source, banner: picked, bannerSource, loader };
 }
 
 /* ------------------------------------------------------------------ */
@@ -200,7 +224,7 @@ async function openEditor() {
   location.hash = "#editor";
   if (!editorLoaded) {
     const mod = await import("./editor-view.js");
-    mod.initEditor();
+    await mod.initEditor();
     editorLoaded = true;
   }
 }

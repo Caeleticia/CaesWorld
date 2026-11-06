@@ -8,6 +8,9 @@
  * 纯前端，不依赖任何第三方库。引擎只负责数据结构与解释执行（engine/）。
  */
 import {
+  loadPack,
+  PACK_FILES,
+  DEFAULT_PACK,
   buildFlowCatalog,
   BLOCK_GROUPS,
   DATA_TYPE_LABEL,
@@ -23,7 +26,9 @@ import {
   resolveImage,
 } from "../engine/index.js";
 
-const STORAGE_KEY = "caeworld:editor-project";
+/** 卡组：工程与内容包都按卡组存在 data/pack/<卡组>/ 里 */
+const PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
+const STORAGE_KEY = `caeworld:editor-project:${PACK}`;
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
@@ -50,15 +55,57 @@ const catalog = buildFlowCatalog();
 
 function loadProject() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    // 新格式：按卡组存；旧版本只有不带卡组后缀的 key，读一次当迁移
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem("caeworld:editor-project");
     if (raw) {
       const p = JSON.parse(raw);
-      if (p && p.kind === "caeworld-editor-project") return p;
+      if (p && p.kind === "caeworld-editor-project") {
+        p.pack = PACK;
+        return p;
+      }
     }
   } catch {
     /* 读不出来就用空白工程 */
   }
   return createProject();
+}
+
+/** 从 data/pack/<卡组>/ 读入内置卡组（首次打开编辑器时调用） */
+async function hydrateFromPack() {
+  try {
+    const pack = await loadPack(PACK);
+    const hasAny = pack.units.length || pack.skills.length || pack.effects.length;
+    if (!hasAny) return false;
+    if (pack.units[0]) project.character = unitCardToCharacter(pack.units[0]);
+    for (const card of pack.skills) {
+      if (project.skills.some((x) => x.id === card.id)) continue;
+      const s = createSkill(card.id, card.name);
+      Object.assign(s, { type: card.type, attribute: card.attribute, multiplier: card.multiplier, description: card.description || "" });
+      s.flow = flowFromContent(card.flow);
+      project.skills.push(s);
+    }
+    for (const def of pack.effects) {
+      if (project.effects.some((x) => x.id === def.id)) continue;
+      const e = createEffect(def.id, def.name);
+      e.flags = (def.flags || []).slice();
+      e.triggers = (def.triggers || []).map((t) => ({ block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" } }));
+      e.flows = {};
+      for (const t of e.triggers) e.flows[t.block.id] = flowFromContent((def.flows || {})[t.block.id]);
+      project.effects.push(e);
+    }
+    // 角色的挂载列表以卡组里的单位卡为准
+    const skillIds = (project.character.skillIds || []).filter((id) => project.skills.some((s) => s.id === id));
+    const effectIds = (project.character.effectIds || []).filter((id) => project.effects.some((e) => e.id === id));
+    project.character.skillIds = skillIds;
+    project.character.effectIds = effectIds;
+    active.skillId = active.skillId || (project.skills[0] ? project.skills[0].id : null);
+    active.effectId = active.effectId || (project.effects[0] ? project.effects[0].id : null);
+    setStatus(`已载入卡组「${PACK}」：角色 ${pack.units.length} · 技能 ${pack.skills.length} · 效果 ${pack.effects.length}`, "ok");
+    return true;
+  } catch (err) {
+    setStatus("卡组读取失败：" + err.message, "bad");
+    return false;
+  }
 }
 
 function markDirty() {
@@ -112,25 +159,15 @@ function currentCard() {
   return null;
 }
 
-/** 编辑器提供一份精简视图给引擎自测（tests/ui-dom.js 用） */
+/** 编辑器当前状态的精简视图（控制台调试用） */
 export function getView() {
   return {
+    pack: PACK,
     active: { ...active },
-    uiAvailable: Boolean(effectEligible()),
+    character: project.character.name || "",
+    skills: project.skills.map((s) => s.id),
+    effects: project.effects.map((e) => e.id),
   };
-}
-
-/**
- * 效果里放「触发」积木之前的检查：
- * 触发流程的积木 id 必须和效果卡登记的触发规则一致，才可能被引擎执行。
- */
-function effectEligible() {
-  const card = currentEffect();
-  if (!card || !active.triggerId) return false;
-  const t = (card.triggers || []).find((x) => x.block.id === active.triggerId);
-  if (!t) return false;
-  const flow = card.flows && card.flows[active.triggerId];
-  return Boolean(flow && flow.nodes.some((n) => n.id === t.block.id && n.type === "trigger"));
 }
 
 /** 当前正在编辑的流程：技能只有一条流程；效果按触发积木各有一条 */
@@ -190,7 +227,8 @@ function renderCardsList() {
         <strong>${escapeHtml(ch.name || "未命名角色")}</strong>
         <span>${escapeHtml(ch.id)}</span>
         <span class="quality q-${escapeHtml(ch.quality)}">${({ white: "白", blue: "蓝", gold: "金", rainbow: "彩" })[ch.quality] || ch.quality}</span>
-      </div>`;
+      </div>
+      <p class="muted card-source">数据来源：${escapeHtml(project.pack || PACK)} 卡组</p>`;
   }
   const skillsBox = $("#ed-mount-skills");
   if (skillsBox) {
@@ -1018,7 +1056,7 @@ function exportProject() {
   const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `cae-project-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = `cae-pack-${PACK}-${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   setStatus("已导出工程 JSON", "ok");
@@ -1164,9 +1202,10 @@ const edit = {
   /** 导出内容包（units / skills / effects 三份） */
   exportContent() {
     const content = projectToContent(project);
-    saveTextFile("units.json", content.units);
-    saveTextFile("skills.json", content.skills);
-    saveTextFile("effects.json", content.effects);
+    // 文件名与卡组目录一致：data/pack/<卡组>/单位.json 技能.json 效果.json
+    saveTextFile(PACK_FILES.units, content.units);
+    saveTextFile(PACK_FILES.skills, content.skills);
+    saveTextFile(PACK_FILES.effects, content.effects);
     return content;
   },
 };
@@ -1191,18 +1230,28 @@ function exportSnapshot() {
 
 export { setProject, projectToContent, edit, importContent, flowFromContent, unitCardToCharacter };
 
-export function initEditor() {
+export async function initEditor() {
   if (!project.character) project.character = createCharacter();
+  if (!project.pack) project.pack = PACK;
   active.skillId = active.skillId || (project.skills[0] ? project.skills[0].id : null);
   active.effectId = active.effectId || (project.effects[0] ? project.effects[0].id : null);
   setupForms();
   setupCanvas();
-  $('#btn-back')?.addEventListener("click", () => {
+  document.querySelector("#btn-back")?.addEventListener("click", () => {
     if (!dirty) return;
     flushSaveSync();
   });
   switchTab("character");
   renderCharacter();
+  // 本地没有存过工程时，用 data/pack/<卡组>/ 里的内置卡起手
+  const fresh = !(project.skills.length || project.effects.length || project.character.name);
+  if (fresh) {
+    const ok = await hydrateFromPack();
+    if (ok) {
+      renderAll();
+      markDirty();
+    }
+  }
 }
 
 /* ================================================================== */
@@ -1611,7 +1660,7 @@ function setupForms() {
   $("#btn-export")?.addEventListener("click", exportProject);
   $("#btn-export-content")?.addEventListener("click", () => {
     edit.exportContent();
-    setStatus("已导出 units.json / skills.json / effects.json", "ok");
+    setStatus(`已导出卡组文件（${PACK_FILES.units} / ${PACK_FILES.skills} / ${PACK_FILES.effects}）`, "ok");
   });
   $("#btn-import")?.addEventListener("click", () => $("#import-file")?.click());
   const cardCol = $("#ed-card-preview");
