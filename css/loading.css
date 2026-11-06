@@ -180,16 +180,6 @@
   color: var(--brand-ink);
 }
 
-.loading-foot {
-  position: absolute;
-  left: 50%;
-  bottom: max(16px, env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-  font-size: 12px;
-  letter-spacing: 0.12em;
-  color: var(--ink-3);
-}
-
 @media (max-width: 520px), (max-height: 560px) {
   .loading-note {
     gap: 16px;
