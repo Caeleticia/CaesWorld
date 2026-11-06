@@ -22,8 +22,6 @@
   <section id="loading-screen" class="loading-screen" aria-labelledby="loading-title">
     <div class="loading-note">
       <div class="pushpin" aria-hidden="true"></div>
-      <!-- 开屏头图：从 assets/banner/index.txt 随机抽一张 -->
-      <img id="loading-banner" class="loading-banner" alt="" hidden />
 
       <header class="cw-head">
         <h1 class="cw-title" id="loading-title"><span class="cw-title-a">Cae's</span><span class="cw-title-b">World</span></h1>
@@ -56,9 +54,6 @@
         <p class="cw-slogan">每个人都能做卡牌</p>
       </div>
 
-      <!-- 头图：与开屏同一张，同一次打开时保持一致 -->
-      <img id="menu-banner" class="menu-banner" alt="" hidden />
-
       <div class="cw-tip cw-tip--side" aria-label="你知道吗">
         <span class="cw-tip-label">
           <span class="cw-tip-star" aria-hidden="true">✦</span>你知道吗
@@ -72,6 +67,12 @@
       </nav>
     </aside>
 
+    <!-- 右侧：每次进入从 assets/banner/index.txt 随机载入一张头图 -->
+    <section class="stage" id="stage" aria-label="头图">
+      <div class="stage-picture">
+        <img id="stage-picture" class="stage-picture-img" alt="" hidden draggable="false" />
+      </div>
+    </section>
   </main>
 
   <!-- ======================= 编辑器 ======================= -->
