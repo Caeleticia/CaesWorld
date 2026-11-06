@@ -1605,6 +1605,17 @@ function setupForms() {
     renderJson();
   });
 
+  // 顶部三个标签：角色 / 技能 / 效果。之前只改了 is-active 的样式，没接 switchTab，
+  // 结果点「设计技能」「设计效果」页面毫无反应（技能与效果共用一个面板，靠这段切左栏）。
+  $$(".ed-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      // 切到技能 / 效果时，若当前没有选中项就落到第一张卡上，避免左栏空白
+      if (btn.dataset.tab === "skills" && !currentSkill() && project.skills[0]) active.skillId = project.skills[0].id;
+      if (btn.dataset.tab === "effects" && !currentEffect() && project.effects[0]) active.effectId = project.effects[0].id;
+      switchTab(btn.dataset.tab);
+    });
+  });
+
   $("#btn-new-skill")?.addEventListener("click", () => edit.newSkill());
   $("#btn-new-effect")?.addEventListener("click", () => edit.newEffect());
   $("#ed-skill-list")?.addEventListener("change", (e) => {
@@ -1689,7 +1700,52 @@ function setupForms() {
   $("#btn-copy-save")?.addEventListener("click", () => copyText(JSON.stringify(projectToContent(project), null, 2)));
   $("#btn-copy-flow")?.addEventListener("click", () => copyText($("#json-flow")?.textContent || "{}"));
 
+  setupSaveDock();
+
   window.addEventListener("beforeunload", () => {
     if (dirty) flushSaveSync();
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* 存档 JSON：移动端固定底部 + 折叠成悬浮球                              */
+/* ------------------------------------------------------------------ */
+const SAVE_COLLAPSE_KEY = "caeworld:editor-json-collapsed";
+
+function setupSaveDock() {
+  const panel = $("#json-save-panel");
+  const fab = $("#json-fab");
+  const collapseBtn = $("#btn-collapse-save");
+  const page = $("#editor-page");
+  if (!panel || !fab || !collapseBtn) return;
+
+  /** @param {boolean} collapsed */
+  const apply = (collapsed) => {
+    panel.classList.toggle("is-collapsed", collapsed);
+    fab.hidden = !collapsed;
+    // 移动端底部留白跟着折叠态变（.editor-page 上的 --save-bar-h）
+    page?.classList.toggle("is-save-collapsed", collapsed);
+    collapseBtn.setAttribute("aria-expanded", String(!collapsed));
+    collapseBtn.title = collapsed ? "展开存档 JSON" : "折叠成悬浮球";
+  };
+
+  let collapsed = false;
+  try {
+    collapsed = localStorage.getItem(SAVE_COLLAPSE_KEY) === "1";
+  } catch {
+    /* 隐私模式读不到就从展开态开始 */
+  }
+  apply(collapsed);
+
+  const toggle = (next) => {
+    apply(next);
+    try {
+      localStorage.setItem(SAVE_COLLAPSE_KEY, next ? "1" : "0");
+    } catch {
+      /* 存不住也不影响本次交互 */
+    }
+  };
+
+  collapseBtn.addEventListener("click", () => toggle(!panel.classList.contains("is-collapsed")));
+  fab.addEventListener("click", () => toggle(false));
 }
