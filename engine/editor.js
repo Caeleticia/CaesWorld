@@ -2,7 +2,7 @@
  * editor.js —— 编辑器工程（纯数据）
  *
  * 编辑器存的是「工程」：角色、技能、效果各一张卡，卡上的流程是积木流程。
- * 由工程生成正式内容包（data/units.json、skills.json、effects.json 同构），
+ * 由工程生成正式内容包（与 data/pack/<卡组>/单位.json、技能.json、效果.json 同构），
  * 战斗引擎读的是内容包，不是工程。
  *
  * 积木存档里额外带 `ui`（位置、常量、提示），战斗引擎会忽略它。
@@ -279,7 +279,7 @@ export function normalizeFlow(flow) {
 }
 
 /**
- * 工程 → 三份内容包（可直接写进 data/units.json 等）。
+ * 工程 → 三份内容包（可直接写进 data/pack/<卡组>/ 下的单位/技能/效果.json）。
  * @returns {{units: object, skills: object, effects: object}}
  */
 export function projectToContent(project) {

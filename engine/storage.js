@@ -2,8 +2,8 @@
  * storage.js —— 数据存储：序列化 / 校验 / 存档槽
  *
  * 三种数据分开存（相互独立，便于以后模组只改其中一部分）：
- *   unit   单位卡      packs/units.json
- *   skill  技能卡      packs/skills.json
+ *   unit   单位卡      data/pack/<卡组>/单位.json
+ *   skill  技能卡      data/pack/<卡组>/技能.json
  *   battle 战斗存档    storage.save("battle", …)（默认走内存，可换 localStorage）
  *
  * 战斗存档是按卡 id 引用的「战局快照」，而不是引擎内部对象的深拷贝：
