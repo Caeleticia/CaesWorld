@@ -6,8 +6,6 @@
   "description": "Cae'sWorld —— 每个人都能做卡牌。动态 UI + 回合制战斗引擎（无界面/无关卡）。",
   "main": "engine/index.js",
   "scripts": {
-    "test": "node tests/run-all.js",
-    "test:ui": "node tests/ui.test.js",
-    "test:engine": "node tests/engine.test.js"
+    "serve": "python3 -m http.server 8771 --bind 127.0.0.1"
   }
 }

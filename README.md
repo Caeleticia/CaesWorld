@@ -48,8 +48,9 @@ python3 -m http.server 8771 --bind 127.0.0.1
     - 设计：编辑器
     - 模组：模组管理
     - 设置：设置
-- **右侧展示区**
-  - 每次进入随机载入一张图片：`castorice` 或 `hyacine`（拍立得样式，带胶带；不连抽同一张）
+- **开屏头图**
+  - 打开游戏时从 `assets/banner/index.txt` 里随机抽一张（banner 文件夹的图片都登记在里面）
+  - 载入页显示在便签顶部，进入主菜单后显示在品牌下方；同一次打开保持一致
 
 ### 响应式
 - 宽屏：左侧边栏 300px + 右侧展示区
@@ -59,34 +60,33 @@ python3 -m http.server 8771 --bind 127.0.0.1
 ## 目录
 
 ```
-index.html            入口（载入页 + 主菜单骨架）
+index.html            入口（载入页 + 主菜单 + 编辑器）
 css/theme.css         色板（#E5FFFF）、方格纸、手写标题、便签、通用动效
 css/loading.css       载入页与进度条
 css/menu.css          侧栏、标签弹出选项、右侧随机图片、手机布局
-js/app.js             启动流程与界面编排（阶段调度、渲染侧栏、提示气泡）
+css/editor.css        编辑器（表单、积木画布、JSON 面板、移动端布局）
+js/app.js             启动流程与界面编排（阶段调度、渲染侧栏、打开编辑器、提示气泡）
+js/editor-view.js     编辑器交互层（表单 / 拖积木 / 连线 / 切线 / 实时 JSON / 自动保存 / 卡组导入导出）
 js/loading.js         进度核心（阶段权重，纯逻辑）+ 图片预加载
 js/tips.js            字符库读取 / 解析 / 不重复抽取（纯逻辑）
 js/menus.js           菜单结构（纯数据）+ 手风琴逻辑
-js/pictures.js        随机图片池与切换
+js/pictures.js        头图读取 / 解析 / 加权随机抽取
 js/icons.js           手绘风线性图标
+engine/               战斗引擎（分操作见下文「战斗引擎」）
+engine/pack.js        卡组载入 / 导出（data/pack/<卡组>/）
+data/pack/default/    默认卡组
+  单位.json           角色 / 单位卡
+  技能.json           技能卡（含积木流程）
+  效果.json           效果卡（触发 + 流程）
+  卡组.json           卡组说明（名字 / 版本 / 作者 / 文件表）
 data/tips.txt         你知道吗字符库（每行一条）
-assets/pictures/      展示图片（castorice.png / hyacine.png）
-tests/ui.test.js      界面纯逻辑单测
-tests/engine.test.js  战斗引擎单测
-tests/run-all.js      依次跑全部测试
-engine/               战斗引擎（见下节）
-data/units.json       单位卡内容包
-data/skills.json      技能卡内容包
-package.json          "type": "module"（让 Node 直接 import engine）
+assets/banner/        开屏头图（banner 文件夹）
+  index.txt           头图清单：每行一个文件名，开屏从里面随机抽
 ```
 
 ## 测试
 
-```bash
-node tests/run-all.js          # 全部
-node tests/ui.test.js          # 界面纯逻辑
-node tests/engine.test.js      # 战斗引擎
-```
+本项目**不保留测试文件**。改完代码请手动走一遍：载入页进度条 → 主菜单 → 编辑器里建角色 / 拖积木 / 连线 / 看 JSON → 导出内容包再导入。
 
 ## 调试参数
 
@@ -95,8 +95,15 @@ node tests/engine.test.js      # 战斗引擎
 | `?freeze=1` | 加载完成后停在载入页（只看载入页视觉） |
 | `?freeze=menu` | 跳过载入页直接看主菜单 |
 | `?tips=0` | 「你知道吗」不自动轮换 |
+| `?banner=文件名` | 指定开屏头图（`assets/banner/index.txt` 里的一行，如 `?banner=peach.png`） |
 
-调试信息：`window.__cw`（字符库、来源、已加载图片、进度核心）。
+## 开屏头图（banner）
+
+- 图片放在 `assets/banner/`，由同目录下的 `assets/banner/index.txt` 列出：**每行一个文件名**。
+- 新增图片：把文件丢进 `assets/banner/`，再在 `index.txt` 里加一行文件名（`#` 开头是注释，空行忽略）。
+- 打开游戏时从 `index.txt` 里随机抽一张：载入页显示在便签顶部，进入主菜单后显示在品牌下方（同一次打开是同一张，不连抽同一张）。
+- 读取失败（比如用 `file://` 直接打开）会回落到代码里的同一批文件名，界面不会空着。
+- 想固定看某一张：地址加 `?banner=peach.png`。
 
 ## 修改字符库
 
@@ -239,14 +246,11 @@ createBattle({ registry, units: [{ cardId, side, slot }], seed })
 
 ## 数据存储
 
-- 内容包：`data/units.json`、`data/skills.json`，`validateContent()` 一次报全所有问题（重复 id、缺字段、技能引用不存在）。
+- 内容包 / 卡组：`data/pack/<卡组>/单位.json`、`技能.json`、`效果.json`，由 `loadPack(卡组名)` 读入；`validateContent()` 一次报全所有问题（重复 id、缺字段、技能引用不存在）。
+- 增加一个卡组：在 `data/pack/` 下新建目录（目录名就是卡组名），放 `单位.json` / `技能.json` / `效果.json`（可选 `卡组.json`），格式同默认卡组；编辑器导出的三份文件可以直接放进去。
 - 战斗存档：`serializeBattle(battle, actions)` 只存「单位 id + 站位 + 当前生命 + 状态 + buff + 累计统计 + 操作序列 + 种子」，体积小；`restoreBattle(save, registry)` 用同种子重放操作，并对账（`verified` / `mismatches`），保证读档与当时完全一致。
 - 槽位：`createSaveStore(driver)`，默认内存驱动，浏览器里换 `createLocalDriver()`（localStorage）。
 - 外部脚本（场景效果、剧情脚本）调 `applyBuff / dealDamage / heal / dispel` 默认不写事件日志，不干扰重放；需要记录时传 `{ log: true }`。
-
-## 测试覆盖
-
-`node tests/engine.test.js`：卡面默认值与互不共享引用、id 三段规则、校验报错、四系加成叠算、三段伤害公式逐项断言、白板基准值、暴击掷骰频率、负加成截断、本源无加成、无敌、占位冲突、计数索敌、buff 计时与到期、击败判定与结束原因、种子复现、存档重放对账、槽位读写、真实数据包校验。
 
 ---
 
@@ -283,8 +287,8 @@ createBattle({ registry, units: [{ cardId, side, slot }], seed })
 ## 实时 JSON 与存档
 - 画布下方**执行流程 JSON**：实时反映积木（id/类型/选项）、连接（from/port/to/portTo）、位置（pos）
 - 页面底部**存档 JSON**：整份工程 + 由它生成的内容包（`units / skills / effects`）
-- 所有改动**自动保存在 localStorage**（`caeworld:editor-project`），顶栏可手动「保存 / 导出 / 导入」
-- 生成的内容包与 `data/units.json` 等格式一致，导入注册表即可直接进战斗（`tests/flow.test.js` 里有完整回路测试）
+- 所有改动**自动保存在 localStorage**（按卡组存：`caeworld:editor-project:<卡组>`，默认卡组是 `default`），顶栏可手动「保存 / 导出 / 导入」
+- 生成的文件与 `data/pack/<卡组>/` 下的 `单位.json / 技能.json / 效果.json` 格式一致：导出的文件直接丢进卡组目录即可被 `loadPack` 载入，编辑器首次打开也会从 `data/pack/default/` 读入内置卡
 
 ## 与引擎的对应
 - 技能：`format: "flow"`，流程由施放者为主体执行；「技能指定的数值」用「攻击」积木的数值输入
@@ -296,3 +300,23 @@ createBattle({ registry, units: [{ cardId, side, slot }], seed })
 - 原「遍历中的单位」只能指代遍历单位，为了让 5-8/5-9 的用法成立，补了「遍历中的阵营 / 当前目标 / 触发的单位」三块数据积木
 - 条件分支的两个分支可以汇到同一个下一步；「比较」的输出只接条件类/结构类的条件输入
 - 效果触发时「自己」默认是持有者，触发积木上可选「触发事件的单位」
+
+## 「真正能设计」的入口一览
+
+| 想做的事 | 入口 |
+| --- | --- |
+| 改角色数值 / 标签 / 抗性 / 开关 | 设计角色 → 左右两列表单，改完右上角立刻显示「已自动保存」并带当前角色/技能/效果数量 |
+| 换卡面 | 填路径、选本地图片、点「用占位图」 |
+| 把技能/效果挂到角色上 | 设计角色右侧「挂载技能 / 挂载效果」勾选 |
+| 新建技能 / 效果 | 对应列表右侧「新建技能 / 新建效果」 |
+| 加触发 | 效果表单里「+ 新触发」（会同时放一块「触发」积木并登记事件） |
+| 放积木 / 连线 / 切线 | 点或拖积木盒；长按输出端口拖到输入端口；长按空白滑动切断 |
+| 改积木选项 | 积木上的下拉/勾选/输入框（触发条件、运算符、单位 id 等），改完实时进 JSON |
+| 看当前流程 JSON | 画布下方「执行流程 JSON（实时）」 |
+| 看整份存档 | 页面底部「存档 JSON」= 工程 + 生成的内容包 |
+| 换卡组 | 浏览器控制台里 `localStorage.setItem('caeworld:editor-pack', '你的卡组名')` 后刷新，就会读写 `data/pack/你的卡组名/` |
+| 导出 | 「导出工程」= 工程 JSON；「导出内容包」= `单位.json` / `技能.json` / `效果.json`（丢进 `data/pack/<卡组>/` 即可） |
+| 导入 | 「导入」或把 JSON 拖到卡面预览区：工程 → 整套替换；内容包/单张卡 → 合并进来，积木流程回到画布，技能/效果自动挂到当前角色 |
+
+`js/editor-view.js` 还导出了 `edit` 接口（`setCharacter / newSkill / addBlock / connect / saveNow / importContent` …），
+它和界面按钮走同一条代码路径，方便在控制台里批量改卡。
