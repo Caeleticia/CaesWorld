@@ -111,13 +111,18 @@
 }
 
 /* ---------------- 面板 ---------------- */
-.ed-panel { display: none; flex: 1 1 auto; min-height: 0; }
-.ed-panel.is-active { display: block; }
+/* 面板必须自己撑满剩余高度：.editor-page 是 fixed 的 flex column，
+   .ed-panel 用 flex:1 + min-height:0 拿高度后，内部 .ed-columns 的 height:100%
+   才有确定参照。之前 is-active 是 display:block，在 flex 容器里百分比高度
+   会退化成 auto，画布随之塌成 0 高（进不去流程图画布的直接原因之一）。 */
+.ed-panel { display: none; }
+.ed-panel.is-active { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
 
 .ed-columns {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
   gap: 10px;
+  flex: 1 1 auto;
   height: 100%;
   min-height: 0;
 }
@@ -315,6 +320,8 @@ textarea:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 3px rgba(127
 .canvas-wrap {
   position: relative;
   min-height: 0;
+  /* 桌面端靠 .flow-layout 的 flex:1 撑开；移动端有下面的 62vh 兜底 */
+  height: 100%;
   border: 1.5px solid var(--line-strong);
   border-radius: var(--r-md);
   overflow: hidden;
@@ -444,6 +451,46 @@ path.drag-line { stroke: #ff6b8b; stroke-width: 2.5; stroke-dasharray: 6 5; fill
   overflow: hidden;
 }
 
+.json-head-actions { display: flex; align-items: center; gap: 6px; }
+.json-collapse-btn { min-width: 30px; }
+
+/* 折叠态：只留标题栏（小悬浮球接管） */
+.json-save-panel.is-collapsed { max-height: 34px; }
+.json-save-panel.is-collapsed pre { display: none; }
+
+/* 折叠后的小悬浮球：收缩到屏幕右侧边缘，圆心压在边上（显示 js） */
+.json-fab {
+  position: fixed;
+  /* --fab-r = 半径；right: -半径 让圆心正好落在屏幕右边缘，只露出左半圆 */
+  --fab-r: 22px;
+  --fab-size: 44px;
+  right: calc(-1 * var(--fab-r));
+  bottom: max(96px, calc(env(safe-area-inset-bottom) + 84px));
+  z-index: 26;
+  width: var(--fab-size);
+  height: var(--fab-size);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.96);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+  /* 文字定位到「露出半圆」的视觉中心（左 1/4 处），不参与盒子尺寸计算 */
+  text-indent: calc(-1 * var(--fab-r) / 2);
+  transition: right 160ms var(--ease-out), box-shadow 160ms;
+}
+/* 悬停/聚焦时滑出，露出完整圆，方便点中 */
+.json-fab:hover,
+.json-fab:focus-visible { right: 6px; text-indent: 0; }
+.json-fab:active { transform: scale(0.94); }
+.json-fab[hidden] { display: none; }
+
 /* ---------------- 积木 ---------------- */
 .block {
   position: absolute;
@@ -545,11 +592,17 @@ path.drag-line { stroke: #ff6b8b; stroke-width: 2.5; stroke-dasharray: 6 5; fill
 
 /* ---------------- 移动端 ---------------- */
 @media (max-width: 900px) {
+  /* 移动端改成「纵向可滚动」：面板不再抢满一屏，而是按内容自然堆叠，
+     由最外层 .editor-page 统一滚动。此时高度链交给 .canvas-wrap 的 62vh 兜底。 */
+  .ed-panel.is-active { flex: 0 1 auto; min-height: 0; }
   .ed-columns,
-  .ed-columns-skill { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .ed-columns-skill { grid-template-columns: minmax(0, 1fr); height: auto; flex: 0 1 auto; }
   .ed-col-form { max-height: none; }
   .ed-col-flow { overflow: visible; }
-  .flow-layout { grid-template-columns: minmax(0, 1fr); }
+  .flow-layout { grid-template-columns: minmax(0, 1fr); flex: 0 1 auto; }
+  /* 移动端 .flow-layout 是 grid 行，canvas-wrap 的 height:100% 会形成百分比循环，
+     这里显式给高（62vh，最小 320px）作为确定尺寸。 */
+  .canvas-wrap { height: 62vh; min-height: 320px; }
   .palette {
     flex-direction: row;
     flex-wrap: nowrap;
@@ -559,10 +612,29 @@ path.drag-line { stroke: #ff6b8b; stroke-width: 2.5; stroke-dasharray: 6 5; fill
   }
   .palette-group { display: flex; flex-direction: column; gap: 3px; flex: none; max-height: 84px; overflow-y: auto; }
   .palette-item { font-size: 12px; padding: 3px 7px; }
-  .canvas-wrap { height: 62vh; min-height: 320px; }
   .editor-title { font-size: 15px; }
   .editor-topbar { flex-wrap: wrap; }
   .form-grid { grid-template-columns: minmax(0, 1fr); }
+
+  /* —— 存档 JSON：移动端固定屏幕下方，滚动时绝不跟着内容跑 ——
+     .editor-page 带 overflow:auto 且是 fixed 容器，fixed 子元素仍以视口为参照，
+     所以外层滚动不会带走它。用 --save-bar-h 给底部留位，避免遮住最后一块内容。 */
+  .editor-page { --save-bar-h: 190px; padding-bottom: calc(var(--save-bar-h) + max(10px, env(safe-area-inset-bottom))); }
+  /* 折叠态由 JS 同步到 .editor-page 上的 is-save-collapsed（不依赖 :has） */
+  .editor-page.is-save-collapsed { --save-bar-h: 56px; }
+
+  .json-save-panel {
+    position: fixed;
+    left: max(10px, env(safe-area-inset-left));
+    right: max(10px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
+    z-index: 25;
+    margin: 0;
+    max-height: 40vh;
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow: var(--shadow-md);
+  }
+  .json-save-panel.is-collapsed { max-height: 34px; }
 }
 
 @media (max-width: 520px) {
