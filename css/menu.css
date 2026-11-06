@@ -1,6 +1,6 @@
 /* ==========================================================================
    menu.css —— 主菜单
-   左侧边栏（品牌 / 你知道吗 / 标签 + 弹出选项） | 右侧空白区（一张随机图片）
+   左侧边栏（品牌 / 你知道吗 / 标签 + 弹出选项） | 右侧头图
    ========================================================================== */
 
 .main-menu {
@@ -299,38 +299,38 @@
 }
 
 /* ==========================================================================
-   右侧：一张随机图片
+   右侧：头图（每次进入随机一张，拍立得样式）
    ========================================================================== */
 .stage {
   position: relative;
   min-width: 0;
   min-height: 0;
-  padding: 40px 12px;
+  padding: 36px 16px;
   display: grid;
   place-items: center;
   overflow: hidden;
   border-radius: var(--r-xl);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(229, 255, 255, 0.35));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(229, 255, 255, 0.35));
   border: 1.5px dashed var(--line-strong);
 }
 
-/* 图片：拍立得/相片样式，随机出现时带弹出与轻微摇摆 */
 .stage-picture {
   position: relative;
+  display: grid;
+  place-items: center;
   max-width: min(78%, 720px);
-  max-height: 82%;
-  padding: 12px 12px 34px;
-  background: #fff;
+  max-height: 100%;
   min-height: 0;
+  padding: 12px 12px 18px;
+  background: #fff;
   border-radius: 8px;
   box-shadow: var(--shadow-lg);
   transform: rotate(-1.6deg);
   animation: pic-in 620ms var(--ease-spring) both;
 }
 
+/* 顶部胶带 */
 .stage-picture::before {
-  /* 顶部胶带 */
   content: "";
   position: absolute;
   top: -12px;
@@ -358,7 +358,7 @@
 
 .stage-picture-img {
   max-width: 100%;
-  max-height: min(56vh, 520px);
+  max-height: min(58vh, 560px);
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
@@ -381,7 +381,7 @@
 }
 
 /* ==========================================================================
-   手机竖屏：上下布局，侧栏变成顶部卡片
+   手机竖屏：上下布局（侧栏变成顶部卡片，头图在下面）
    ========================================================================== */
 @media (max-width: 680px), (max-aspect-ratio: 4/5) {
   body {
@@ -390,7 +390,6 @@
 
   .main-menu {
     grid-template-columns: minmax(0, 1fr);
-    /* 顶部卡片可按内容长高（min-content），展示区吃掉剩余高度；整体不超出屏幕 */
     grid-template-rows: minmax(0, auto) minmax(0, 1fr);
     gap: 10px;
     padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
@@ -398,7 +397,7 @@
   }
 
   .sidebar {
-    max-height: 56vh;
+    max-height: 58vh;
     padding: 12px 10px 8px;
     gap: 10px;
     border-radius: var(--r-lg);
@@ -465,11 +464,15 @@
     font-size: 15px;
   }
 
+  .stage {
+    padding: 20px 10px;
+  }
+
   .stage-picture {
     max-width: 88%;
   }
 
   .stage-picture-img {
-    max-height: 40vh;
+    max-height: 34vh;
   }
 }
