@@ -44,6 +44,7 @@ const TRIGGER_EVENTS = Object.freeze([
   { value: "unitTurnStart", label: "单位行动开始时" },
   { value: "unitTurnEnd", label: "单位行动结束时" },
   { value: "skillCast", label: "单位释放技能" },
+  { value: "skillCastSelf", label: "单位释放该技能（仅本技能自身）" },
   { value: "attack", label: "单位攻击时" },
   { value: "attacked", label: "单位受击时" },
   { value: "lethalDamage", label: "单位受致命伤害时" },

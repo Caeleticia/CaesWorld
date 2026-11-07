@@ -1,17 +1,17 @@
 /**
  * skills.js —— 技能卡：默认值、规范化、校验、运行时效果
  *
- * 一个技能 = 名字 + id + 类型(主动/被动) + 属性 + 倍率 + 可选效果列表。
- * 数值公式里技能只贡献「倍率」（默认 1），其余全部来自实时加成。
+ * 一个技能 = 名字 + id + 类型(主动/被动) + 可选效果列表 / 积木流程。
+ * 实际攻击由流程里的「攻击」积木完成，伤害属性与数值都在积木上指定，
+ * 技能本身不带属性或倍率。
  */
 import {
   ATTRIBUTES,
   SKILL_TYPES,
-  DEFAULT_SKILL_MULTIPLIER,
   parseId,
 } from "./constants.js";
 
-/** 技能数据有无「属性」字段：直接数据 / 积木流程 */
+/** 技能数据的形式：直接数据 / 积木流程 */
 export const SKILL_FORMATS = Object.freeze(["data", "flow"]);
 
 /** 效果类型：伤害 / 加 buff / 移除 buff */
@@ -22,13 +22,6 @@ export function createSkillDefaults() {
     name: "",
     id: "",
     type: "active",
-    /** 技能属性：决定伤害吃哪一系加成，也是伤害默认属性 */
-    attribute: "physical",
-    /**
-     * 倍率：可写单个数字，或按属性分别写 { physical: 1.2, magic: 0 }。
-     * 不写 = 1。数值都乘在「技能指定的数值（默认攻击力）」上。
-     */
-    multiplier: DEFAULT_SKILL_MULTIPLIER,
     /**
      * 技能指定的数值来源：
      *   "atk"（默认）= 施放者实时攻击力
@@ -94,21 +87,6 @@ export function validateSkillCard(skill) {
     errors.push(`type 必须是 ${SKILL_TYPES.join("/")}：${skill.type}`);
   }
 
-  if (!ATTRIBUTES.includes(skill.attribute)) {
-    errors.push(`attribute 必须是 ${ATTRIBUTES.join("/")}：${skill.attribute}`);
-  }
-
-  if (typeof skill.multiplier === "number") {
-    checkNumber(errors, "multiplier", skill.multiplier, { min: 0 });
-  } else if (skill.multiplier && typeof skill.multiplier === "object") {
-    for (const a of ATTRIBUTES) {
-      const v = skill.multiplier[a];
-      if (v !== undefined) checkNumber(errors, `multiplier.${a}`, v, { min: 0 });
-    }
-  } else {
-    errors.push("multiplier 必须是数字或按属性分流的对象");
-  }
-
   if (skill.valueSource !== "atk") {
     checkNumber(errors, "valueSource", skill.valueSource, { min: 0 });
   }
@@ -143,22 +121,7 @@ export function validateSkillCard(skill) {
 }
 
 /**
- * 取该属性下的倍率。
- * @param {object} skill
- * @param {string} attribute
- */
-export function multiplierFor(skill, attribute) {
-  const m = skill && skill.multiplier;
-  if (typeof m === "number") return m;
-  if (m && typeof m === "object") {
-    const v = m[attribute];
-    return typeof v === "number" ? v : 0;
-  }
-  return DEFAULT_SKILL_MULTIPLIER;
-}
-
-/**
- * 规范化效果列表：默认单体伤害，缺省属性取技能属性。
+ * 规范化效果列表：默认单体伤害；伤害未写属性时按物理处理。
  * @returns {Array<object>}
  */
 export function normalizeEffects(skill) {
@@ -168,7 +131,7 @@ export function normalizeEffects(skill) {
   return list.map((eff) => {
     const out = { ...eff };
     if (out.target === undefined) out.target = out.kind === "damage" ? "enemy" : "self";
-    if (out.kind === "damage" && out.attribute === undefined) out.attribute = skill.attribute;
+    if (out.kind === "damage" && out.attribute === undefined) out.attribute = "physical";
     return out;
   });
 }

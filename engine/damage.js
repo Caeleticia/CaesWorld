@@ -3,7 +3,7 @@
  *
  * 假设 A 攻击 B，伤害属性为 attr：
  *
- *   伤害值 = 技能指定的数值(默认 A 攻击力) * 技能倍率
+ *   伤害值 = 攻击积木给的数值(默认 A 攻击力)
  *          * (1 + A 伤害提升%) * (1 + A 对应属性伤害提升%)
  *          * (暴击 ? 1 + A 暴击伤害 : 1)
  *   防御减伤率 = 1 - (A等级 + 10) / (A等级 + 10 + B防御力 * (1 - A 减防%))
@@ -13,7 +13,7 @@
  *
  * 特例
  *  - 本源(origin)伤害：无视任何加成、防御、抗性、免伤/易伤、无敌与护盾，
- *    伤害 = 技能指定的数值 * 技能倍率，且不暴击。
+ *    伤害 = 数值，且不暴击。
  *  - 暴击伤害 / 各种加成可以为负，此时 (1 + x) 截断到 [0, 1]，
  *    防止负数伤害或把「减伤」变成「增伤」。
  */
@@ -51,14 +51,12 @@ export function vulnerabilityRate(damageTakenPct = 0, vulnPct = 0) {
  * 伤害值（暴击与否两种结果）。
  * @returns {{min: number, max: number}}
  */
-export function damageRange(attacker, skillValue, multiplier, attribute = "physical") {
+export function damageRange(attacker, skillValue, attribute = "physical") {
   if (attribute === TRUE_DAMAGE_ATTRIBUTE) {
-    const v = skillValue * multiplier;
-    return { min: v, max: v };
+    return { min: skillValue, max: skillValue };
   }
   const beforeCrit =
     skillValue *
-    multiplier *
     boost(attacker.dmgBoostPct) *
     boost(attacker.attrDmgBoostPct?.[attribute]);
   return {
@@ -92,8 +90,7 @@ export function damageTakenFactor(attacker, target, attribute = "physical") {
  * @param {object} params
  * @param {object} params.attacker  已算好的面板（stats.computeStats）
  * @param {object} params.target    已算好的面板
- * @param {number} params.skillValue 技能指定的数值（默认 = attacker.atk）
- * @param {number} params.multiplier 技能倍率
+ * @param {number} params.skillValue 攻击积木给的数值（默认 = attacker.atk）
  * @param {string} [params.attribute] 伤害属性
  * @param {boolean} [params.crit]    是否强制暴击（默认按暴击率随机）
  * @param {boolean} [params.noCrit]  强制不暴击
@@ -105,7 +102,6 @@ export function calculateDamage({
   attacker,
   target,
   skillValue,
-  multiplier,
   attribute = "physical",
   crit,
   noCrit = false,
@@ -114,19 +110,18 @@ export function calculateDamage({
 }) {
   const isTrue = attribute === TRUE_DAMAGE_ATTRIBUTE;
 
-  // 本源：数值与倍率都不吃加成；其它情况可省略 skillValue（默认取攻击力）
+  // 本源：数值不吃加成；其它情况可省略 skillValue（默认取攻击力）
   const fallback = Number(attacker.atk) || 0;
   const value = Number.isFinite(Number(skillValue)) && skillValue !== null && skillValue !== undefined
     ? Number(skillValue)
     : fallback;
-  const mult = Number(multiplier) || 0;
 
   let isCrit = false;
   if (!isTrue && !noCrit) {
     isCrit = typeof crit === "boolean" ? crit : rollChance(rng, attacker.critRate);
   }
 
-  const { min: rawMin, max: rawMax } = damageRange(attacker, value, mult, attribute);
+  const { min: rawMin, max: rawMax } = damageRange(attacker, value, attribute);
   const raw = isCrit ? rawMax : rawMin;
 
   let factors;
@@ -144,9 +139,8 @@ export function calculateDamage({
     attribute,
     isTrueDamage: isTrue,
     crit: isCrit,
-    /** 技能指定的数值 / 倍率 */
+    /** 攻击积木给的数值 */
     skillValue: value,
-    multiplier: mult,
     /** 伤害值（暴击/非暴击后） */
     rawDamage: raw,
     rawDamageRange: { min: rawMin, max: rawMax },
