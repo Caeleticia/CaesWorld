@@ -248,9 +248,10 @@ textarea:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 3px rgba(127
 .mount-row em { font-style: normal; font-size: 10px; color: var(--ink-3); }
 
 .list-head { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
-.list-head select { flex: 1 1 0; width: auto; min-width: 0; }
+.list-head select { flex: 1 1 0; width: auto; min-width: 120px; }
 .list-head select.pack-filter { flex: 0 1 108px; max-width: 132px; }
 .list-head .btn { flex: none; white-space: nowrap; }
+.list-head .btn.danger { margin-left: auto; }
 .grow { flex: 1 1 auto; }
 
 .form-actions { display: flex; justify-content: flex-end; gap: 8px; }
