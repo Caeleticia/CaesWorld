@@ -1,0 +1,847 @@
+{
+  "schema": 1,
+  "kind": "caeworld-pack",
+  "id": "study",
+  "name": "妙妙生物第一弹",
+  "version": 1,
+  "author": "",
+  "description": "",
+  "updatedAt": "2026-11-07T06:54:07.950Z",
+  "units": [
+    {
+      "name": "皇帝小时候",
+      "id": "study_unit_littleempire",
+      "quality": "blue",
+      "level": 90,
+      "baseHp": 8000,
+      "baseAtk": 1000,
+      "baseDef": 500,
+      "critRate": 0.05,
+      "critDamage": 0.5,
+      "speed": 100,
+      "resistances": {
+        "physical": 0.05,
+        "magic": 0.05,
+        "spirit": 0.05
+      },
+      "label": "",
+      "occupiesSlot": true,
+      "countsAsUnit": true,
+      "invincible": false,
+      "skills": [
+        "study_skill_pos2"
+      ],
+      "bonuses": [],
+      "members": [],
+      "pack": "study",
+      "packName": "妙妙生物第一弹"
+    },
+    {
+      "name": "皇帝",
+      "id": "study_unit_empire",
+      "quality": "blue",
+      "level": 90,
+      "baseHp": 5000,
+      "baseAtk": 1000,
+      "baseDef": 500,
+      "critRate": 0.05,
+      "critDamage": 0.5,
+      "speed": 100,
+      "resistances": {
+        "physical": 0.05,
+        "magic": 0.05,
+        "spirit": 0.05
+      },
+      "label": "",
+      "occupiesSlot": true,
+      "countsAsUnit": true,
+      "invincible": false,
+      "skills": [
+        "study_skill_lw",
+        "study_skill_new"
+      ],
+      "bonuses": [],
+      "members": [],
+      "pack": "study",
+      "packName": "妙妙生物第一弹"
+    }
+  ],
+  "skills": [
+    {
+      "name": "那就平方",
+      "id": "study_skill_pos2",
+      "type": "active",
+      "valueSource": "atk",
+      "format": "flow",
+      "targets": 1,
+      "effects": [],
+      "requiresTarget": false,
+      "flow": {
+        "schema": 1,
+        "kind": "flow",
+        "nodes": [
+          {
+            "id": "trg1",
+            "type": "trigger",
+            "options": {
+              "event": "skillCastSelf",
+              "unitScope": "self"
+            },
+            "pos": {
+              "x": 60,
+              "y": 60
+            }
+          },
+          {
+            "id": "atk1",
+            "type": "attack",
+            "options": {
+              "attribute": "spirit",
+              "ignoreReduction": false,
+              "additional": false
+            },
+            "pos": {
+              "x": 320,
+              "y": 60
+            }
+          },
+          {
+            "id": "chooseUnit1",
+            "type": "chooseUnit",
+            "options": {
+              "multiple": false
+            },
+            "pos": {
+              "x": 580,
+              "y": 60
+            }
+          },
+          {
+            "id": "targetSide1",
+            "type": "targetSide",
+            "options": {
+              "side": "enemy"
+            },
+            "pos": {
+              "x": 60,
+              "y": 280
+            }
+          },
+          {
+            "id": "selfData1",
+            "type": "selfData",
+            "options": {
+              "field": "atk"
+            },
+            "pos": {
+              "x": 320,
+              "y": 280
+            }
+          },
+          {
+            "id": "attachEffect1",
+            "type": "attachEffect",
+            "options": {
+              "effectId": "study_effect_math"
+            },
+            "pos": {
+              "x": 580,
+              "y": 280
+            }
+          },
+          {
+            "id": "repeatLoop1",
+            "type": "repeatLoop",
+            "options": {},
+            "pos": {
+              "x": 60,
+              "y": 500
+            }
+          },
+          {
+            "id": "num1",
+            "type": "number",
+            "options": {
+              "mode": "const",
+              "value": 3,
+              "min": 0,
+              "max": 10
+            },
+            "pos": {
+              "x": 320,
+              "y": 500
+            }
+          }
+        ],
+        "links": [
+          {
+            "id": "chooseUnit1.set->atk1.targets",
+            "from": "chooseUnit1",
+            "port": "set",
+            "to": "atk1",
+            "portTo": "targets"
+          },
+          {
+            "id": "targetSide1.set->chooseUnit1.targets",
+            "from": "targetSide1",
+            "port": "set",
+            "to": "chooseUnit1",
+            "portTo": "targets"
+          },
+          {
+            "id": "trg1.next->atk1.in",
+            "from": "trg1",
+            "port": "next",
+            "to": "atk1",
+            "portTo": "in"
+          },
+          {
+            "id": "num1.num->repeatLoop1.count",
+            "from": "num1",
+            "port": "num",
+            "to": "repeatLoop1",
+            "portTo": "count"
+          },
+          {
+            "id": "atk1.next->repeatLoop1.in",
+            "from": "atk1",
+            "port": "next",
+            "to": "repeatLoop1",
+            "portTo": "in"
+          },
+          {
+            "id": "repeatLoop1.body->attachEffect1.in",
+            "from": "repeatLoop1",
+            "port": "body",
+            "to": "attachEffect1",
+            "portTo": "in"
+          },
+          {
+            "id": "selfData1.value->atk1.value",
+            "from": "selfData1",
+            "port": "value",
+            "to": "atk1",
+            "portTo": "value"
+          },
+          {
+            "id": "chooseUnit1.set->attachEffect1.targets",
+            "from": "chooseUnit1",
+            "port": "set",
+            "to": "attachEffect1",
+            "portTo": "targets"
+          }
+        ]
+      },
+      "pack": "study",
+      "packName": "妙妙生物第一弹",
+      "description": "对指定单位造成100%精神伤害，并施加三层数论",
+      "ui": {
+        "view": {
+          "x": 0,
+          "y": 0,
+          "zoom": 1
+        },
+        "blocks": {}
+      }
+    },
+    {
+      "name": "御驾亲征",
+      "id": "study_skill_new",
+      "type": "passive",
+      "valueSource": "atk",
+      "format": "flow",
+      "targets": 1,
+      "effects": [],
+      "requiresTarget": false,
+      "flow": {
+        "schema": 1,
+        "kind": "flow",
+        "nodes": [
+          {
+            "id": "trg1",
+            "type": "trigger",
+            "options": {
+              "event": "always",
+              "unitScope": "self"
+            },
+            "pos": {
+              "x": 2.854786457807118,
+              "y": 112.38286640519729
+            }
+          },
+          {
+            "id": "targetSide1",
+            "type": "targetSide",
+            "options": {
+              "side": "ally"
+            },
+            "pos": {
+              "x": 344.55302041535055,
+              "y": 183.1181074655364
+            }
+          },
+          {
+            "id": "forEach1",
+            "type": "forEach",
+            "options": {
+              "context": "each"
+            },
+            "pos": {
+              "x": 588.8301019839041,
+              "y": 72.091159342642
+            }
+          },
+          {
+            "id": "contextUnit1",
+            "type": "contextUnit",
+            "options": {},
+            "pos": {
+              "x": 84.71917872369517,
+              "y": 330.0265940885418
+            }
+          },
+          {
+            "id": "branch1",
+            "type": "branch",
+            "options": {},
+            "pos": {
+              "x": 578.8069327848815,
+              "y": 253.2823964646501
+            }
+          },
+          {
+            "id": "attachEffect1",
+            "type": "attachEffect",
+            "options": {},
+            "pos": {
+              "x": 811.6549675039471,
+              "y": 214.5971539885855
+            }
+          },
+          {
+            "id": "unitData1",
+            "type": "unitData",
+            "options": {
+              "field": "effectStacks"
+            },
+            "pos": {
+              "x": 331.44567999842053,
+              "y": 338.94738373238124
+            }
+          },
+          {
+            "id": "string1",
+            "type": "string",
+            "options": {
+              "value": "study_effect_yjqz"
+            },
+            "pos": {
+              "x": 104.76567398621724,
+              "y": 490.0656883677973
+            }
+          },
+          {
+            "id": "compare1",
+            "type": "compare",
+            "options": {
+              "operator": "=="
+            },
+            "pos": {
+              "x": 639.082773591381,
+              "y": 405.17348085937493
+            }
+          },
+          {
+            "id": "num1",
+            "type": "number",
+            "options": {
+              "mode": "const",
+              "value": 0,
+              "min": 0,
+              "max": 10
+            },
+            "pos": {
+              "x": 330.67457346775194,
+              "y": 517.6615623782131
+            }
+          }
+        ],
+        "links": [
+          {
+            "id": "targetSide1.set->forEach1.targets",
+            "from": "targetSide1",
+            "port": "set",
+            "to": "forEach1",
+            "portTo": "targets"
+          },
+          {
+            "id": "trg1.next->forEach1.in",
+            "from": "trg1",
+            "port": "next",
+            "to": "forEach1",
+            "portTo": "in"
+          },
+          {
+            "id": "forEach1.body->branch1.in",
+            "from": "forEach1",
+            "port": "body",
+            "to": "branch1",
+            "portTo": "in"
+          },
+          {
+            "id": "string1.str->unitData1.effectId",
+            "from": "string1",
+            "port": "str",
+            "to": "unitData1",
+            "portTo": "effectId"
+          },
+          {
+            "id": "contextUnit1.target->unitData1.unit",
+            "from": "contextUnit1",
+            "port": "target",
+            "to": "unitData1",
+            "portTo": "unit"
+          },
+          {
+            "id": "num1.num->compare1.b",
+            "from": "num1",
+            "port": "num",
+            "to": "compare1",
+            "portTo": "b"
+          },
+          {
+            "id": "unitData1.value->compare1.a",
+            "from": "unitData1",
+            "port": "value",
+            "to": "compare1",
+            "portTo": "a"
+          },
+          {
+            "id": "compare1.out->branch1.condition",
+            "from": "compare1",
+            "port": "out",
+            "to": "branch1",
+            "portTo": "condition"
+          },
+          {
+            "id": "branch1.true->attachEffect1.in",
+            "from": "branch1",
+            "port": "true",
+            "to": "attachEffect1",
+            "portTo": "in"
+          },
+          {
+            "id": "contextUnit1.target->attachEffect1.targets",
+            "from": "contextUnit1",
+            "port": "target",
+            "to": "attachEffect1",
+            "portTo": "targets"
+          },
+          {
+            "id": "string1.str->attachEffect1.effectId",
+            "from": "string1",
+            "port": "str",
+            "to": "attachEffect1",
+            "portTo": "effectId"
+          }
+        ]
+      },
+      "pack": "study",
+      "packName": "妙妙生物第一弹",
+      "description": "在场时，我方单位攻击力提升40%",
+      "ui": {
+        "view": {
+          "x": 0,
+          "y": 0,
+          "zoom": 1
+        },
+        "blocks": {}
+      }
+    },
+    {
+      "name": "龙威",
+      "id": "study_skill_lw",
+      "type": "active",
+      "valueSource": "atk",
+      "format": "flow",
+      "targets": 1,
+      "effects": [],
+      "requiresTarget": false,
+      "flow": {
+        "schema": 1,
+        "kind": "flow",
+        "nodes": [
+          {
+            "id": "trg1",
+            "type": "trigger",
+            "options": {
+              "event": "skillCastSelf",
+              "unitScope": "self"
+            },
+            "pos": {
+              "x": 190.7157331808932,
+              "y": 230.3916570557488
+            }
+          },
+          {
+            "id": "selfUnit1",
+            "type": "selfUnit",
+            "options": {
+              "which": "self"
+            },
+            "pos": {
+              "x": 188.55304471433138,
+              "y": 578.6289075532087
+            }
+          },
+          {
+            "id": "unitData1",
+            "type": "unitData",
+            "options": {
+              "field": "atk"
+            },
+            "pos": {
+              "x": 392.21876072873573,
+              "y": 575.2431843925825
+            }
+          },
+          {
+            "id": "atk1",
+            "type": "attack",
+            "options": {
+              "attribute": "origin",
+              "ignoreReduction": false,
+              "additional": false
+            },
+            "pos": {
+              "x": 632.7823445557486,
+              "y": 317.40213863966267
+            }
+          },
+          {
+            "id": "targetSide1",
+            "type": "targetSide",
+            "options": {
+              "side": "enemy"
+            },
+            "pos": {
+              "x": 199.28278485409425,
+              "y": 420.08980366579704
+            }
+          },
+          {
+            "id": "chooseUnit1",
+            "type": "chooseUnit",
+            "options": {
+              "multiple": false
+            },
+            "pos": {
+              "x": 407.9197818921409,
+              "y": 411.8562942017453
+            }
+          }
+        ],
+        "links": [
+          {
+            "id": "selfUnit1.target->unitData1.unit",
+            "from": "selfUnit1",
+            "port": "target",
+            "to": "unitData1",
+            "portTo": "unit"
+          },
+          {
+            "id": "trg1.next->atk1.in",
+            "from": "trg1",
+            "port": "next",
+            "to": "atk1",
+            "portTo": "in"
+          },
+          {
+            "id": "unitData1.value->atk1.value",
+            "from": "unitData1",
+            "port": "value",
+            "to": "atk1",
+            "portTo": "value"
+          },
+          {
+            "id": "targetSide1.set->chooseUnit1.targets",
+            "from": "targetSide1",
+            "port": "set",
+            "to": "chooseUnit1",
+            "portTo": "targets"
+          },
+          {
+            "id": "chooseUnit1.set->atk1.targets",
+            "from": "chooseUnit1",
+            "port": "set",
+            "to": "atk1",
+            "portTo": "targets"
+          }
+        ]
+      },
+      "pack": "study",
+      "packName": "妙妙生物第一弹",
+      "description": "造成100%本源伤害",
+      "ui": {
+        "view": {
+          "x": 0,
+          "y": 0,
+          "zoom": 1
+        },
+        "blocks": {}
+      }
+    }
+  ],
+  "effects": [
+    {
+      "id": "study_effect_yjqz",
+      "name": "御驾亲征",
+      "flags": [],
+      "polarity": "positive",
+      "stackable": false,
+      "maxStacks": 0,
+      "description": "攻击力提升40%",
+      "pack": "study",
+      "packName": "妙妙生物第一弹",
+      "triggers": [],
+      "flows": {},
+      "attrBonus": [
+        {
+          "attr": "atkPct",
+          "value": 0.4
+        }
+      ],
+      "autoConsume": false,
+      "ui": {
+        "view": {
+          "x": 0,
+          "y": 0,
+          "zoom": 1
+        },
+        "blocks": {}
+      }
+    },
+    {
+      "id": "study_effect_math",
+      "name": "数论",
+      "flags": [],
+      "polarity": "negative",
+      "stackable": true,
+      "maxStacks": 0,
+      "description": "",
+      "pack": "study",
+      "packName": "妙妙生物第一弹",
+      "triggers": [
+        {
+          "id": "trg",
+          "event": "unitTurnStart",
+          "unitScope": "self"
+        }
+      ],
+      "flows": {
+        "trg": {
+          "schema": 1,
+          "kind": "flow",
+          "nodes": [
+            {
+              "id": "trg",
+              "type": "trigger",
+              "options": {
+                "event": "unitTurnStart",
+                "unitScope": "self"
+              },
+              "pos": {
+                "x": 60,
+                "y": 60
+              }
+            },
+            {
+              "id": "atk1",
+              "type": "attack",
+              "options": {
+                "attribute": "spirit",
+                "ignoreReduction": false,
+                "additional": true
+              },
+              "pos": {
+                "x": 320,
+                "y": 60
+              }
+            },
+            {
+              "id": "selfData1",
+              "type": "selfData",
+              "options": {
+                "field": "effectStacks"
+              },
+              "pos": {
+                "x": 580,
+                "y": 60
+              }
+            },
+            {
+              "id": "string1",
+              "type": "string",
+              "options": {
+                "value": "study_effect_math"
+              },
+              "pos": {
+                "x": 60,
+                "y": 280
+              }
+            },
+            {
+              "id": "selfUnit1",
+              "type": "selfUnit",
+              "options": {
+                "which": "self"
+              },
+              "pos": {
+                "x": 320,
+                "y": 280
+              }
+            },
+            {
+              "id": "removeEffect1",
+              "type": "removeEffect",
+              "options": {
+                "mode": "specified",
+                "force": false,
+                "effectId": "study_effect_math"
+              },
+              "pos": {
+                "x": 580,
+                "y": 280
+              }
+            },
+            {
+              "id": "num1",
+              "type": "number",
+              "options": {
+                "mode": "const",
+                "value": 1,
+                "min": 0,
+                "max": 10
+              },
+              "pos": {
+                "x": 60,
+                "y": 500
+              }
+            },
+            {
+              "id": "math1",
+              "type": "math",
+              "options": {
+                "operator": "mul"
+              },
+              "pos": {
+                "x": 320,
+                "y": 500
+              }
+            },
+            {
+              "id": "num2",
+              "type": "number",
+              "options": {
+                "mode": "const",
+                "value": 1000,
+                "min": 0,
+                "max": 10
+              },
+              "pos": {
+                "x": 580,
+                "y": 500
+              }
+            },
+            {
+              "id": "selfUnit2",
+              "type": "selfUnit",
+              "options": {
+                "which": "self"
+              },
+              "pos": {
+                "x": 60,
+                "y": 720
+              }
+            }
+          ],
+          "links": [
+            {
+              "id": "trg.next->atk1.in",
+              "from": "trg",
+              "port": "next",
+              "to": "atk1",
+              "portTo": "in"
+            },
+            {
+              "id": "string1.str->selfData1.effectId",
+              "from": "string1",
+              "port": "str",
+              "to": "selfData1",
+              "portTo": "effectId"
+            },
+            {
+              "id": "selfUnit1.target->atk1.targets",
+              "from": "selfUnit1",
+              "port": "target",
+              "to": "atk1",
+              "portTo": "targets"
+            },
+            {
+              "id": "num1.num->removeEffect1.value",
+              "from": "num1",
+              "port": "num",
+              "to": "removeEffect1",
+              "portTo": "value"
+            },
+            {
+              "id": "atk1.next->removeEffect1.in",
+              "from": "atk1",
+              "port": "next",
+              "to": "removeEffect1",
+              "portTo": "in"
+            },
+            {
+              "id": "num2.num->math1.b",
+              "from": "num2",
+              "port": "num",
+              "to": "math1",
+              "portTo": "b"
+            },
+            {
+              "id": "selfData1.value->math1.a",
+              "from": "selfData1",
+              "port": "value",
+              "to": "math1",
+              "portTo": "a"
+            },
+            {
+              "id": "math1.num->atk1.value",
+              "from": "math1",
+              "port": "num",
+              "to": "atk1",
+              "portTo": "value"
+            },
+            {
+              "id": "selfUnit2.target->removeEffect1.targets",
+              "from": "selfUnit2",
+              "port": "target",
+              "to": "removeEffect1",
+              "portTo": "targets"
+            }
+          ]
+        }
+      },
+      "attrBonus": [],
+      "autoConsume": false,
+      "ui": {
+        "view": {
+          "x": 0,
+          "y": 0,
+          "zoom": 1
+        },
+        "blocks": {}
+      }
+    }
+  ]
+}
