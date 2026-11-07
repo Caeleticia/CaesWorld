@@ -40,6 +40,7 @@
   gap: 8px;
   min-width: 0;
   flex: 1;
+  white-space: nowrap;
 }
 
 .ed-status {
@@ -59,7 +60,10 @@
   display: flex;
   gap: 6px;
   flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
+.editor-actions .btn { white-space: nowrap; }
 
 /* ---------------- 通用按钮 ---------------- */
 .btn {
@@ -242,7 +246,9 @@ textarea:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 3px rgba(127
 .mount-row input { width: auto; }
 .mount-row code { margin-left: auto; font-size: 11px; color: var(--ink-3); }
 
-.list-head { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.list-head { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.list-head select { flex: 1 1 0; width: auto; min-width: 0; }
+.list-head .btn { flex: none; white-space: nowrap; }
 .grow { flex: 1 1 auto; }
 
 .form-actions { display: flex; justify-content: flex-end; gap: 8px; }
@@ -292,6 +298,7 @@ textarea:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 3px rgba(127
   gap: 10px;
 }
 .palette-group { display: grid; gap: 4px; }
+.palette-items { display: grid; gap: 4px; }
 .palette-title {
   font-size: 11px;
   font-weight: 700;
@@ -320,7 +327,7 @@ textarea:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 3px rgba(127
 .canvas-wrap {
   position: relative;
   min-height: 0;
-  /* 桌面端靠 .flow-layout 的 flex:1 撑开；移动端有下面的 62vh 兜底 */
+  /* 桌面端靠 .flow-layout 的 flex:1 撑开；移动端有下面的 56vh 兜底 */
   height: 100%;
   border: 1.5px solid var(--line-strong);
   border-radius: var(--r-md);
@@ -592,34 +599,81 @@ path.drag-line { stroke: #ff6b8b; stroke-width: 2.5; stroke-dasharray: 6 5; fill
 
 /* ---------------- 移动端 ---------------- */
 @media (max-width: 900px) {
-  /* 移动端改成「纵向可滚动」：面板不再抢满一屏，而是按内容自然堆叠，
-     由最外层 .editor-page 统一滚动。此时高度链交给 .canvas-wrap 的 62vh 兜底。 */
-  .ed-panel.is-active { flex: 0 1 auto; min-height: 0; }
+  /* 移动端改成「纵向整页滚动」：面板按内容自然堆叠，
+     不再被 .editor-page 的 flex 压扁（否则 .flow-layout 会被压到 min-height，
+     积木盒所在的 auto 行会被挤成 0 高）。 */
+  .editor-page {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .ed-panel.is-active { display: block; flex: none; min-height: 0; }
   .ed-columns,
-  .ed-columns-skill { grid-template-columns: minmax(0, 1fr); height: auto; flex: 0 1 auto; }
+  .ed-columns-skill { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; height: auto; flex: none; }
+  .ed-col { overflow: visible; }
   .ed-col-form { max-height: none; }
   .ed-col-flow { overflow: visible; }
-  .flow-layout { grid-template-columns: minmax(0, 1fr); flex: 0 1 auto; }
-  /* 移动端 .flow-layout 是 grid 行，canvas-wrap 的 height:100% 会形成百分比循环，
-     这里显式给高（62vh，最小 320px）作为确定尺寸。 */
-  .canvas-wrap { height: 62vh; min-height: 320px; }
+  /* 流程区改成纵向 flex：积木盒固定高度，画布用有上限的确定高度 */
+  .flow-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: none;
+    min-height: 0;
+  }
+  .canvas-wrap { height: clamp(280px, 52vh, 520px); flex: none; }
   .palette {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+    flex: none;
+    height: clamp(196px, 24vh, 224px);
+    min-height: 196px;
+    max-height: 224px;
     flex-direction: row;
     flex-wrap: nowrap;
+    align-items: flex-start;
     overflow-x: auto;
+    overflow-y: hidden;
     gap: 8px;
-    max-height: 96px;
+    padding: 8px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+    box-shadow: var(--shadow-sm);
   }
-  .palette-group { display: flex; flex-direction: column; gap: 3px; flex: none; max-height: 84px; overflow-y: auto; }
-  .palette-item { font-size: 12px; padding: 3px 7px; }
-  .editor-title { font-size: 15px; }
-  .editor-topbar { flex-wrap: wrap; }
+  .palette-group { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; }
+  .palette-items {
+    display: grid;
+    grid-auto-flow: column;
+    grid-template-rows: repeat(5, auto);
+    grid-auto-columns: max-content;
+    gap: 3px 4px;
+  }
+  .palette-item { font-size: 12px; padding: 4px 8px; white-space: nowrap; }
+
+  /* 顶栏：标题保持一行，操作按钮换到下一行（窄屏可横向滑动） */
+  .editor-topbar { flex-wrap: wrap; row-gap: 6px; }
+  .editor-title { flex: 1 1 auto; min-width: 0; font-size: 15px; white-space: nowrap; }
+  .editor-actions { flex: 1 1 100%; justify-content: flex-end; overflow-x: auto; padding-bottom: 2px; }
+  .editor-actions .btn { flex: none; white-space: nowrap; }
+  .ed-status { max-width: 55vw; }
+
+  /* 标签页在窄屏也允许横向滑动，不换行 */
+  .ed-tabs { overflow-x: auto; flex-wrap: nowrap; }
+  .ed-tab { flex: none; }
+
   .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .list-head { flex-wrap: wrap; }
+  .list-head .btn { flex: none; white-space: nowrap; }
 
   /* —— 存档 JSON：移动端固定屏幕下方，滚动时绝不跟着内容跑 ——
      .editor-page 带 overflow:auto 且是 fixed 容器，fixed 子元素仍以视口为参照，
      所以外层滚动不会带走它。用 --save-bar-h 给底部留位，避免遮住最后一块内容。 */
-  .editor-page { --save-bar-h: 190px; padding-bottom: calc(var(--save-bar-h) + max(10px, env(safe-area-inset-bottom))); }
+  .editor-page {
+    --save-bar-h: 350px;
+    --save-bar-h: calc(min(40vh, 340px) + 12px);
+    padding-bottom: calc(var(--save-bar-h) + max(10px, env(safe-area-inset-bottom)));
+  }
   /* 折叠态由 JS 同步到 .editor-page 上的 is-save-collapsed（不依赖 :has） */
   .editor-page.is-save-collapsed { --save-bar-h: 56px; }
 
@@ -641,4 +695,9 @@ path.drag-line { stroke: #ff6b8b; stroke-width: 2.5; stroke-dasharray: 6 5; fill
   .editor-actions .btn { padding: 4px 8px; font-size: 12px; }
   .ed-tab { padding: 5px 10px; font-size: 14px; }
   .block { width: 196px; }
+}
+
+/* 桌面端不使用「悬浮球」：存档 JSON 折叠后只留标题栏，用标题栏的按钮展开 */
+@media (min-width: 901px) {
+  .json-fab { display: none; }
 }
