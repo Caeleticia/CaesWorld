@@ -19,6 +19,7 @@ import {
   RESISTANCE_ATTRIBUTES,
   TRUE_DAMAGE_ATTRIBUTE,
   UNIT_STATES,
+  effectAttrBonusTarget,
   effectPolarityOf,
 } from "./constants.js";
 import { createRng } from "./math.js";
@@ -266,8 +267,8 @@ export function createBattle(setup) {
       buffs: [],
       /** 效果层栈：[{ id, stacks }]，按首次附加顺序 */
       effects: [],
-      /** 临时属性层 { physical: { flat, pct }, atk: {…}, hp: {…} } */
-      attrBonus: {},
+      /** 效果属性修正层：{ mods: { atkPct… }, resistances: { physical… } } */
+      attrBonus: { mods: {}, resistances: {} },
       /** 被「给予技能」临时获得的技能 [{ skillId, count }] */
       granted: [],
       parentKey: null,
@@ -315,26 +316,24 @@ export function createBattle(setup) {
     for (const b of unit.permanentBonuses) addBonus(acc, b);
     for (const b of unit.extraBonuses) addBonus(acc, b);
     for (const buff of unit.buffs) addBonus(acc, buffToBonus(buff));
-    const s = computeStats(card, acc);
-    // 效果带来的临时属性层
+    // 效果属性修正：直接进加成累加器，与常驻加成同一套叠算顺序
     const layer = unit.attrBonus || {};
-    if (layer.atk) s.atk = Math.max(0, s.atk * (1 + layer.atk.pct) + layer.atk.flat);
-    if (layer.def) s.def = Math.max(0, s.def * (1 + layer.def.pct) + layer.def.flat);
-    if (layer.hp) s.hp = Math.max(0, s.hp * (1 + layer.hp.pct) + layer.hp.flat);
-    return s;
+    if (layer.mods) addBonus(acc, layer.mods);
+    return computeStats(card, acc);
   }
 
   function resistancesOf(u) {
     const s = statsOf(u);
     const out = { ...s.resistances };
+    const layer = u.attrBonus || {};
     for (const attr of RESISTANCE_ATTRIBUTES) {
-      if (u.attrBonus[attr]) out[attr] = (out[attr] || 0) + u.attrBonus[attr].flat;
+      const add = layer.resistances ? layer.resistances[attr] : 0;
+      if (add) out[attr] = (out[attr] || 0) + add;
     }
     return out;
   }
 
   /* ================= 效果层栈 ================= */
-  const cardEffectsOf = (u) => (Array.isArray(u.card.effects) ? u.card.effects : []);
   const effectStacks = (u, eid) => {
     const e = u.effects.find((x) => x.id === eid);
     return e ? e.stacks : 0;
@@ -346,20 +345,35 @@ export function createBattle(setup) {
   /** 效果倾向：正面 / 负面 / 特殊（「特殊」两类移除都不算） */
   const effectPolarity = (eid) => effectPolarityOf(registry.getEffect(eid));
 
+  /**
+   * 按当前效果层重算属性修正层。
+   * 每层效果的 attrBonus 数值 × 层数，三系抗性单独累计。
+   */
   function recomputeAttrBonuses(u) {
-    u.attrBonus = {};
-    for (const layer of u.effects) {
-      const def = registry.getEffect(layer.id);
+    const layer = { mods: {}, resistances: {} };
+    for (const eff of u.effects) {
+      const def = registry.getEffect(eff.id);
       if (!def || !Array.isArray(def.attrBonus)) continue;
-      for (const op of def.attrBonus) {
-        if (!op || !op.attr) continue;
-        const value = (Number(op.value) || 0) * layer.stacks;
-        u.attrBonus[op.attr] = u.attrBonus[op.attr] || { flat: 0, pct: 0 };
-        const t = u.attrBonus[op.attr];
-        if (op.pct) t.pct += value;
-        else t.flat += value;
+      for (const entry of def.attrBonus) {
+        const target = effectAttrBonusTarget(entry);
+        if (!target) continue;
+        const value = target.value * eff.stacks;
+        if (!value) continue;
+        if (target.resistance) {
+          layer.resistances[target.resistance] = (layer.resistances[target.resistance] || 0) + value;
+          continue;
+        }
+        // 四系伤害提升 / 穿透是嵌套对象（按「键.系」存放），其余键直接累加
+        const [key, element] = target.mod.split(".");
+        if (element) {
+          const group = layer.mods[key] && typeof layer.mods[key] === "object" ? layer.mods[key] : (layer.mods[key] = {});
+          group[element] = (group[element] || 0) + value;
+        } else {
+          layer.mods[target.mod] = (layer.mods[target.mod] || 0) + value;
+        }
       }
     }
+    u.attrBonus = layer;
   }
 
   function attachEffect(target, eid, extra = {}) {
@@ -438,21 +452,59 @@ export function createBattle(setup) {
   }
 
   /* ================= 事件总线 ================= */
-  /** 单位身上的全部效果（单位卡自带 + 卡面常驻效果 + 动态附加的效果） */
+  /** 单位身上的全部效果（卡面成员效果 + 战斗中动态附加的效果；效果不能初始挂载） */
   function activeEffectsOf(u) {
     const out = [];
     for (const m of u.card.members || []) {
       if (m && m.effect) out.push({ ...m.effect, __member: { block: m.block, flow: m.flow } });
-    }
-    for (const eid of cardEffectsOf(u)) {
-      const def = registry.getEffect(eid);
-      if (def) out.push(def);
     }
     for (const layer of u.effects) {
       const def = registry.getEffect(layer.id);
       if (def) out.push(def);
     }
     return out;
+  }
+
+  /**
+   * 被动技能的触发流程：技能类型为 passive、且流程里有「触发」积木时，
+   * 把技能包装成与效果卡同形的触发源，让它的流程随事件广播自动运行
+   * （主动技能只在 useSkill 时执行，不参与事件广播）。
+   */
+  function passiveSkillEffectsOf(u) {
+    const out = [];
+    for (const skill of u.skills || []) {
+      if (!skill || skill.type !== "passive" || !skill.flow) continue;
+      const nodes = Array.isArray(skill.flow.nodes) ? skill.flow.nodes : [];
+      const triggers = nodes
+        .filter((n) => n && n.type === "trigger" && n.options && n.options.event)
+        .map((n) => ({
+          id: n.id,
+          event: n.options.event,
+          unitScope: n.options.unitScope || "self",
+        }));
+      if (!triggers.length) continue;
+      const flows = {};
+      for (const t of triggers) flows[t.id] = skill.flow;
+      out.push({
+        id: skill.id,
+        name: skill.name,
+        triggers,
+        flows,
+        attrBonus: [],
+        /** 标记来源，便于日志/去重区分（技能 id 与效果 id 可能重名） */
+        passiveSkill: true,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * 入场播报：先广播「单位入场」，再为单位补一次「数据更新」。
+   * 「始终」类被动技能 / 效果据此在入场时完成首次结算（战前没有数据更新事件）。
+   */
+  function announceEntry(units) {
+    for (const unit of units) emit("unitEnter", [unit]);
+    for (const unit of units) emit("dataUpdate", [unit]);
   }
 
   /**
@@ -500,14 +552,19 @@ export function createBattle(setup) {
     const candidates = [];
     const seen = new Set();
     for (const u of livingUnits()) {
-      for (const effect of activeEffectsOf(u)) {
+      // 效果卡（卡面成员 + 已附加效果）与被动技能的触发流程共用同一套广播
+      const sources = [
+        ...activeEffectsOf(u).map((effect) => ({ effect, key: effect.id })),
+        ...passiveSkillEffectsOf(u).map((effect) => ({ effect, key: `skill:${effect.id}` })),
+      ];
+      for (const { effect, key: sourceKey } of sources) {
         if (!triggerMatches(effect, eventType, info)) continue;
         // 全局事件人人有份；其余事件只有「事件涉及的单位」身上的效果才会触发
         // （受击事件的目标就是正在挨打的单位，所以反伤不会再反向触发攻击方）
         // 事件对象必须带上单位 key（单位由 makeUnit 建立，key = uid）
         const relevant = globalEvent || targets.some((t) => t && t.key === u.key);
         if (!relevant) continue;
-        const key = `${u.key}|${effect.id}`;
+        const key = `${u.key}|${sourceKey}`;
         if (seen.has(key)) continue;
         seen.add(key);
         candidates.push({ unit: u, effect });
@@ -548,6 +605,27 @@ export function createBattle(setup) {
           } catch (err) {
             log(BATTLE_EVENT.FLOW_ERROR, { owner: unit.uid, effect: effect.id, reason: String((err && err.message) || err) });
           }
+        }
+      }
+      // 自动消耗：持有者行动开始（unitTurnStart）时，本效果对应的流程跑完后掉一层
+      if (eventType === "unitTurnStart") {
+        const consumed = new Set();
+        for (const { unit, effect } of candidates) {
+          if (!effect.autoConsume || effect.__member || state.status === "finished" || !isAlive(unit)) continue;
+          const key = `${unit.key}|${effect.id}`;
+          if (consumed.has(key)) continue;
+          consumed.add(key);
+          const layer = unit.effects.find((e) => e.id === effect.id);
+          if (!layer) continue;
+          const removed = removeLayers(unit, layer, 1);
+          if (!removed) continue;
+          log(BATTLE_EVENT.EFFECT_REMOVED, {
+            unit: unit.uid,
+            effectId: effect.id,
+            layers: removed,
+            reason: "auto-consume",
+          });
+          emit("dataUpdate", [unit]);
         }
       }
     } finally {
@@ -905,7 +983,11 @@ export function createBattle(setup) {
     const unit = makeUnit(uid, card, side, slot, undefined, label || card.label);
     unit.parentKey = parent ? parent.key : null;
     if (parent) {
-      for (const attr of Object.keys(parent.attrBonus)) unit.attrBonus[attr] = { ...parent.attrBonus[attr] };
+      const inherited = parent.attrBonus || {};
+      unit.attrBonus = {
+        mods: structuredClone(inherited.mods || {}),
+        resistances: { ...(inherited.resistances || {}) },
+      };
       for (const layer of parent.effects) {
         unit.effects.push({ id: layer.id, stacks: layer.stacks, inheritedFrom: { source: parent.key, effectId: layer.id } });
       }
@@ -944,7 +1026,7 @@ export function createBattle(setup) {
       if (!unit) break;
       spawned.push(unit);
     }
-    for (const unit of spawned) emit("unitEnter", [unit]);
+    announceEntry(spawned);
     return spawned.length;
   }
 
@@ -966,7 +1048,7 @@ export function createBattle(setup) {
       }
       spawned.push(unit);
     }
-    for (const unit of spawned) emit("unitEnter", [unit]);
+    announceEntry(spawned);
     return spawned.length;
   }
 
@@ -1399,7 +1481,7 @@ export function createBattle(setup) {
       units: state.units.map((u) => ({ uid: u.uid, cardId: u.cardId, side: u.side, slot: u.slot })),
     });
     emit("turnStart", []);
-    emit("unitEnter", livingUnits().slice());
+    announceEntry(livingUnits().slice());
     if (state.status === "finished") return api;
     log(BATTLE_EVENT.TURN_START, { activeId: state.activeId });
     const A = active();
