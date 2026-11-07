@@ -25,7 +25,9 @@ import {
   validateProject,
   charactersOf,
   PLACEHOLDER_IMAGE as PLACEHOLDER,
-  resolveImage,
+  cardImagePath,
+  defaultCardImageName,
+  resolveCardImage,
   RESISTANCE_ATTRIBUTES,
   EFFECT_ATTR_BONUS_KEYS,
   effectPolarityOf,
@@ -42,7 +44,7 @@ import {
 } from "../engine/index.js";
 import { loadContentPacks, DEFAULT_PACK_ID, DEFAULT_PACK_NAME, EDITOR_PACK_ID, EDITOR_PACK_NAME } from "./mods.js";
 
-/** 卡组：工程与内容包都按卡组存在 data/pack/<卡组>/ 里 */
+/** 卡组：编辑器工程按卡组存 localStorage；内容来自单文件模组（mods/） */
 const PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
 const STORAGE_KEY = `caeworld:editor-project:${PACK}`;
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -130,7 +132,7 @@ async function hydrateFromPacks() {
   try {
     const res = await loadContentPacks({ includeEditor: false });
     // 停用模组后，工程里属于该模组的卡也移除
-    const disabledPacks = new Set(res.disabledModIds || []);
+    const disabledPacks = new Set(res.disabledPackIds || []);
     if (disabledPacks.size) {
       project.characters = project.characters.filter((ch) => !disabledPacks.has(ch.pack));
       project.skills = project.skills.filter((s) => !disabledPacks.has(s.pack));
@@ -195,8 +197,12 @@ async function hydrateFromPacks() {
     if (!currentCharacter()) active.character = project.characters[0] || null;
     if (!currentSkill()) active.skill = project.skills[0] || null;
     if (!currentEffect()) active.effect = project.effects[0] || null;
+    const defaultLoaded = res.packs.some((p) => p.packId === DEFAULT_PACK_ID);
+    const modCount = res.packs.filter(
+      (p) => p.packId !== DEFAULT_PACK_ID && (p.source === "server" || p.source === "local")
+    ).length;
     setStatus(
-      `卡包：默认包 + ${Math.max(0, res.packs.filter((p) => p.source === "server" || p.source === "local").length)} 个模组 · 角色 ${project.characters.length} · 技能 ${project.skills.length} · 效果 ${project.effects.length}`,
+      `卡包：${defaultLoaded ? "默认包 + " : ""}${modCount} 个模组 · 角色 ${project.characters.length} · 技能 ${project.skills.length} · 效果 ${project.effects.length}`,
       "ok"
     );
     return true;
@@ -782,7 +788,7 @@ function renderCardsList() {
   if (preview) {
     preview.innerHTML = ch
       ? `
-      <img src="${resolveImage(ch.image)}" alt="${escapeHtml(ch.name || "角色")}" onerror="this.src='${PLACEHOLDER}'" />
+      <img src="${resolveCardImage(ch)}" alt="${escapeHtml(ch.name || "角色")}" onerror="this.src='${PLACEHOLDER}'" />
       <div class="card-meta">
         <strong>${escapeHtml(ch.name || "未命名角色")}</strong>
         <span>${escapeHtml(ch.id)}</span>
@@ -828,12 +834,14 @@ function renderCharacter() {
     "f-critdmg": ch.critDamage,
     "f-speed": ch.speed,
     "f-label": ch.label,
-    "f-image": ch.image,
   };
   for (const [id, value] of Object.entries(map)) {
     const el = $("#" + id);
     if (el && document.activeElement !== el) el.value = value === undefined || value === null ? "" : value;
   }
+  // 路径框默认填「卡牌短 id.png」；null = 用户明确选择了占位图
+  const imageInput = $("#f-image");
+  if (imageInput && document.activeElement !== imageInput) imageInput.value = cardImagePath(ch);
   for (const attr of RESISTANCE_ATTRIBUTES) {
     const el = $(`#f-res-${attr}`);
     if (el && document.activeElement !== el) el.value = ch.resistances[attr];
@@ -852,7 +860,7 @@ function renderCharacter() {
     ).toFixed(0)}% / ${(unit.critDamage * 100).toFixed(0)}%`;
   }
   const img = $("#ed-card-image");
-  if (img) img.src = resolveImage(ch.image);
+  if (img) img.src = resolveCardImage(ch);
 }
 
 /* ---------------------------- 技能 / 效果 ---------------------------- */
@@ -872,7 +880,12 @@ function renderSkillPanel() {
       ["active", "主动"],
       ["passive", "被动"],
     ], s.type))}
-    ${field("说明", `<textarea data-skill="description" rows="2">${escapeHtml(s.description || "")}</textarea>`)}`;
+    ${field("说明", `<textarea data-skill="description" rows="2">${escapeHtml(s.description || "")}</textarea>`)}
+    <div class="trigger-head">
+      <span>触发</span>
+      <button class="btn small" type="button" data-action="add-skill-trigger">+ 新触发</button>
+    </div>
+    <p class="hint">每个触发选自己的条件，后续积木接在对应触发后面；同一技能可以放多个触发。新触发默认「单位释放该技能」。</p>`;
 }
 
 function renderEffectPanel() {
@@ -1045,6 +1058,11 @@ const TRIGGER_LABEL = {
   always: "始终",
 };
 
+/** 技能新触发的默认事件：单位释放此技能 */
+const SKILL_DEFAULT_TRIGGER = "skillCastSelf";
+/** 效果新触发的默认事件：单位行动结束时 */
+const EFFECT_DEFAULT_TRIGGER = "unitTurnEnd";
+
 /** 效果「属性修正」下拉的显示名 */
 const ATTR_BONUS_LABEL = {
   atkPct: "攻击力提升 %",
@@ -1097,16 +1115,32 @@ const canvasState = {
 
 /** 长按不动多久才进入「切断连线」模式；移动超过这个距离则视为平移画布 */
 const CUT_HOLD_MS = 460;
-const CUT_SLOP = 8;
+const CUT_SLOP = 12;
 
 const canvasEl = () => $("#blocks-canvas");
 const worldEl = () => $("#blocks-world");
+
+function showCutMarker(e) {
+  const marker = $("#cut-marker");
+  const canvas = canvasEl();
+  if (!marker || !canvas) return;
+  const box = canvas.getBoundingClientRect();
+  marker.style.left = `${e.clientX - box.left}px`;
+  marker.style.top = `${e.clientY - box.top}px`;
+  marker.style.display = "block";
+}
+
+function hideCutMarker() {
+  const marker = $("#cut-marker");
+  if (marker) marker.style.display = "none";
+}
 
 function clearCutTimer() {
   if (canvasState.cutTimer) {
     clearTimeout(canvasState.cutTimer);
     canvasState.cutTimer = 0;
   }
+  hideCutMarker();
 }
 
 /**
@@ -1118,12 +1152,17 @@ function clearCutTimer() {
 function beginCut(e, linkId = null) {
   clearCutTimer();
   canvasState.pendingCut = { x: e.clientX, y: e.clientY, moved: false, linkId };
+  if (linkId) showCutMarker(e);
   canvasState.cutTimer = setTimeout(() => {
     const cut = canvasState.pendingCut;
     if (!cut || cut.moved || canvasState.link) return;
     clearCutTimer();
     canvasState.pendingCut = null;
-    if (cut.linkId) removeLink(cut.linkId);
+    if (cut.linkId) {
+      // 切断后手指可能还按着，别让后续移动变成平移画布
+      canvasState.pan = null;
+      removeLink(cut.linkId);
+    }
   }, CUT_HOLD_MS);
 }
 
@@ -1351,13 +1390,26 @@ function makeLinkPath(link) {
     const dx = Math.max(50, Math.abs(b.x - a.x) / 2);
     d = `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
   }
+  const id = linkId(link);
+  const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  group.setAttribute("class", "link-group");
+  group.dataset.link = id;
+
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
   path.setAttribute("d", d);
   path.setAttribute("class", `link ${isFlow ? "link-flow" : "link-data"}`);
   if (isFlow) path.dataset.flow = "1";
   if (toPort.dataset.type) path.dataset.type = toPort.dataset.type;
-  path.dataset.link = linkId(link);
-  return path;
+  path.dataset.link = id;
+
+  // 视觉线很细，手指按不住；上面盖一条透明的宽路径专门接收长按
+  const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  hit.setAttribute("d", d);
+  hit.setAttribute("class", "link-hit");
+  hit.dataset.link = id;
+
+  group.append(path, hit);
+  return group;
 }
 
 function cssEsc(s) {
@@ -1386,8 +1438,10 @@ function addBlock(type) {
     setStatus(active.tab === "effects" ? "先选一个效果和触发流程" : "先选一个技能", "bad");
     return;
   }
-  if (type === "trigger" && flow.nodes.some((n) => n.type === "trigger")) {
-    setStatus("一个流程只能有一个「触发」", "bad");
+  // 技能流程可以放多个触发，每个触发接自己的内容；
+  // 效果的每个触发是独立流程，一个流程里仍然只能有一个触发。
+  if (type === "trigger" && active.tab !== "skills" && flow.nodes.some((n) => n.type === "trigger")) {
+    setStatus("效果的每个触发需要单独流程，请点「+ 新触发」", "bad");
     return;
   }
   const base = { trigger: "trg", attack: "atk", heal: "heal", number: "num" }[type] || type;
@@ -1398,14 +1452,31 @@ function addBlock(type) {
   const def = blockDef(type);
   const options = {};
   for (const o of def.options || []) options[o.key] = o.default;
+  // 触发条件按当前编辑对象给默认值
+  if (type === "trigger") options.event = active.tab === "skills" ? SKILL_DEFAULT_TRIGGER : EFFECT_DEFAULT_TRIGGER;
   // 刚放下的「数值」积木给一个非 0 的默认值，免得连上去后伤害为 0 让人以为是 bug
   if (type === "number" && options.mode === "const" && !Number(options.value)) options.value = 10;
   if (type === "number" && options.mode === "range") {
     if (options.max <= options.min) options.max = Math.max(10, options.min + 10);
   }
-  const box = canvasEl().getBoundingClientRect();
-  const center = toWorld(box.left + box.width / 2 + (Math.random() - 0.5) * 60, box.top + box.height / 2 + (Math.random() - 0.5) * 60);
-  flow.nodes.push({ id, type, options, pos: { x: Math.round(center.x - 110), y: Math.round(center.y - 60) } });
+  let pos;
+  if (type === "trigger" && active.tab === "skills") {
+    // 技能可以有多个触发：放在已有触发的下方，避免叠在攻击/数值积木上
+    const triggers = flow.nodes.filter((n) => n.type === "trigger");
+    const first = triggers[0];
+    pos =
+      first && first.pos
+        ? { x: Math.round(first.pos.x), y: Math.round(first.pos.y + 220 * triggers.length) }
+        : { x: 80, y: 80 };
+  } else {
+    const box = canvasEl().getBoundingClientRect();
+    const center = toWorld(
+      box.left + box.width / 2 + (Math.random() - 0.5) * 60,
+      box.top + box.height / 2 + (Math.random() - 0.5) * 60
+    );
+    pos = { x: Math.round(center.x - 110), y: Math.round(center.y - 60) };
+  }
+  flow.nodes.push({ id, type, options, pos });
   if (type === "trigger" && active.tab === "effects") {
     const card = currentEffect();
     card.triggers = card.triggers || [];
@@ -1725,7 +1796,7 @@ function onPointerDown(e) {
   canvasState.lastXY = { x: e.clientX, y: e.clientY };
   const portEl = e.target.closest(".port");
   const blockEl = e.target.closest(".block");
-  const pathEl = e.target.closest("path.link");
+  const pathEl = e.target.closest("path.link, path.link-hit");
 
   if (portEl && blockEl && portEl.dataset.dir === "out") {
     e.preventDefault();
@@ -2270,7 +2341,7 @@ const edit = {
   setCharacter(key, value) {
     const ch = currentCharacter();
     if (!ch) throw new Error("当前没有角色");
-    if (key === "image") ch.image = String(value || "");
+    if (key === "image") ch.image = value === null ? null : String(value || "");
     else if (["level", "baseHp", "baseAtk", "baseDef", "critRate", "critDamage", "speed"].includes(key)) {
       ch[key] = Number(value) || 0;
     } else if (["occupiesSlot", "countsAsUnit", "invincible"].includes(key)) ch[key] = Boolean(value);
@@ -2406,7 +2477,7 @@ const edit = {
     return card.attrBonus;
   },
   /** 给效果加一个触发流程（和「+ 新触发」按钮一致） */
-  addTrigger(event = "unitTurnStart") {
+  addTrigger(event = EFFECT_DEFAULT_TRIGGER) {
     const card = currentEffect();
     if (!card) throw new Error("当前没有效果");
     card.triggers = card.triggers || [];
@@ -2667,7 +2738,7 @@ function unitCardToCharacter(card) {
     occupiesSlot: card.occupiesSlot,
     countsAsUnit: card.countsAsUnit,
     invincible: card.invincible,
-    image: card.image || "",
+    image: card.image === null ? null : card.image || "",
     skillIds: (card.skills || []).slice(),
     resistances: Object.fromEntries(
       RESISTANCE_ATTRIBUTES.map((a) => [a, Number(card.resistances?.[a] ?? createCharacter().resistances[a]) || 0])
@@ -2745,7 +2816,7 @@ function importPackDoc(doc, file) {
       .map((t) => ({
         block: {
           id: (t && (t.id || (t.block && t.block.id))) || "",
-          event: (t && (t.event || (t.block && t.block.event))) || "unitTurnStart",
+          event: (t && (t.event || (t.block && t.block.event))) || EFFECT_DEFAULT_TRIGGER,
           unitScope: (t && (t.unitScope || (t.block && t.block.unitScope))) || "self",
         },
       }))
@@ -2974,7 +3045,11 @@ function setupForms() {
     el.addEventListener("change", handler);
   };
   bind("f-name", (el) => (ch().name = el.value));
-  bind("f-id", (el) => (ch().id = el.value.trim()));
+  bind("f-id", (el) => {
+    ch().id = el.value.trim();
+    // 默认卡面是「卡牌短 id.png」，改 id 时同步路径框
+    renderCharacter();
+  });
   bind("f-quality", (el) => (ch().quality = el.value));
   bind("f-level", (el) => (ch().level = Number(el.value) || 1));
   bind("f-hp", (el) => (ch().baseHp = Number(el.value) || 0));
@@ -2985,7 +3060,9 @@ function setupForms() {
   bind("f-speed", (el) => (ch().speed = Number(el.value) || 0));
   bind("f-label", (el) => (ch().label = el.value));
   bind("f-image", (el) => {
-    ch().image = el.value.trim();
+    const value = el.value.trim();
+    // 填的就是默认短 id.png 时存空，让默认路径跟着卡牌 id 走
+    ch().image = value === defaultCardImageName(ch()) ? "" : value;
     renderCharacter();
   });
   for (const attr of RESISTANCE_ATTRIBUTES) {
@@ -3021,7 +3098,8 @@ function setupForms() {
     reader.readAsDataURL(file);
   });
   $("#btn-placeholder")?.addEventListener("click", () => {
-    ch().image = "";
+    // null 表示「明确使用占位图」，不被默认 id.png 覆盖
+    ch().image = null;
     const input = $("#f-image");
     if (input) input.value = "";
     renderCharacter();
@@ -3096,6 +3174,10 @@ function setupForms() {
   const onSkill = (e) => onSkillFormInput(e);
   $("#ed-skill-form")?.addEventListener("input", onSkill);
   $("#ed-skill-form")?.addEventListener("change", onSkill);
+  $("#ed-skill-form")?.addEventListener("click", (e) => {
+    if (!e.target.closest('[data-action="add-skill-trigger"]')) return;
+    edit.addBlock("trigger");
+  });
 
   const onEffect = (e) => onEffectFormInput(e);
   $("#ed-effect-form")?.addEventListener("input", onEffect);
@@ -3108,7 +3190,7 @@ function setupForms() {
       return;
     }
     if (e.target.closest('[data-action="add-trigger"]')) {
-      edit.addTrigger("unitTurnStart");
+      edit.addTrigger();
       return;
     }
     if (e.target.closest('[data-action="delete-trigger"]')) {

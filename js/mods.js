@@ -10,12 +10,14 @@
  *   · 「导入」的模组存进 localStorage；
  *   · 「启用 / 停用」存进 localStorage，不修改服务器文件。
  *
+ * 默认包也统一走模组流程：mods/default.json（pack id = default）。
+ * 所有内容都是单文件卡包。
+ *
  * 读出来的每张卡都会带上 pack / packName 字段，供编辑器、卡牌库、训练场筛选。
  */
 import {
   DEFAULT_PACK,
   cardsOf,
-  loadPack,
   normalizeProject,
   projectToRegistryInput,
 } from "../engine/index.js";
@@ -164,6 +166,9 @@ export function normalizeModPackage(raw, { file = "", source = "server" } = {}) 
     source,
     enabled: isModEnabled(id),
     raw: data,
+    /** 卡片归属的卡包 id / 显示名（可能和文件名不同） */
+    packId: cardPackId,
+    packName: cardPackName,
     units: tagCards(units, cardPackId, cardPackName, id),
     skills: tagCards(skills, cardPackId, cardPackName, id),
     effects: tagCards(effects, cardPackId, cardPackName, id),
@@ -230,21 +235,6 @@ export async function loadAllMods({ includeDisabled = true } = {}) {
   return { mods, errors: [...server.errors, ...local.errors] };
 }
 
-/** 默认包内容（data/pack/default/） */
-export async function loadDefaultPackContent() {
-  const pack = await loadPack(DEFAULT_PACK);
-  return {
-    id: DEFAULT_PACK_ID,
-    name: DEFAULT_PACK_NAME,
-    source: "default",
-    enabled: true,
-    units: tagCards(pack.units, DEFAULT_PACK_ID, DEFAULT_PACK_NAME),
-    skills: tagCards(pack.skills, DEFAULT_PACK_ID, DEFAULT_PACK_NAME),
-    effects: tagCards(pack.effects, DEFAULT_PACK_ID, DEFAULT_PACK_NAME),
-    errors: pack.errors || [],
-  };
-}
-
 /** 编辑器本地工程内容 */
 export function loadEditorPackContent() {
   const errors = [];
@@ -308,19 +298,26 @@ export function loadEditorPackContent() {
 }
 
 /**
- * 汇总内容：默认包 + 启用的模组 + 编辑器工程。
+ * 汇总内容：启用的模组（默认包也是 mods/default.json）+ 编辑器工程。
  * 同一 id 后面的来源覆盖前面的来源（编辑器优先、本地模组优先于服务器模组）。
  */
 export async function loadContentPacks({ includeEditor = true } = {}) {
   const errors = [];
   const packs = [];
-  const defaultPack = await loadDefaultPackContent();
-  errors.push(...(defaultPack.errors || []));
-  packs.push(defaultPack);
 
   const modsRes = await loadAllMods({ includeDisabled: true });
   errors.push(...modsRes.errors);
-  const disabledModIds = modsRes.mods.filter((m) => !m.enabled).map((m) => m.id);
+  const disabledMods = modsRes.mods.filter((m) => !m.enabled);
+  const disabledModIds = disabledMods.map((m) => m.id);
+  // 停用模组对应的卡包 id：编辑器工程里没有 modId，只能按 pack 清理
+  const disabledPackIds = [
+    ...new Set(
+      disabledMods
+        .flatMap((m) => [...(m.units || []), ...(m.skills || []), ...(m.effects || [])])
+        .map((card) => card && card.pack)
+        .filter(Boolean)
+    ),
+  ];
   packs.push(...modsRes.mods.filter((m) => m.enabled));
 
   if (includeEditor) {
@@ -330,6 +327,7 @@ export async function loadContentPacks({ includeEditor = true } = {}) {
   }
 
   const disabled = new Set(disabledModIds);
+  const disabledPacks = new Set(disabledPackIds);
   const merge = (key) => {
     const map = new Map();
     for (const pack of packs) {
@@ -337,13 +335,16 @@ export async function loadContentPacks({ includeEditor = true } = {}) {
         if (card && typeof card === "object" && card.id) map.set(card.id, card);
       }
     }
-    // 编辑器工程里可能残留已停用模组的卡，这里一并过滤
-    return [...map.values()].filter((card) => !disabled.has(card.modId || card.pack));
+    // 模组卡按 modId 过滤；编辑器工程里的卡没有 modId，按所属卡包过滤
+    return [...map.values()].filter(
+      (card) => !disabledPacks.has(card.pack) && (!card.modId || !disabled.has(card.modId))
+    );
   };
 
   return {
     packs,
     disabledModIds,
+    disabledPackIds,
     units: merge("units"),
     skills: merge("skills"),
     effects: merge("effects"),

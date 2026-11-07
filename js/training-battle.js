@@ -22,7 +22,8 @@ import {
   EFFECT_POLARITY_LABEL,
   QUALITY_LABEL,
   effectPolarityOf,
-  resolveImage,
+  resolveCardImage,
+  cardImagePath,
   PLACEHOLDER_IMAGE,
 } from "../engine/index.js";
 import { createStageScaler, STAGE_DESIGN } from "./training-stage.js";
@@ -290,12 +291,12 @@ export function openBattle({ registry, config, onExit }) {
     wrap.className = "tbt-unit";
     wrap.dataset.uid = pub.uid;
     wrap.dataset.side = pub.side;
-    const hasArt = Boolean(card.image);
+    const hasArt = Boolean(cardImagePath(card));
     wrap.innerHTML = `
       <button class="tbt-card" type="button" data-uid="${escapeHtml(pub.uid)}" data-quality="${escapeHtml(card.quality || "white")}"
               data-no-art="${hasArt ? "0" : "1"}">
-        <img class="tbt-card-img" src="${resolveImage(card.image)}" alt="" draggable="false"
-             onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
+        <img class="tbt-card-img" src="${resolveCardImage(card)}" alt="" draggable="false"
+             onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}';var c=this.closest('.tbt-card');if(c)c.setAttribute('data-no-art','1')" />
         <span class="tbt-card-monogram" aria-hidden="true">${escapeHtml(firstChar(pub.name))}</span>
         <span class="tbt-card-shade"></span>
         <span class="tbt-card-name"></span>
@@ -593,7 +594,7 @@ export function openBattle({ registry, config, onExit }) {
       : `<div class="tbt-act-hint">选择一个技能，或结束行动</div>`;
     el.innerHTML = `
       <div class="tbt-act-head">
-        <img class="tbt-act-portrait" src="${resolveImage(card.image)}" alt="" draggable="false"
+        <img class="tbt-act-portrait" src="${resolveCardImage(card)}" alt="" draggable="false"
              onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
         <span class="tbt-act-name">
           <b>${escapeHtml(active.name)}</b>
@@ -703,7 +704,7 @@ export function openBattle({ registry, config, onExit }) {
     refs.detail.innerHTML = `
       <div class="tbt-sheet" role="dialog" aria-modal="true" aria-label="${escapeHtml(unit.name)} 的数据">
         <header class="tbt-sheet-head">
-          <img src="${resolveImage(card.image)}" alt="" draggable="false"
+          <img src="${resolveCardImage(card)}" alt="" draggable="false"
                onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
           <div class="tbt-sheet-title">
             <h3>${escapeHtml(unit.name)}</h3>

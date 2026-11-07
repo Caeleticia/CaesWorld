@@ -102,6 +102,13 @@ function initTabs(nav, onPick) {
     if (btn) {
       const next = toggleTab(nav.dataset.open || null, btn.dataset.tab);
       setOpenTab(nav, next);
+      // 手机端侧栏高度有限：展开后把弹层滚进可视区（尤其是最下面的「设置」）
+      if (next) {
+        const wrap = btn.closest(".tab");
+        setTimeout(() => {
+          wrap?.querySelector(".tab-pop")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }, 320);
+      }
       return;
     }
     const item = event.target.closest(".pop-item");
@@ -175,6 +182,7 @@ async function boot() {
     if (itemId === "editor") openEditor();
     if (itemId === "training") openTraining();
     if (itemId === "mod-manager") openModManager();
+    if (itemId === "settings") openSettings();
   });
 
   $(".cw-tip-refresh")?.addEventListener("click", () => tip.refresh());
@@ -206,6 +214,7 @@ async function boot() {
       else if (location.hash === "#editor") openEditor();
       else if (location.hash === "#library") openLibrary();
       else if (location.hash === "#mods") openModManager();
+      else if (location.hash === "#settings") openSettings();
     }, leaving);
   }, hold);
 
@@ -219,7 +228,7 @@ async function boot() {
 let editorLoaded = false;
 let editorModule = null;
 
-const SUBPAGE_SELECTORS = ["#editor-page", "#library-page", "#mod-page", "#training-page", "#battle-page"];
+const SUBPAGE_SELECTORS = ["#editor-page", "#library-page", "#mod-page", "#settings-page", "#training-page", "#battle-page"];
 
 /** 打开某个子页面前，先把其它子页面收起来（主菜单也隐藏） */
 function hideSubpages(except = null) {
@@ -306,6 +315,26 @@ function closeModManager() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 设置                                                                */
+/* ------------------------------------------------------------------ */
+async function openSettings() {
+  const page = $("#settings-page");
+  if (!page) return;
+  hideSubpages(page);
+  page.hidden = false;
+  location.hash = "#settings";
+  const mod = await import("./settings-view.js");
+  mod.initSettings();
+}
+
+function closeSettings() {
+  const page = $("#settings-page");
+  if (!page || page.hidden) return;
+  page.hidden = true;
+  showMenuIfNoSubpage();
+}
+
+/* ------------------------------------------------------------------ */
 /* 训练场                                                              */
 /* ------------------------------------------------------------------ */
 async function openTraining() {
@@ -333,6 +362,7 @@ window.addEventListener("hashchange", () => {
   if (location.hash !== "#editor") closeEditor();
   if (location.hash !== "#library") closeLibrary();
   if (location.hash !== "#mods") closeModManager();
+  if (location.hash !== "#settings") closeSettings();
   if (location.hash !== "#training") closeTraining();
 });
 

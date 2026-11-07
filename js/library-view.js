@@ -4,8 +4,8 @@
  * 汇总「默认包 + 已启用模组 + 编辑器工程」的单位 / 技能 / 效果，
  * 支持按卡包与关键字筛选。
  */
-import { loadContentPacks } from "./mods.js";
-import { PLACEHOLDER_IMAGE, QUALITY_LABEL, resolveImage } from "../engine/index.js";
+import { loadContentPacks, DEFAULT_PACK_ID } from "./mods.js";
+import { PLACEHOLDER_IMAGE, QUALITY_LABEL, resolveCardImage } from "../engine/index.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -59,8 +59,12 @@ async function refresh() {
     renderPackOptions();
     render();
     const errs = data.errors || [];
+    const defaultLoaded = data.packs.some((p) => p.packId === DEFAULT_PACK_ID);
+    const modCount = data.packs.filter(
+      (p) => p.packId !== DEFAULT_PACK_ID && (p.source === "server" || p.source === "local")
+    ).length;
     setStatus(
-      `默认包 + ${Math.max(0, data.packs.filter((p) => p.source === "server" || p.source === "local").length)} 个模组` +
+      `${defaultLoaded ? "默认包 + " : ""}${modCount} 个模组` +
         (errs.length ? ` · ${errs.length} 个读取问题` : "")
     );
     if (errs.length) console.warn("[卡牌库] 读取问题：", errs);
@@ -113,7 +117,7 @@ function unitCard(card) {
   const q = QUALITY_LABEL[card.quality] || card.quality || "白";
   return `
   <article class="lib-card">
-    <img class="lib-card-art" src="${resolveImage(card.image)}" alt="" loading="lazy" draggable="false"
+    <img class="lib-card-art" src="${resolveCardImage(card)}" alt="" loading="lazy" draggable="false"
          onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
     <div class="lib-card-main">
       <div class="lib-card-head">
