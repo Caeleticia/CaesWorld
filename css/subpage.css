@@ -250,3 +250,38 @@
     radial-gradient(circle at 30% 25%, #ffffff 0 18%, transparent 19%),
     var(--brand-strong);
 }
+
+/* ---------------- 设置 ---------------- */
+.settings-list { display: grid; gap: 10px; }
+.settings-card {
+  padding: 12px 14px;
+  background: #fff;
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+}
+.settings-card h2 {
+  margin: 0 0 6px;
+  font-family: var(--font-hand);
+  font-size: 17px;
+  color: var(--ink);
+}
+.settings-card p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.65;
+}
+.settings-card ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.75;
+}
+.settings-usage {
+  margin-top: 8px !important;
+  font-size: 11.5px !important;
+  color: var(--ink-3) !important;
+}
+.settings-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.settings-note { margin-top: 8px !important; font-size: 11px !important; color: var(--ink-3) !important; }

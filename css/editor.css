@@ -402,6 +402,7 @@ textarea:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 3px rgba(127
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .blocks-world {
@@ -414,12 +415,23 @@ textarea:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 3px rgba(127
 }
 
 svg.links { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
-svg.links path.link { pointer-events: stroke; fill: none; }
+svg.links g.link-group { pointer-events: none; }
+svg.links path.link { pointer-events: none; fill: none; }
+/* 不可见的宽命中路径：让手指更容易按住连线，视觉线宽仍是 2.5px */
+svg.links path.link-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 20;
+  stroke-linecap: round;
+  pointer-events: stroke;
+  cursor: pointer;
+  -webkit-touch-callout: none;
+}
 path.link {
   stroke: #9fb7b9;
   stroke-width: 2.5;
   stroke-linecap: round;
-  pointer-events: stroke;
+  pointer-events: none;
 }
 path.link.link-data { stroke-linecap: round; }
 path.link[data-type="targetset"] { stroke: #5aa6d9; }
@@ -428,8 +440,8 @@ path.link[data-type="number"] { stroke: #d9a227; }
 path.link[data-type="string"] { stroke: #b07ee0; }
 path.link[data-type="condition"] { stroke: #3fa45b; }
 path.link[data-flow="1"] { stroke: #8aa1a4; }
-path.link[data-flow="1"]:hover,
-path.link[data-type]:hover { stroke: #ff6b8b; stroke-width: 4; }
+g.link-group:hover path.link[data-flow="1"],
+g.link-group:hover path.link[data-type] { stroke: #ff6b8b; stroke-width: 4; }
 path.drag-line { stroke: #ff6b8b; stroke-width: 2.5; stroke-dasharray: 6 5; fill: none; pointer-events: none; }
 
 .cut-marker {
