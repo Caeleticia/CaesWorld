@@ -44,6 +44,12 @@
   to   { opacity: 1; }
 }
 
+/* 顶栏按钮不换行、不被压缩 */
+.tw-topbar .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
 /* ---------------- 顶栏 ---------------- */
 .tw-topbar {
   display: flex;
@@ -62,6 +68,8 @@
   align-items: baseline;
   gap: 7px;
   min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
   font-family: var(--font-hand);
   font-size: 17px;
   font-weight: 700;
@@ -129,6 +137,7 @@
   box-shadow: 0 2px 8px rgba(255, 107, 139, 0.3);
   transition: transform 240ms var(--ease-spring), background 240ms;
 }
+.tw-page[data-orient="portrait"] .tw-seg { display: flex; }
 .tw-seg[data-side="blue"] .tw-seg-thumb {
   transform: translateX(100%);
   background: linear-gradient(180deg, #d8ecff, #a9d6fb);
@@ -325,8 +334,48 @@
   background: var(--brand-strong);
   border: 1px solid var(--brand-deep);
 }
-.tlib-row .in-deck {
+.tlib-in {
+  display: inline-block;
+  margin-left: 3px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 8.5px;
+  line-height: 13px;
+  color: var(--brand-ink);
+  background: var(--brand-strong);
+  vertical-align: 1px;
+}
+
+.btn.primary {
+  border-color: var(--brand-deep);
+  background: linear-gradient(180deg, #e6ffff, #bff4f6);
+  box-shadow: 0 2px 0 rgba(127, 195, 199, 0.5);
+  font-weight: 700;
+}
+
+/* 轻提示（保存 / 切换卡组等） */
+.tw-toast {
   position: absolute;
+  left: 50%;
+  bottom: 14px;
+  z-index: 40;
+  max-width: 70%;
+  padding: 7px 16px;
+  border-radius: 999px;
+  background: rgba(23, 57, 60, 0.88);
+  color: #eaffff;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 8px 20px rgba(23, 57, 60, 0.3);
+  transform: translate(-50%, 0);
+}
+.tw-toast.is-in { animation: tw-toast-in 220ms var(--ease-spring) both; }
+@keyframes tw-toast-in {
+  from { opacity: 0; transform: translate(-50%, 10px) scale(0.94); }
+  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
 
 /* 品质色条 */
@@ -592,6 +641,10 @@
 .tbt-topbar { position: relative; z-index: 9; }
 .tbt-status {
   margin-left: auto;
+  flex: 0 0 auto;
+  max-width: 44%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   padding: 3px 10px;
   border-radius: 999px;
   background: var(--brand-strong);
@@ -808,8 +861,32 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 没有卡面时的战斗卡牌：深色底 + 首字水印，不要露出编辑器的占位图 */
+.tbt-card[data-no-art="1"] {
+  background-color: #0d1417;
+  background-image:
+    radial-gradient(circle at 50% 38%, rgba(70, 110, 116, 0.55), rgba(10, 18, 22, 0.98) 72%),
+    repeating-linear-gradient(45deg, rgba(255, 176, 32, 0.07) 0 2px, transparent 2px 9px);
+}
+.tbt-card[data-no-art="1"] .tbt-card-img { display: none; }
+.tbt-card-monogram {
+  display: none;
+  position: absolute;
+  left: 50%;
+  top: 43%;
+  transform: translate(-50%, -50%);
+  font-family: var(--font-hand);
+  font-size: calc(var(--card-w, 110px) * 0.34);
+  font-weight: 900;
+  line-height: 1;
+  color: rgba(229, 255, 255, 0.18);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+.tbt-card[data-no-art="1"] .tbt-card-monogram { display: block; }
+
 /* 状态 / 效果图标：卡面外、靠外一侧 */
-.tbt-status {
+.tbt-statuses {
   position: absolute;
   top: 1px;
   display: flex;
@@ -817,8 +894,8 @@
   gap: 3px;
   z-index: 3;
 }
-.tbt-unit[data-side="ally"] .tbt-status { left: -20px; }
-.tbt-unit[data-side="enemy"] .tbt-status { right: -20px; }
+.tbt-unit[data-side="ally"] .tbt-statuses { left: -20px; }
+.tbt-unit[data-side="enemy"] .tbt-statuses { right: -20px; }
 .tbt-status-ico {
   width: 17px;
   height: 17px;
@@ -838,6 +915,7 @@
 .tbt-status-ico:hover { transform: scale(1.15); }
 .tbt-status-ico.is-good { background: #e6fff0; border-color: #7fd8a8; color: #1c6b3f; }
 .tbt-status-ico.is-bad { background: #fff0f3; border-color: #f0a4b6; color: #9c2340; }
+.tbt-status-ico.is-special { background: #fff8e6; border-color: #f0cf8a; color: #8a5c00; }
 .tbt-status-ico.is-buff { background: #fff8e6; border-color: #f0cf8a; color: #8a5c00; }
 .tbt-status-ico.is-invincible { background: #f3e8ff; border-color: #c9a6f0; color: #5b2f8a; }
 .tbt-status-ico.is-more { background: #eef7f7; color: var(--ink-3); border-style: dashed; }
@@ -1022,14 +1100,14 @@
   border: 1.5px solid var(--line-strong);
   background: var(--brand-strong);
 }
-.tbt-act-name { display: grid; gap: 1px; min-width: 0; }
+.tbt-act-name { display: grid; gap: 1px; min-width: 0; overflow: hidden; }
 .tbt-act-name b {
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tbt-act-name span { font-size: 9.5px; color: var(--ink-3); white-space: nowrap; }
+.tbt-act-name span { font-size: 9.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tbt-act-hint {
   flex: 1 1 auto;
   min-width: 0;
@@ -1094,22 +1172,33 @@
 }
 @keyframes tbt-spin { to { transform: rotate(360deg); } }
 
-/* 竖屏行动栏 */
+/* 竖屏行动栏：上排 单位信息 / 提示 / 结束，下排技能 */
 .tw-page[data-orient="portrait"] .tbt-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "head hint end"
+    "skills skills skills";
+  align-items: center;
+  gap: 4px 6px;
   min-height: 92px;
-  align-items: stretch;
   padding: 6px 8px;
 }
-.tw-page[data-orient="portrait"] .tbt-act-head { max-width: 96px; }
-.tw-page[data-orient="portrait"] .tbt-act-portrait { width: 32px; height: 42px; }
+.tw-page[data-orient="portrait"] .tbt-act-head { grid-area: head; max-width: 128px; }
+.tw-page[data-orient="portrait"] .tbt-act-portrait { width: 30px; height: 40px; }
+.tw-page[data-orient="portrait"] .tbt-act-hint { grid-area: hint; font-size: 10.5px; line-height: 1.3; }
+.tw-page[data-orient="portrait"] .tbt-act-head .btn.tiny { display: none; }
 .tw-page[data-orient="portrait"] .tbt-skills {
+  grid-area: skills;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
+  width: 100%;
 }
 .tw-page[data-orient="portrait"] .tbt-skill { min-width: 0; max-width: none; padding: 3px 6px; }
 .tw-page[data-orient="portrait"] .tbt-skill b { font-size: 11px; }
-.tw-page[data-orient="portrait"] .tbt-end { padding: 4px 8px; }
+.tw-page[data-orient="portrait"] .tbt-end { grid-area: end; padding: 4px 8px; }
+.tw-page[data-orient="portrait"] .tbt-wait { grid-area: 1 / 1 / 3 / 4; justify-content: center; }
 
 /* ---------------- 特效画布 ---------------- */
 .tbt-fx {
@@ -1274,6 +1363,8 @@
   color: var(--brand-ink);
 }
 .tbd-eff-head .neg { background: #ffe3ea; color: #9c2340; }
+.tbd-eff-head .special { background: #fff3cf; color: #8a5c00; }
+.tbd-eff-head .pos { background: #e6fff0; color: #1c6b3f; }
 .tbd-eff p { margin: 3px 0 0; font-size: 10.5px; line-height: 1.5; color: var(--ink-2); white-space: pre-line; }
 .tbd-empty { margin: 2px 0; font-size: 11px; color: var(--ink-3); }
 
