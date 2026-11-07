@@ -8,8 +8,6 @@
  * 纯前端，不依赖任何第三方库。引擎只负责数据结构与解释执行（engine/）。
  */
 import {
-  loadPack,
-  PACK_FILES,
   DEFAULT_PACK,
   buildFlowCatalog,
   BLOCK_GROUPS,
@@ -22,11 +20,26 @@ import {
   createEffect,
   characterToUnit,
   projectToContent,
+  normalizeProject,
+  validateProject,
+  charactersOf,
   PLACEHOLDER_IMAGE as PLACEHOLDER,
   resolveImage,
   RESISTANCE_ATTRIBUTES,
+  EFFECT_ATTR_BONUS_KEYS,
   effectPolarityOf,
+  normalizeEffectAttrBonus,
+  parseId,
+  buildId,
+  packFileOf,
+  createPack,
+  isValidPackId,
+  PACK_KIND,
+  PROJECT_KIND,
+  DRAFT_PACK_ID,
+  DRAFT_PACK_NAME,
 } from "../engine/index.js";
+import { loadContentPacks, DEFAULT_PACK_ID, DEFAULT_PACK_NAME, EDITOR_PACK_ID, EDITOR_PACK_NAME } from "./mods.js";
 
 /** 卡组：工程与内容包都按卡组存在 data/pack/<卡组>/ 里 */
 const PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
@@ -42,16 +55,33 @@ const escapeHtml = (s) =>
 /* ================================================================== */
 let project = loadProject();
 
-let active = { tab: "character", skill: null, effect: null, triggerId: null };
+let active = {
+  tab: "character",
+  character: null,
+  skill: null,
+  effect: null,
+  triggerId: null,
+  /** 编辑器里的卡包筛选：all 或 pack id */
+  characterPack: "all",
+  skillPack: "all",
+  effectPack: "all",
+  /** 「卡包」标签页当前选中的卡包（导出 / 存档 JSON 用） */
+  packId: null,
+};
 
 /** 换一个工程（导入用）；页面上的表单与画布一起重绘 */
 function setProject(p) {
-  project = stripLegacyFields(p);
+  project = normalizeProject(stripLegacyFields(p));
   active = {
     tab: "character",
+    character: (project.characters || [])[0] || null,
     skill: (project.skills || [])[0] || null,
     effect: (project.effects || [])[0] || null,
     triggerId: null,
+    characterPack: "all",
+    skillPack: "all",
+    effectPack: "all",
+    packId: null,
   };
   renderAll();
   switchTab("character");
@@ -66,7 +96,9 @@ function stripLegacyFields(p) {
     delete s.attribute;
     delete s.multiplier;
   }
-  if (p && p.character && p.character.resistances) delete p.character.resistances.origin;
+  for (const ch of charactersOf(p)) {
+    if (ch.resistances) delete ch.resistances.origin;
+  }
   return p;
 }
 
@@ -78,52 +110,95 @@ function loadProject() {
       const p = JSON.parse(raw);
       if (p && p.kind === "caeworld-editor-project") {
         p.pack = PACK;
-        return stripLegacyFields(p);
+        return normalizeProject(stripLegacyFields(p));
       }
     }
   } catch {
     /* 读不出来就用空白工程 */
   }
-  return createProject();
+  const blank = createProject();
+  blank.pack = PACK;
+  return blank;
 }
 
-/** 从 data/pack/<卡组>/ 读入内置卡组（首次打开编辑器时调用） */
-async function hydrateFromPack() {
+/**
+ * 把「默认包 + 已启用的模组」里的卡补进工程（按 id 去重，已有编辑不会被覆盖）。
+ * 新模组启用后重新打开编辑器就能看到；删除的卡如果仍在内容包里，会在下次打开时补回。
+ */
+async function hydrateFromPacks() {
   try {
-    const pack = await loadPack(PACK);
-    const hasAny = pack.units.length || pack.skills.length || pack.effects.length;
-    if (!hasAny) return false;
-    if (pack.units[0]) project.character = unitCardToCharacter(pack.units[0]);
-    for (const card of pack.skills) {
-      if (project.skills.some((x) => x.id === card.id)) continue;
+    const res = await loadContentPacks({ includeEditor: false });
+    // 停用模组后，工程里属于该模组的卡也移除
+    const disabledPacks = new Set(res.disabledModIds || []);
+    if (disabledPacks.size) {
+      project.characters = project.characters.filter((ch) => !disabledPacks.has(ch.pack));
+      project.skills = project.skills.filter((s) => !disabledPacks.has(s.pack));
+      project.effects = project.effects.filter((e) => !disabledPacks.has(e.pack));
+      for (const ch of project.characters) {
+        ch.skillIds = (ch.skillIds || []).filter((id) => project.skills.some((s) => s.id === id));
+      }
+    }
+    // 空工程只有一个未命名的占位角色，先把占位角色去掉，换成内容包里的角色
+    const onlyBlank =
+      project.characters.length === 1 &&
+      !project.characters[0].name &&
+      !(project.characters[0].skillIds || []).length &&
+      String(project.characters[0].id || "").startsWith("custom_unit_char");
+    if (onlyBlank) project.characters = [];
+
+    for (const card of res.units) {
+      if (project.characters.some((ch) => ch.id === card.id)) continue;
+      project.characters.push(unitCardToCharacter(card));
+    }
+    for (const card of res.skills) {
+      if (project.skills.some((s) => s.id === card.id)) continue;
+      if ((project.removedSkillIds || []).includes(card.id)) continue;
       const s = createSkill(card.id, card.name);
-      Object.assign(s, { type: card.type, description: card.description || "" });
+      Object.assign(s, {
+        type: card.type || "active",
+        description: card.description || "",
+        pack: card.pack || DEFAULT_PACK_ID,
+        packName: card.packName || (card.pack === DEFAULT_PACK_ID ? DEFAULT_PACK_NAME : card.pack),
+      });
       s.flow = flowFromContent(card.flow);
       project.skills.push(s);
     }
-    for (const def of pack.effects) {
-      if (project.effects.some((x) => x.id === def.id)) continue;
-      const e = createEffect(def.id, def.name);
-      e.flags = Array.isArray(def.flags) ? def.flags.filter((f) => f !== "negative") : [];
-      e.polarity = effectPolarityOf(def);
-      e.stackable = Boolean(def.stackable);
-      e.maxStacks = Number.isFinite(Number(def.maxStacks)) ? Math.max(0, Math.floor(Number(def.maxStacks))) : 1;
-      e.triggers = (def.triggers || []).map((t) => ({ block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" } }));
+    for (const card of res.effects) {
+      if (project.effects.some((e) => e.id === card.id)) continue;
+      const e = createEffect(card.id, card.name);
+      e.flags = Array.isArray(card.flags) ? card.flags.filter((f) => f !== "negative") : [];
+      e.polarity = effectPolarityOf(card);
+      e.stackable = Boolean(card.stackable);
+      e.maxStacks = Number.isFinite(Number(card.maxStacks)) ? Math.max(0, Math.floor(Number(card.maxStacks))) : 1;
+      e.pack = card.pack || DEFAULT_PACK_ID;
+      e.packName = card.packName || (card.pack === DEFAULT_PACK_ID ? DEFAULT_PACK_NAME : card.pack);
+      e.attrBonus = normalizeEffectAttrBonus(card.attrBonus);
+      e.autoConsume = Boolean(card.autoConsume);
+      if (card.ui) e.ui = clone(card.ui);
+      e.triggers = (card.triggers || []).map((t) => ({
+        block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" },
+      }));
       e.flows = {};
-      for (const t of e.triggers) e.flows[t.block.id] = flowFromContent((def.flows || {})[t.block.id]);
+      for (const t of e.triggers) e.flows[t.block.id] = flowFromContent((card.flows || {})[t.block.id]);
       project.effects.push(e);
     }
-    // 角色的挂载列表以卡组里的单位卡为准
-    const skillIds = (project.character.skillIds || []).filter((id) => project.skills.some((s) => s.id === id));
-    const effectIds = (project.character.effectIds || []).filter((id) => project.effects.some((e) => e.id === id));
-    project.character.skillIds = skillIds;
-    project.character.effectIds = effectIds;
+
+    if (!project.characters.length) project.characters.push(createCharacter());
+    for (const ch of project.characters) {
+      ch.skillIds = (ch.skillIds || []).filter((id) => project.skills.some((s) => s.id === id));
+    }
+    // 把内容包里的卡包登记进工程清单（否则卡包页 / 筛选看不到）
+    normalizeProject(project);
+    if (!currentCharacter()) active.character = project.characters[0] || null;
     if (!currentSkill()) active.skill = project.skills[0] || null;
     if (!currentEffect()) active.effect = project.effects[0] || null;
-    setStatus(`已载入卡组「${PACK}」：角色 ${pack.units.length} · 技能 ${pack.skills.length} · 效果 ${pack.effects.length}`, "ok");
+    setStatus(
+      `卡包：默认包 + ${Math.max(0, res.packs.filter((p) => p.source === "server" || p.source === "local").length)} 个模组 · 角色 ${project.characters.length} · 技能 ${project.skills.length} · 效果 ${project.effects.length}`,
+      "ok"
+    );
     return true;
   } catch (err) {
-    setStatus("卡组读取失败：" + err.message, "bad");
+    setStatus("卡包读取失败：" + err.message, "bad");
     return false;
   }
 }
@@ -142,10 +217,11 @@ function flushSave() {
     dirty = false;
     const skills = (project.skills || []).length;
     const effects = (project.effects || []).length;
-    const ch = project.character || {};
+    const ch = currentCharacter() || {};
+    const characters = (project.characters || []).length;
     const flowOk = currentFlow() ? validateFlow() : true;
     setStatus(
-      `已自动保存 · 角色「${ch.name || "未命名"}」· 技能 ${skills} · 效果 ${effects}` +
+      `已自动保存 · 角色「${ch.name || "未命名"}」· 角色 ${characters} · 技能 ${skills} · 效果 ${effects}` +
         (currentFlow() && !flowOk ? " · 流程有问题" : ""),
       "ok"
     );
@@ -164,6 +240,11 @@ function setStatus(text, kind = "") {
 /* ================================================================== */
 /* 当前正在编辑的卡                                                    */
 /* ================================================================== */
+function currentCharacter() {
+  const list = project.characters || [];
+  return active.character && list.includes(active.character) ? active.character : null;
+}
+
 function currentSkill() {
   const list = project.skills || [];
   return active.skill && list.includes(active.skill) ? active.skill : null;
@@ -185,15 +266,23 @@ function currentCard() {
 export function getView() {
   const skill = currentSkill();
   const effect = currentEffect();
+  const character = currentCharacter();
   return {
     pack: PACK,
     active: {
       tab: active.tab,
+      characterId: character ? character.id : null,
       skillId: skill ? skill.id : null,
       effectId: effect ? effect.id : null,
       triggerId: active.triggerId,
+      characterPack: active.characterPack,
+      skillPack: active.skillPack,
+      effectPack: active.effectPack,
+      packId: active.packId,
     },
-    character: project.character.name || "",
+    packs: packsOfProject().map((p) => ({ id: p.id, name: p.name })),
+    character: character ? character.name || "" : "",
+    characters: (project.characters || []).map((ch) => ch.id),
     skills: project.skills.map((s) => s.id),
     effects: project.effects.map((e) => e.id),
   };
@@ -216,9 +305,18 @@ function currentFlow() {
 /* ================================================================== */
 function switchTab(tab) {
   active.tab = tab;
+  if (!currentCharacter() && (project.characters || []).length) {
+    active.character = project.characters.find((c) => packMatch(c, active.characterPack)) || project.characters[0];
+  }
+  if (!currentSkill() && (project.skills || []).length) {
+    active.skill = project.skills.find((s) => packMatch(s, active.skillPack)) || project.skills[0];
+  }
+  if (!currentEffect() && (project.effects || []).length) {
+    active.effect = project.effects.find((e) => packMatch(e, active.effectPack)) || project.effects[0];
+  }
   $$(".ed-tab").forEach((b) => b.classList.toggle("is-active", b.dataset.tab === tab));
   // 技能与效果共用「数据 + 流程」面板，左侧表单在技能 / 效果之间切换
-  const panel = tab === "character" ? "character" : "skills";
+  const panel = tab === "character" ? "character" : tab === "packs" ? "packs" : "skills";
   $$(".ed-panel").forEach((p) => p.classList.toggle("is-active", p.dataset.panel === panel));
   const skillCol = $("#ed-skill-col");
   const effectCol = $("#ed-effect-col");
@@ -240,71 +338,400 @@ function renderAll() {
   renderCharacter();
   renderSkillPanel();
   renderEffectPanel();
+  renderPackPanel();
   renderFlow();
   renderJson();
   renderCardsList();
 }
 
+const PACK_ALL = "all";
+
+function packOf(card) {
+  return (card && card.pack) || DEFAULT_PACK_ID;
+}
+
+/** 工程里的卡包清单 */
+function packsOfProject() {
+  return project.packs || (project.packs = []);
+}
+
+function packEntry(id) {
+  return packsOfProject().find((p) => p && p.id === id) || null;
+}
+
+function packNameById(id) {
+  const meta = packEntry(id);
+  if (meta && meta.name) return meta.name;
+  if (id === DEFAULT_PACK_ID) return DEFAULT_PACK_NAME;
+  if (id === DRAFT_PACK_ID) return DRAFT_PACK_NAME;
+  if (id === EDITOR_PACK_ID) return EDITOR_PACK_NAME;
+  return String(id);
+}
+
+function packNameOf(card) {
+  return packNameById(packOf(card));
+}
+
+/** 确保卡包存在，返回卡包对象 */
+function ensurePack(id, name) {
+  const packId = String(id || DEFAULT_PACK_ID);
+  let pack = packEntry(packId);
+  if (!pack) {
+    pack = createPack(packId, name || packNameById(packId));
+    packsOfProject().push(pack);
+  } else if (!pack.name) pack.name = name || packId;
+  return pack;
+}
+
+/** 新建内容时的目标卡包：筛选是「全部」时进草稿包 draft */
+function newCardPack(filterKey) {
+  const filter = active[filterKey];
+  const id = filter && filter !== PACK_ALL ? filter : DRAFT_PACK_ID;
+  const pack = ensurePack(id, id === DRAFT_PACK_ID ? DRAFT_PACK_NAME : undefined);
+  active.packId = pack.id;
+  return pack;
+}
+
+/** 卡包下拉的 option 列表 */
+function packOptionsHtml(selected) {
+  return packsOfProject()
+    .filter((p) => p && p.id)
+    .slice()
+    .sort((a, b) => String(a.name).localeCompare(String(b.name), "zh-CN"))
+    .map(
+      (p) =>
+        `<option value="${escapeHtml(p.id)}" ${String(p.id) === String(selected) ? "selected" : ""}>${escapeHtml(
+          p.name || p.id
+        )}（${escapeHtml(p.id)}）</option>`
+    )
+    .join("");
+}
+
+/** 卡包下拉（用于表单里的「所属卡包」） */
+function packSelectHtml(attrs, selected) {
+  return `<select ${attrs}>${packOptionsHtml(selected)}</select>`;
+}
+
+function fillPackSelect(el, selected) {
+  if (!el) return selected;
+  const opts = packsOfProject()
+    .filter((p) => p && p.id)
+    .slice()
+    .sort((a, b) => String(a.name).localeCompare(String(b.name), "zh-CN"));
+  el.innerHTML =
+    `<option value="${PACK_ALL}">全部卡包</option>` +
+    opts
+      .map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name || o.id)}（${escapeHtml(o.id)}）</option>`)
+      .join("");
+  const wanted = selected && opts.some((o) => o.id === selected) ? selected : PACK_ALL;
+  el.value = wanted;
+  return wanted;
+}
+
+function packMatch(card, pack) {
+  return !pack || pack === PACK_ALL || packOf(card) === pack;
+}
+
+/* ---------------------------- 卡包操作 ---------------------------- */
+function allCards() {
+  return [...(project.characters || []), ...(project.skills || []), ...(project.effects || [])];
+}
+
+/** 流程里可能引用卡 id 的常量字段 */
+const CARD_REF_KEYS = ["unitId", "skillId", "effectId"];
+
+function rewriteFlowRefs(flow, oldId, newId) {
+  if (!flow || typeof flow !== "object") return;
+  for (const node of flow.nodes || []) {
+    const bags = [node.options, node.ui && node.ui.const];
+    for (const bag of bags) {
+      if (!bag || typeof bag !== "object") continue;
+      for (const key of CARD_REF_KEYS) {
+        if (bag[key] === oldId) bag[key] = newId;
+      }
+    }
+  }
+}
+
+/** 改一张卡的 id 时，同步工程里所有对它的引用 */
+function rewriteAllRefs(oldId, newId) {
+  if (!oldId || oldId === newId) return;
+  for (const ch of project.characters || []) {
+    ch.skillIds = (ch.skillIds || []).map((x) => (x === oldId ? newId : x));
+  }
+  project.removedSkillIds = (project.removedSkillIds || []).map((x) => (x === oldId ? newId : x));
+  for (const skill of project.skills || []) rewriteFlowRefs(skill.flow, oldId, newId);
+  for (const effect of project.effects || []) {
+    for (const trigger of effect.triggers || []) {
+      rewriteFlowRefs((effect.flows || {})[trigger.block.id], oldId, newId);
+    }
+  }
+}
+
+/** 把一张卡切到另一个卡包（id 的包前缀一起改，并同步引用） */
+function moveCardToPack(card, packId) {
+  if (!card || !packId) return false;
+  if (card.pack === packId) return true;
+  const pack = ensurePack(packId);
+  const parsed = parseId(card.id);
+  if (parsed.ok) {
+    const newId = buildId(pack.id, parsed.kind, parsed.key);
+    if (newId !== card.id) {
+      if (allCards().some((c) => c !== card && c.id === newId)) {
+        setStatus(`切换卡包失败：${newId} 已被占用`, "bad");
+        return false;
+      }
+      const oldId = card.id;
+      card.id = newId;
+      rewriteAllRefs(oldId, newId);
+    }
+  } else {
+    setStatus("卡 id 不是「包_类型_标识」格式，只切换了所属卡包", "bad");
+  }
+  card.pack = pack.id;
+  card.packName = pack.name;
+  return true;
+}
+
+/** 重命名卡包（只改显示名） */
+function renamePack(id, name) {
+  const meta = packEntry(id);
+  const next = String(name || "").trim();
+  if (!meta || !next) return false;
+  meta.name = next;
+  for (const card of allCards()) if (card.pack === id) card.packName = next;
+  return true;
+}
+
+/**
+ * 修改卡包 id：卡包清单、卡上的 pack、卡 id 的包前缀、以及所有引用一起改。
+ * @returns {{ok: boolean, error?: string}}
+ */
+function renamePackId(oldId, rawNewId) {
+  const newId = String(rawNewId || "").trim();
+  if (!isValidPackId(newId)) {
+    return { ok: false, error: "卡包 id 只能包含字母 / 数字 / . / -，且不能是 all" };
+  }
+  if (newId === oldId) return { ok: true };
+  if (packEntry(newId)) return { ok: false, error: `卡包 id 已存在：${newId}` };
+  const meta = packEntry(oldId);
+  if (!meta) return { ok: false, error: "卡包不存在" };
+
+  const moving = allCards().filter((c) => c.pack === oldId);
+  const planned = new Map();
+  for (const card of moving) {
+    const parsed = parseId(card.id);
+    if (parsed.ok) planned.set(card, buildId(newId, parsed.kind, parsed.key));
+  }
+  const outside = new Set(allCards().filter((c) => c.pack !== oldId).map((c) => c.id));
+  for (const id of planned.values()) {
+    if (outside.has(id)) return { ok: false, error: `卡 id 冲突：${id}` };
+  }
+  for (const [card, nextCardId] of planned) {
+    const oldCardId = card.id;
+    card.id = nextCardId;
+    rewriteAllRefs(oldCardId, nextCardId);
+  }
+  for (const card of moving) {
+    card.pack = newId;
+    card.packName = meta.name;
+  }
+  project.removedSkillIds = (project.removedSkillIds || []).map((id) => {
+    const parsed = parseId(id);
+    return parsed.ok && parsed.kind === "skill" && parsed.pack === oldId ? buildId(newId, "skill", parsed.key) : id;
+  });
+  meta.id = newId;
+  for (const key of ["characterPack", "skillPack", "effectPack"]) {
+    if (active[key] === oldId) active[key] = newId;
+  }
+  if (active.packId === oldId) active.packId = newId;
+  return { ok: true };
+}
+
+/** 新建一个卡包 id（不含下划线：下划线是卡 id 的分隔符） */
+function newPackId() {
+  let n = 1;
+  let id = "pack";
+  while (packEntry(id)) {
+    n += 1;
+    id = `pack${n}`;
+  }
+  return id;
+}
+
+/** 当前标签页对应的卡包（存档 JSON / 复制用） */
+function currentPackId() {
+  const card = active.tab === "character" ? currentCharacter() : currentCard();
+  if (card && card.pack) return card.pack;
+  if (active.packId && packEntry(active.packId)) return active.packId;
+  const first = packsOfProject().find((p) => p && p.id);
+  return first ? first.id : DEFAULT_PACK_ID;
+}
+
+/** 卡包里引用了、但不在本卡包内的卡 id（导出时提示用） */
+function missingPackRefs(file) {
+  const skillIds = new Set((file.skills || []).map((s) => s.id));
+  const effectIds = new Set((file.effects || []).map((e) => e.id));
+  const unitIds = new Set((file.units || []).map((u) => u.id));
+  const missing = new Set();
+  const scanFlow = (flow) => {
+    for (const node of (flow && flow.nodes) || []) {
+      const o = node.options || {};
+      if (o.unitId && !unitIds.has(o.unitId)) missing.add(o.unitId);
+      if (o.skillId && !skillIds.has(o.skillId)) missing.add(o.skillId);
+      if (o.effectId && !effectIds.has(o.effectId)) missing.add(o.effectId);
+    }
+  };
+  for (const unit of file.units || []) {
+    for (const sid of unit.skills || []) if (!skillIds.has(sid)) missing.add(sid);
+  }
+  for (const skill of file.skills || []) scanFlow(skill.flow);
+  for (const effect of file.effects || []) {
+    for (const flow of Object.values(effect.flows || {})) scanFlow(flow);
+  }
+  return [...missing];
+}
+
+/** 导出选中的卡包（单文件；同时把内容备份到 localStorage） */
+function exportPack(packId) {
+  const id = String(packId || "").trim();
+  if (!id || !packEntry(id)) {
+    setStatus("请先选择一个卡包", "bad");
+    return null;
+  }
+  const file = packFileOf(project, id);
+  try {
+    localStorage.setItem("caeworld:export:" + id, JSON.stringify(file));
+  } catch {
+    /* 文件太大就只下载 */
+  }
+  const ok = downloadJson(`${id}.json`, file);
+  const missing = missingPackRefs(file);
+  const extra = missing.length
+    ? `；有 ${missing.length} 个引用不在本卡包（${missing.slice(0, 3).join("、")}${missing.length > 3 ? "…" : ""}）`
+    : "";
+  setStatus(
+    ok
+      ? `已导出卡包「${packNameById(id)}」${extra}；若浏览器没弹出下载，可点底部「复制卡包」`
+      : `下载失败，已把「${packNameById(id)}」复制到剪贴板${extra}`,
+    ok ? "ok" : "bad"
+  );
+  return file;
+}
+
+/** 导出弹窗：先选一个卡包 */
+function openExportModal() {
+  const modal = $("#ed-export-modal");
+  const sel = $("#ed-export-pack");
+  if (!modal || !sel) return;
+  const packs = packsOfProject().filter((p) => p && p.id);
+  if (!packs.length) {
+    setStatus("还没有卡包", "bad");
+    return;
+  }
+  const current = currentPackId();
+  sel.innerHTML = packOptionsHtml(current);
+  sel.value = current;
+  modal.hidden = false;
+  sel.focus?.();
+}
+
+function closeExportModal() {
+  const modal = $("#ed-export-modal");
+  if (modal) modal.hidden = true;
+}
+
+function cardOptionsHtml(all, filtered, packFilter) {
+  if (!filtered.length) return `<option value="">（无）</option>`;
+  return filtered
+    .map((card) => {
+      const i = all.indexOf(card);
+      return `<option value="${i}">${escapeHtml(card.name || card.id)} · ${escapeHtml(card.id)} · ${escapeHtml(
+        packNameOf(card)
+      )}</option>`;
+    })
+    .join("");
+}
+
 function renderCardsList() {
-  // 角色卡预览 & 挂载列表
-  const ch = project.character;
+  const chars = project.characters || [];
+  const skills = project.skills || [];
+  const effects = project.effects || [];
+  const ch = currentCharacter();
+
+  // 角色选择 + 卡包筛选
+  active.characterPack = fillPackSelect($("#ed-character-pack"), active.characterPack);
+  const charList = $("#ed-character-list");
+  if (charList) {
+    const filtered = chars.filter((c) => packMatch(c, active.characterPack));
+    charList.innerHTML = filtered.length
+      ? filtered
+          .map((c) => {
+            const i = chars.indexOf(c);
+            return `<option value="${i}">${escapeHtml(c.name || c.id)} · ${escapeHtml(c.id)} · ${escapeHtml(
+              packNameOf(c)
+            )}</option>`;
+          })
+          .join("")
+      : `<option value="">（无角色）</option>`;
+    if (filtered.includes(active.character)) charList.value = String(chars.indexOf(active.character));
+  }
+
+  // 技能 / 效果选择 + 卡包筛选
+  active.skillPack = fillPackSelect($("#ed-skill-pack"), active.skillPack);
+  const skillList = $("#ed-skill-list");
+  if (skillList) {
+    const filtered = skills.filter((s) => packMatch(s, active.skillPack));
+    skillList.innerHTML = cardOptionsHtml(skills, filtered, active.skillPack);
+    if (filtered.includes(active.skill)) skillList.value = String(skills.indexOf(active.skill));
+  }
+  active.effectPack = fillPackSelect($("#ed-effect-pack"), active.effectPack);
+  const effectList = $("#ed-effect-list");
+  if (effectList) {
+    const filtered = effects.filter((e) => packMatch(e, active.effectPack));
+    effectList.innerHTML = cardOptionsHtml(effects, filtered, active.effectPack);
+    if (filtered.includes(active.effect)) effectList.value = String(effects.indexOf(active.effect));
+  }
+
+  // 角色卡预览 & 挂载技能列表（效果只能在战斗中附加，不在这里挂载）
   const preview = $("#ed-card-preview");
   if (preview) {
-    preview.innerHTML = `
+    preview.innerHTML = ch
+      ? `
       <img src="${resolveImage(ch.image)}" alt="${escapeHtml(ch.name || "角色")}" onerror="this.src='${PLACEHOLDER}'" />
       <div class="card-meta">
         <strong>${escapeHtml(ch.name || "未命名角色")}</strong>
         <span>${escapeHtml(ch.id)}</span>
         <span class="quality q-${escapeHtml(ch.quality)}">${({ white: "白", blue: "蓝", gold: "金", rainbow: "彩" })[ch.quality] || ch.quality}</span>
       </div>
-      <p class="muted card-source">数据来源：${escapeHtml(project.pack || PACK)} 卡组</p>`;
+      <p class="muted card-source">数据来源：${escapeHtml(packNameOf(ch))}</p>`
+      : `<p class="hint">还没有角色。点「新建角色」开始。</p>`;
   }
   const skillsBox = $("#ed-mount-skills");
   if (skillsBox) {
-    skillsBox.innerHTML = (project.skills || [])
-      .map(
-        (s) => `<label class="mount-row"><input type="checkbox" data-mount="skill" value="${escapeHtml(s.id)}" ${
-          (ch.skillIds || []).includes(s.id) ? "checked" : ""
-        } /> <span>${escapeHtml(s.name || s.id)}</span><code>${escapeHtml(s.id)}</code></label>`
-      )
-      .join("") || `<p class="hint">还没有技能，去「技能」里新建一个。</p>`;
-  }
-  const effectsBox = $("#ed-mount-effects");
-  if (effectsBox) {
-    effectsBox.innerHTML =
-      (project.effects || [])
-        .map(
-          (e) => `<label class="mount-row"><input type="checkbox" data-mount="effect" value="${escapeHtml(e.id)}" ${
-            (ch.effectIds || []).includes(e.id) ? "checked" : ""
-          } /> <span>${escapeHtml(e.name || e.id)}</span><code>${escapeHtml(e.id)}</code></label>`
-        )
-        .join("") || `<p class="hint">还没有效果，去「效果」里新建一个。</p>`;
-  }
-  const skillList = $("#ed-skill-list");
-  if (skillList) {
-    const skills = project.skills || [];
-    skillList.innerHTML =
-      skills
-        .map((s, i) => `<option value="${i}">${escapeHtml(s.name || s.id)} · ${escapeHtml(s.id)}</option>`)
-        .join("") || `<option value="">（无）</option>`;
-    const idx = skills.indexOf(active.skill);
-    if (idx >= 0) skillList.value = String(idx);
-  }
-  const effectList = $("#ed-effect-list");
-  if (effectList) {
-    const effects = project.effects || [];
-    effectList.innerHTML =
-      effects
-        .map((e, i) => `<option value="${i}">${escapeHtml(e.name || e.id)} · ${escapeHtml(e.id)}</option>`)
-        .join("") || `<option value="">（无）</option>`;
-    const idx = effects.indexOf(active.effect);
-    if (idx >= 0) effectList.value = String(idx);
+    if (!ch) skillsBox.innerHTML = `<p class="hint">先选择一个角色。</p>`;
+    else
+      skillsBox.innerHTML =
+        skills
+          .map(
+            (s) => `<label class="mount-row"><input type="checkbox" data-mount="skill" value="${escapeHtml(
+              s.id
+            )}" ${(ch.skillIds || []).includes(s.id) ? "checked" : ""} /> <span>${escapeHtml(
+              s.name || s.id
+            )}</span><code>${escapeHtml(s.id)}</code><em>${escapeHtml(packNameOf(s))}</em></label>`
+          )
+          .join("") || `<p class="hint">还没有技能，去「技能」里新建一个。</p>`;
   }
 }
 
 /* ---------------------------- 角色表单 ---------------------------- */
 function renderCharacter() {
-  const ch = project.character;
+  const ch = currentCharacter();
+  if (!ch) {
+    const stats = $("#ed-unit-stats");
+    if (stats) stats.textContent = "还没有角色，点「新建角色」开始。";
+    return;
+  }
   const map = {
     "f-name": ch.name,
     "f-id": ch.id,
@@ -331,6 +758,8 @@ function renderCharacter() {
     const el = $("#f-" + (key === "occupiesSlot" ? "occupy" : key === "countsAsUnit" ? "count" : "invincible"));
     if (el) el.checked = Boolean(ch[key]);
   }
+  const packSel = $("#f-pack");
+  if (packSel && document.activeElement !== packSel) packSel.innerHTML = packOptionsHtml(ch.pack);
   const unit = characterToUnit(ch);
   const stats = $("#ed-unit-stats");
   if (stats) {
@@ -354,6 +783,7 @@ function renderSkillPanel() {
   box.innerHTML = `
     ${field("技能名", `<input data-skill="name" value="${escapeHtml(s.name)}" />`)}
     ${field("技能 id", `<input data-skill="id" value="${escapeHtml(s.id)}" />`, "扩展包_类型_标识，类型必须是 skill")}
+    ${field("所属卡包", packSelectHtml('data-skill-pack="1"', s.pack), "切包会同时改卡 id 的包前缀并同步引用")}
     ${field("类型", select("data-skill=\"type\"", [
       ["active", "主动"],
       ["passive", "被动"],
@@ -378,6 +808,7 @@ function renderEffectPanel() {
   if (typeof e.stackable !== "boolean") e.stackable = false;
   const maxStacks = Number(e.maxStacks);
   e.maxStacks = Number.isFinite(maxStacks) ? Math.max(0, Math.floor(maxStacks)) : 1;
+  e.attrBonus = Array.isArray(e.attrBonus) ? e.attrBonus : [];
   e.triggers = e.triggers || [];
   if (!e.triggers.some((t) => t.block.id === active.triggerId)) {
     active.triggerId = e.triggers[0] ? e.triggers[0].block.id : null;
@@ -385,6 +816,7 @@ function renderEffectPanel() {
   box.innerHTML = `
     ${field("效果名", `<input data-effect="name" value="${escapeHtml(e.name)}" />`)}
     ${field("效果 id", `<input data-effect="id" value="${escapeHtml(e.id)}" />`, "扩展包_类型_标识，类型必须是 effect")}
+    ${field("所属卡包", packSelectHtml('data-effect-pack="1"', e.pack), "切包会同时改卡 id 的包前缀并同步引用")}
     ${field(
       "倾向",
       select('data-effect="polarity"', [
@@ -396,7 +828,13 @@ function renderEffectPanel() {
     )}
     <div class="chips">
       <label><input type="checkbox" data-effect-flag="unremovable" ${(e.flags || []).includes("unremovable") ? "checked" : ""} /> 不可解除（需勾选「强制移除」）</label>
+      <label><input type="checkbox" data-effect-auto="1" ${e.autoConsume ? "checked" : ""} /> 自动消耗（持有者行动、流程触发后移除一层）</label>
     </div>
+    ${
+      e.autoConsume && !(e.triggers || []).some((t) => t.block.event === "unitTurnStart")
+        ? `<p class="hint">自动消耗只在「单位行动开始时」触发；当前还没有这个触发，所以不会自动掉层。</p>`
+        : ""
+    }
     <div class="form-row">
       <label class="form-check"><input type="checkbox" data-effect-stack="1" ${e.stackable ? "checked" : ""} /> 层数计数</label>
     </div>
@@ -411,6 +849,25 @@ function renderEffectPanel() {
     }
     ${field("说明", `<textarea data-effect="description" rows="2">${escapeHtml(e.description || "")}</textarea>`)}
     <div class="trigger-head">
+      <span>属性修正</span>
+      <button class="btn small" data-action="add-attrbonus">+ 添加属性修正</button>
+    </div>
+    <div class="attrbonus-list">
+      ${(e.attrBonus || []).map((op, i) => {
+        const key = String(op.attr || "");
+        const value = Number(op.value) || 0;
+        return `<div class="attrbonus-row">
+          ${select(
+            `data-attrbonus-attr="${i}"`,
+            EFFECT_ATTR_BONUS_KEYS.map((k) => [k, ATTR_BONUS_LABEL[k] || k]),
+            key
+          )}
+          <input type="number" step="0.01" data-attrbonus-value="${i}" value="${value}" />
+          <button class="btn tiny danger" type="button" data-action="delete-attrbonus" data-index="${i}" title="删除这条属性修正">×</button>
+        </div>`;
+      }).join("") || `<p class="hint">没有属性修正。效果可以只做触发流程，也可以给持有者提供攻击力 / 防御力等面板加成（百分比存小数，5% = 0.05）。</p>`}
+    </div>
+    <div class="trigger-head">
       <span>触发流程</span>
       <button class="btn small" data-action="add-trigger">+ 新触发</button>
     </div>
@@ -422,6 +879,70 @@ function renderEffectPanel() {
       }).join("") || `<p class="hint">还没有触发。效果只有存在时才会触发，先加一个触发。</p>`}
     </div>
     ${active.triggerId ? `<button class="btn small danger" data-action="delete-trigger">删除当前触发</button>` : ""}`;
+}
+
+/* ---------------------------- 卡包面板 ---------------------------- */
+function renderPackPanel() {
+  const list = $("#ed-pack-list");
+  const form = $("#ed-pack-form");
+  const cardsBox = $("#ed-pack-cards");
+  if (!list || !form) return;
+  const packs = packsOfProject().filter((p) => p && p.id);
+  if (!active.packId || !packEntry(active.packId)) {
+    active.packId = packs[0] ? packs[0].id : DEFAULT_PACK_ID;
+  }
+  const meta = packEntry(active.packId) || ensurePack(active.packId);
+  list.innerHTML = packs
+    .map(
+      (p) =>
+        `<option value="${escapeHtml(p.id)}" ${p.id === meta.id ? "selected" : ""}>${escapeHtml(
+          p.name || p.id
+        )}（${escapeHtml(p.id)}）</option>`
+    )
+    .join("");
+  list.value = meta.id;
+
+  const groups = [
+    { kind: "unit", label: "角色", cards: (project.characters || []).filter((c) => c && c.pack === meta.id) },
+    { kind: "skill", label: "技能", cards: (project.skills || []).filter((s) => s && s.pack === meta.id) },
+    { kind: "effect", label: "效果", cards: (project.effects || []).filter((e) => e && e.pack === meta.id) },
+  ];
+
+  form.innerHTML = `
+    ${field("卡包名", `<input data-pack="name" value="${escapeHtml(meta.name || meta.id)}" />`)}
+    ${field(
+      "包 ID",
+      `<input data-pack-id-input value="${escapeHtml(meta.id)}" />`,
+      "改 ID 会同时改本包所有卡 id 的包前缀并同步引用；只能字母 / 数字 / . / -"
+    )}
+    <div class="form-actions">
+      <button class="btn small" type="button" data-action="apply-pack-id">应用包 ID</button>
+      <button class="btn small" type="button" data-action="export-pack">导出此卡包</button>
+    </div>
+    ${field("版本", `<input type="number" min="1" step="1" data-pack="version" value="${Number(meta.version) || 1}" />`)}
+    ${field("作者", `<input data-pack="author" value="${escapeHtml(meta.author || "")}" />`)}
+    ${field("说明", `<textarea data-pack="description" rows="3">${escapeHtml(meta.description || "")}</textarea>`)}
+    <p class="muted">共 ${groups.reduce((n, g) => n + g.cards.length, 0)} 张卡；导出时会检查引用了、但不在本卡包里的角色 / 技能 / 效果。</p>`;
+
+  if (cardsBox) {
+    cardsBox.innerHTML = groups
+      .map(
+        (g) => `<div class="pack-card-group">
+          <h3>${g.label}（${g.cards.length}）</h3>
+          ${
+            g.cards
+              .map(
+                (c) =>
+                  `<button class="pack-card-item" type="button" data-pack-card="${g.kind}:${escapeHtml(c.id)}">
+                    <span>${escapeHtml(c.name || c.id)}</span><code>${escapeHtml(c.id)}</code>
+                  </button>`
+              )
+              .join("") || `<p class="hint">空</p>`
+          }
+        </div>`
+      )
+      .join("");
+  }
 }
 
 const TRIGGER_LABEL = {
@@ -439,6 +960,32 @@ const TRIGGER_LABEL = {
   heal: "单位回复生命时",
   loseHp: "单位损失生命时",
   always: "始终",
+};
+
+/** 效果「属性修正」下拉的显示名 */
+const ATTR_BONUS_LABEL = {
+  atkPct: "攻击力提升 %",
+  atkFlat: "攻击力提升值",
+  defPct: "防御力提升 %",
+  defFlat: "防御力提升值",
+  hpPct: "生命值提升 %",
+  hpFlat: "生命值提升值",
+  critRate: "暴击率",
+  critDamage: "暴击伤害",
+  speed: "速度",
+  dmgBoostPct: "伤害提升 %",
+  damageTakenPct: "受到伤害提升 %",
+  vulnPct: "易伤 %",
+  resistDownPct: "抗性降低 %",
+  physical: "物理抗性",
+  magic: "魔法抗性",
+  spirit: "精神抗性",
+  "attrDmgBoostPct.physical": "物理伤害提升 %",
+  "attrDmgBoostPct.magic": "魔法伤害提升 %",
+  "attrDmgBoostPct.spirit": "精神伤害提升 %",
+  "attrPenPct.physical": "物理穿透 %",
+  "attrPenPct.magic": "魔法穿透 %",
+  "attrPenPct.spirit": "精神穿透 %",
 };
 
 function field(label, control, hint) {
@@ -461,12 +1008,41 @@ const canvasState = {
   link: null,
   selectedId: null,
   pendingCut: null,
-  erasing: false,
+  cutTimer: 0,
   nodeEls: new Map(),
 };
 
+/** 长按不动多久才进入「切断连线」模式；移动超过这个距离则视为平移画布 */
+const CUT_HOLD_MS = 460;
+const CUT_SLOP = 8;
+
 const canvasEl = () => $("#blocks-canvas");
 const worldEl = () => $("#blocks-world");
+
+function clearCutTimer() {
+  if (canvasState.cutTimer) {
+    clearTimeout(canvasState.cutTimer);
+    canvasState.cutTimer = 0;
+  }
+}
+
+/**
+ * 按下空白 / 连线：先进入「待切断」。
+ * 只有按住不动超过 CUT_HOLD_MS 才删除；期间一动就取消，交给平移画布。
+ * @param {PointerEvent} e
+ * @param {string|null} linkId 按在连线上的那条线；按在空白处为 null
+ */
+function beginCut(e, linkId = null) {
+  clearCutTimer();
+  canvasState.pendingCut = { x: e.clientX, y: e.clientY, moved: false, linkId };
+  canvasState.cutTimer = setTimeout(() => {
+    const cut = canvasState.pendingCut;
+    if (!cut || cut.moved || canvasState.link) return;
+    clearCutTimer();
+    canvasState.pendingCut = null;
+    if (cut.linkId) removeLink(cut.linkId);
+  }, CUT_HOLD_MS);
+}
 
 function toWorld(clientX, clientY) {
   const box = canvasEl().getBoundingClientRect();
@@ -881,6 +1457,8 @@ function setupCanvas() {
   };
   bind("#btn-delete-block", deleteSelected);
   bind("#btn-fit", fitView);
+  bind("#btn-locate", locateNearestBlock);
+  bind("#btn-tidy", tidyFlow);
   bind("#btn-zoom-in", () => zoomBy(1.15));
   bind("#btn-zoom-out", () => zoomBy(1 / 1.15));
   bind("#btn-clear-flow", () => {
@@ -928,6 +1506,137 @@ function fitView() {
   redrawLinks();
 }
 
+/** 「定位」：把视角移动到离当前视口中心最近的积木 */
+function locateNearestBlock() {
+  const flow = currentFlow();
+  if (!flow || !flow.nodes.length) return;
+  const box = canvasEl().getBoundingClientRect();
+  const zoom = canvasState.view.zoom || 1;
+  const center = {
+    x: (box.width / 2 - canvasState.view.x) / zoom,
+    y: (box.height / 2 - canvasState.view.y) / zoom,
+  };
+  let best = null;
+  let bestDist = Infinity;
+  for (const node of flow.nodes) {
+    const el = canvasState.nodeEls.get(node.id);
+    const w = el?.offsetWidth || 224;
+    const h = el?.offsetHeight || 150;
+    const cx = (node.pos?.x || 0) + w / 2;
+    const cy = (node.pos?.y || 0) + h / 2;
+    const dist = Math.hypot(cx - center.x, cy - center.y);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = { cx, cy };
+    }
+  }
+  if (!best) return;
+  canvasState.view.x = box.width / 2 - best.cx * zoom;
+  canvasState.view.y = box.height / 2 - best.cy * zoom;
+  syncWorld();
+  redrawLinks();
+}
+
+function isFlowLink(flow, link) {
+  const from = flow.nodes.find((n) => n.id === link.from);
+  const to = flow.nodes.find((n) => n.id === link.to);
+  if (!from || !to) return false;
+  const defFrom = blockDef(from.type);
+  const defTo = blockDef(to.type);
+  const out = defFrom?.ports.find((p) => p.id === link.port && p.direction === "out");
+  const inp = defTo?.ports.find((p) => p.id === link.portTo && p.direction === "in");
+  return Boolean(out && inp && !out.type && !inp.type);
+}
+
+function flowPortRank(node, portId) {
+  const def = blockDef(node.type);
+  const i = def?.ports.findIndex((p) => p.id === portId && p.direction === "out") ?? 0;
+  return i < 0 ? 99 : i;
+}
+
+/**
+ * 「整理」：按执行流顺序把执行类积木排成一列，数据类积木排到左侧一列。
+ * 位置用实测高度逐块下推，保证积木块之间不重叠；最后 fit 到可视范围。
+ */
+function tidyFlow() {
+  const flow = currentFlow();
+  if (!flow || !flow.nodes.length) return;
+  const nodes = flow.nodes;
+  const isExec = (node) => {
+    const def = blockDef(node.type);
+    return Boolean(def && def.ports.some((p) => !p.type));
+  };
+
+  const flowLinks = (flow.links || []).filter((l) => isFlowLink(flow, l));
+  const execNodes = nodes.filter(isExec);
+  const dataNodes = nodes.filter((n) => !isExec(n));
+
+  // 从触发积木开始，按端口顺序深度优先执行流
+  const order = [];
+  const seen = new Set();
+  const visit = (id) => {
+    if (seen.has(id)) return;
+    const node = nodes.find((n) => n.id === id);
+    if (!node || !isExec(node)) return;
+    seen.add(id);
+    order.push(node);
+    const outs = flowLinks
+      .filter((l) => l.from === id)
+      .sort((a, b) => flowPortRank(node, a.port) - flowPortRank(node, b.port));
+    for (const link of outs) visit(link.to);
+  };
+  const trigger = nodes.find((n) => n.type === "trigger") || execNodes[0];
+  if (trigger) visit(trigger.id);
+  for (const node of execNodes) visit(node.id);
+
+  const heightOf = (id) => canvasState.nodeEls.get(id)?.offsetHeight || 150;
+  const EXEC_X = 430;
+  const DATA_X = 40;
+  const GAP = 36;
+  const execY = new Map();
+  let cursor = 80;
+  for (const node of order) {
+    node.pos = { x: EXEC_X, y: cursor };
+    execY.set(node.id, cursor);
+    cursor += heightOf(node.id) + GAP;
+  }
+
+  // 数据积木：尽量靠近它服务的执行积木；没有执行消费者就排在末尾
+  const consumers = new Map();
+  for (const link of flow.links || []) {
+    if (isFlowLink(flow, link)) continue;
+    if (!consumers.has(link.from)) consumers.set(link.from, []);
+    consumers.get(link.from).push(link.to);
+  }
+  const anchorCache = new Map();
+  const anchorY = (id, seen = new Set()) => {
+    if (anchorCache.has(id)) return anchorCache.get(id);
+    if (execY.has(id)) return execY.get(id);
+    if (seen.has(id)) return Infinity;
+    seen.add(id);
+    let best = Infinity;
+    for (const toId of consumers.get(id) || []) {
+      best = Math.min(best, anchorY(toId, seen));
+    }
+    anchorCache.set(id, best);
+    return best;
+  };
+  const dataOrder = dataNodes
+    .map((node) => ({ node, anchor: anchorY(node.id) }))
+    .sort((a, b) => (a.anchor === b.anchor ? String(a.node.id).localeCompare(String(b.node.id)) : a.anchor - b.anchor));
+
+  cursor = 80;
+  for (const { node, anchor } of dataOrder) {
+    const y = Number.isFinite(anchor) ? Math.max(cursor, anchor) : cursor;
+    node.pos = { x: DATA_X, y };
+    cursor = y + heightOf(node.id) + GAP;
+  }
+
+  markDirty();
+  refreshFlowView();
+  fitView();
+}
+
 function onPointerDown(e) {
   if (e.button === 2) return;
   canvasState.lastXY = { x: e.clientX, y: e.clientY };
@@ -943,8 +1652,16 @@ function onPointerDown(e) {
     return;
   }
   if (pathEl) {
-    canvasState.pendingCut = { at: Date.now(), x: e.clientX, y: e.clientY };
+    beginCut(e, pathEl.dataset.link || null);
+    canvasState.pan = { x: e.clientX, y: e.clientY, vx: canvasState.view.x, vy: canvasState.view.y, moved: false };
     canvasEl().setPointerCapture(e.pointerId);
+    return;
+  }
+  // 积木里的下拉 / 勾选 / 输入框必须走原生交互：
+  // 这里若继续 setPointerCapture，后续 click 会被重定向到画布，桌面端就点不动勾选框。
+  const controlEl = blockEl && e.target.closest("input, select, textarea, button, label, option");
+  if (controlEl) {
+    selectNode(blockEl.dataset.id);
     return;
   }
   if (blockEl) {
@@ -953,8 +1670,8 @@ function onPointerDown(e) {
     canvasEl().setPointerCapture(e.pointerId);
     return;
   }
-  // 空白：长按后滑动 = 切断；否则拖动平移
-  canvasState.pendingCut = { at: Date.now(), x: e.clientX, y: e.clientY };
+  // 空白：按住不动 = 切断；移动 = 平移画布
+  beginCut(e);
   canvasState.pan = { x: e.clientX, y: e.clientY, vx: canvasState.view.x, vy: canvasState.view.y, moved: false };
   canvasEl().setPointerCapture(e.pointerId);
 }
@@ -1006,34 +1723,14 @@ function drawDragLine(e) {
 
 function onPointerMove(e) {
   const cut = canvasState.pendingCut;
-  if (cut && !canvasState.link && !canvasState.erasing) {
+  if (cut && !canvasState.link) {
     const d = Math.hypot(e.clientX - cut.x, e.clientY - cut.y);
-    if (cut.at && Date.now() - cut.at > 420 && d > 10) {
-      canvasState.erasing = true;
-      canvasState.pan = null;
+    if (d > CUT_SLOP) {
+      // 长按期间移动了：不再变成删除，按拖动处理
+      cut.moved = true;
+      clearCutTimer();
       canvasState.pendingCut = null;
-      const canvas = canvasEl();
-      canvas.classList.add("is-erasing");
     }
-  }
-  if (canvasState.erasing) {
-    const box = canvasEl().getBoundingClientRect();
-    const marker = $("#cut-marker");
-    if (marker) {
-      marker.style.display = "block";
-      marker.style.left = `${e.clientX - box.left}px`;
-      marker.style.top = `${e.clientY - box.top}px`;
-    }
-    // 切掉指针下方的连线
-    const hit = document.elementsFromPoint(e.clientX, e.clientY);
-    for (const node of hit) {
-      const p = node.closest && node.closest("path.link");
-      if (p) removeLink(p.dataset.link);
-    }
-    return;
-  }
-  if (cut && Date.now() - cut.at > 420 && !canvasState.link) {
-    canvasEl().dataset.longPress = "1";
   }
   if (canvasState.link) {
     drawDragLine(e);
@@ -1060,6 +1757,8 @@ function onPointerMove(e) {
     return;
   }
   if (canvasState.pan) {
+    // 还在「可能长按切断」的静止窗口内：先不平移，避免轻微抖动就移走画布
+    if (canvasState.pendingCut) return;
     const dx = e.clientX - canvasState.pan.x;
     const dy = e.clientY - canvasState.pan.y;
     if (Math.hypot(dx, dy) > 4) canvasState.pan.moved = true;
@@ -1071,9 +1770,7 @@ function onPointerMove(e) {
 }
 
 function onPointerUp(e) {
-  canvasEl().classList.remove("is-erasing");
-  const marker = $("#cut-marker");
-  if (marker) marker.style.display = "none";
+  clearCutTimer();
 
   if (canvasState.link) {
     // 拖动连线时画布做了 setPointerCapture，pointerup 的 e.target 会被重定向成
@@ -1099,10 +1796,9 @@ function onPointerUp(e) {
     }
     canvasState.drag = null;
   }
-  if (canvasState.pan && !canvasState.pan.moved && !canvasState.erasing) selectNode(null);
+  if (canvasState.pan && !canvasState.pan.moved) selectNode(null);
   canvasState.pan = null;
   canvasState.pendingCut = null;
-  canvasState.erasing = false;
 }
 
 /*
@@ -1153,7 +1849,9 @@ function applySkillField(card, key, value) {
   if (key === "id") {
     const old = card.id;
     card.id = String(value || "").trim();
-    project.character.skillIds = (project.character.skillIds || []).map((x) => (x === old ? card.id : x));
+    for (const ch of project.characters || []) {
+      ch.skillIds = (ch.skillIds || []).map((x) => (x === old ? card.id : x));
+    }
     active.skill = card;
   } else card[key] = String(value ?? "");
 }
@@ -1161,6 +1859,15 @@ function applySkillField(card, key, value) {
 function onSkillFormInput(e) {
   const s = currentSkill();
   if (!s) return;
+  if (e.target.dataset.skillPack !== undefined) {
+    if (moveCardToPack(s, e.target.value)) {
+      markDirty();
+      renderAll();
+    } else {
+      renderSkillPanel();
+    }
+    return;
+  }
   const key = e.target.dataset.skill;
   if (!key) return;
   applySkillField(s, key, e.target.value);
@@ -1178,6 +1885,21 @@ function onEffectFormInput(e) {
     card.flags = e.target.checked ? [...new Set([...card.flags, flag])] : card.flags.filter((f) => f !== flag);
     markDirty();
     renderJson();
+    return;
+  }
+  if (e.target.dataset.effectAuto !== undefined) {
+    card.autoConsume = Boolean(e.target.checked);
+    markDirty();
+    renderJson();
+    return;
+  }
+  if (e.target.dataset.effectPack !== undefined) {
+    if (moveCardToPack(card, e.target.value)) {
+      markDirty();
+      renderAll();
+    } else {
+      renderEffectPanel();
+    }
     return;
   }
   if (e.target.dataset.effectStack !== undefined) {
@@ -1200,15 +1922,58 @@ function onEffectFormInput(e) {
     renderJson();
     return;
   }
+  // 属性修正：选属性 / 改数值（行内编辑不重绘表单，避免输入框失焦）
+  const attrBonusIndex = e.target.dataset.attrbonusAttr;
+  if (attrBonusIndex !== undefined) {
+    const op = (card.attrBonus || [])[Number(attrBonusIndex)];
+    if (!op) return;
+    op.attr = e.target.value;
+    markDirty();
+    renderJson();
+    return;
+  }
+  const attrBonusValue = e.target.dataset.attrbonusValue;
+  if (attrBonusValue !== undefined) {
+    const op = (card.attrBonus || [])[Number(attrBonusValue)];
+    if (!op) return;
+    const n = Number(e.target.value);
+    op.value = Number.isFinite(n) ? n : 0;
+    markDirty();
+    renderJson();
+    return;
+  }
   const key = e.target.dataset.effect;
   if (!key) return;
   if (key === "id") {
-    const old = card.id;
     card.id = e.target.value.trim();
-    project.character.effectIds = (project.character.effectIds || []).map((x) => (x === old ? card.id : x));
     active.effect = card;
   } else if (key === "polarity") card.polarity = e.target.value || "positive";
   else card[key] = e.target.value;
+  markDirty();
+  renderCardsList();
+  renderJson();
+}
+
+/** 卡包表单：改名 / 版本 / 作者 / 说明（包 ID 走「应用包 ID」按钮） */
+function onPackFormInput(e) {
+  const meta = packEntry(active.packId);
+  if (!meta) return;
+  const key = e.target.dataset.pack;
+  if (!key) return;
+  if (key === "name") {
+    const value = String(e.target.value || "");
+    if (value.trim()) renamePack(meta.id, value);
+  } else if (key === "version") {
+    meta.version = Math.max(1, Math.floor(Number(e.target.value) || 1));
+  } else if (key === "author") {
+    meta.author = String(e.target.value || "");
+  } else if (key === "description") {
+    meta.description = String(e.target.value || "");
+  }
+  // 只更新下拉里的显示名，不重绘表单（避免输入框失焦）
+  for (const opt of $$("#ed-pack-list option")) {
+    if (opt.value === meta.id) opt.textContent = `${meta.name || meta.id}（${meta.id}）`;
+  }
   markDirty();
   renderCardsList();
   renderJson();
@@ -1225,22 +1990,37 @@ function uniqueId(existing, base) {
 }
 
 function copyText(text) {
-  if (!text) return;
-  navigator.clipboard
-    ?.writeText(text)
-    .then(() => setStatus("已复制到剪贴板", "ok"))
-    .catch(() => setStatus("复制失败", "bad"));
-}
-
-function exportProject() {
-  flushSaveSync();
-  const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `cae-pack-${PACK}-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  setStatus("已导出工程 JSON", "ok");
+  if (!text) return false;
+  const done = () => setStatus("已复制到剪贴板", "ok");
+  const fail = () => setStatus("复制失败", "bad");
+  try {
+    const p = navigator.clipboard?.writeText(text);
+    if (p && typeof p.then === "function") {
+      p.then(done).catch(fail);
+      return true;
+    }
+  } catch {
+    /* 走下面的兜底 */
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand && document.execCommand("copy");
+    area.remove();
+    if (ok) {
+      done();
+      return true;
+    }
+  } catch {
+    /* 忽略 */
+  }
+  fail();
+  return false;
 }
 
 function importProject(e) {
@@ -1274,21 +2054,29 @@ const edit = {
       next.effect = (project.effects || []).find((e) => e.id === next.effectId) || null;
       delete next.effectId;
     }
+    if ("characterId" in next) {
+      next.character = (project.characters || []).find((c) => c.id === next.characterId) || null;
+      delete next.characterId;
+    }
     Object.assign(active, next);
+    if (active.character && !(project.characters || []).includes(active.character)) active.character = null;
     if (active.skill && !(project.skills || []).includes(active.skill)) active.skill = null;
     if (active.effect && !(project.effects || []).includes(active.effect)) active.effect = null;
     if (!active.tab) active.tab = "character";
+    if (active.tab === "character" && !currentCharacter() && project.characters[0]) active.character = project.characters[0];
     if (active.tab === "skills" && !currentSkill() && project.skills[0]) active.skill = project.skills[0];
     if (active.tab === "effects" && !currentEffect() && project.effects[0]) active.effect = project.effects[0];
     switchTab(active.tab);
   },
   /** 修改角色字段 */
   setCharacter(key, value) {
-    if (key === "image") project.character.image = String(value || "");
+    const ch = currentCharacter();
+    if (!ch) throw new Error("当前没有角色");
+    if (key === "image") ch.image = String(value || "");
     else if (["level", "baseHp", "baseAtk", "baseDef", "critRate", "critDamage", "speed"].includes(key)) {
-      project.character[key] = Number(value) || 0;
-    } else if (["occupiesSlot", "countsAsUnit", "invincible"].includes(key)) project.character[key] = Boolean(value);
-    else if (["name", "id", "quality", "label"].includes(key)) project.character[key] = String(value ?? "");
+      ch[key] = Number(value) || 0;
+    } else if (["occupiesSlot", "countsAsUnit", "invincible"].includes(key)) ch[key] = Boolean(value);
+    else if (["name", "id", "quality", "label", "pack", "packName"].includes(key)) ch[key] = String(value ?? "");
     else throw new Error(`未知角色字段：${key}`);
     markDirty();
     renderCharacter();
@@ -1297,13 +2085,33 @@ const edit = {
   },
   setResistance(attr, value) {
     if (!RESISTANCE_ATTRIBUTES.includes(attr)) return;
-    project.character.resistances[attr] = Number(value) || 0;
+    const ch = currentCharacter();
+    if (!ch) return;
+    ch.resistances[attr] = Number(value) || 0;
     markDirty();
     renderJson();
   },
+  newCharacter(id, name) {
+    const pack = newCardPack("characterPack");
+    const cid = id || uniqueId((project.characters || []).map((c) => c.id), buildId(pack.id, "unit", "char"));
+    const ch = createCharacter();
+    ch.id = cid;
+    ch.name = name || "新角色";
+    ch.pack = pack.id;
+    ch.packName = pack.name;
+    project.characters.push(ch);
+    active.character = ch;
+    markDirty();
+    switchTab("character");
+    return ch;
+  },
   newSkill(id, name) {
-    const sid = id || uniqueId(project.skills.map((x) => x.id), "custom_skill_new");
+    const pack = newCardPack("skillPack");
+    const sid = id || uniqueId(project.skills.map((x) => x.id), buildId(pack.id, "skill", "new"));
     const card = createSkill(sid, name || "新技能");
+    card.pack = pack.id;
+    card.packName = pack.name;
+    project.removedSkillIds = (project.removedSkillIds || []).filter((id) => id !== card.id);
     project.skills.push(card);
     active.skill = card;
     markDirty();
@@ -1311,8 +2119,11 @@ const edit = {
     return card;
   },
   newEffect(id, name) {
-    const eid = id || uniqueId(project.effects.map((x) => x.id), "custom_effect_new");
+    const pack = newCardPack("effectPack");
+    const eid = id || uniqueId(project.effects.map((x) => x.id), buildId(pack.id, "effect", "new"));
     const card = createEffect(eid, name || "新效果");
+    card.pack = pack.id;
+    card.packName = pack.name;
     project.effects.push(card);
     active.effect = card;
     active.triggerId = null;
@@ -1337,11 +2148,11 @@ const edit = {
     if (!card) throw new Error("当前没有效果");
     if (key === "flags") card.flags = Array.isArray(value) ? value.slice() : [];
     else if (key === "id") {
-      const old = card.id;
       card.id = String(value || "").trim();
-      project.character.effectIds = (project.character.effectIds || []).map((x) => (x === old ? card.id : x));
       active.effect = card;
-    } else if (key === "polarity") card.polarity = ["positive", "negative", "special"].includes(value) ? value : "positive";
+    } else if (key === "attrBonus") card.attrBonus = normalizeEffectAttrBonus(value);
+    else if (key === "autoConsume") card.autoConsume = Boolean(value);
+    else if (key === "polarity") card.polarity = ["positive", "negative", "special"].includes(value) ? value : "positive";
     else if (key === "stackable") card.stackable = Boolean(value);
     else if (key === "maxStacks") {
       const n = Number(value);
@@ -1352,6 +2163,29 @@ const edit = {
     renderCardsList();
     renderJson();
     return card;
+  },
+  /** 给效果加一条属性修正（和「+ 添加属性修正」按钮一致） */
+  addAttrBonus(attr = "atkPct", value = 0) {
+    const card = currentEffect();
+    if (!card) throw new Error("当前没有效果");
+    card.attrBonus = Array.isArray(card.attrBonus) ? card.attrBonus : [];
+    const op = { attr, value: Number(value) || 0 };
+    card.attrBonus.push(op);
+    markDirty();
+    renderEffectPanel();
+    renderJson();
+    return op;
+  },
+  /** 删除第 index 条属性修正 */
+  removeAttrBonus(index) {
+    const card = currentEffect();
+    if (!card) throw new Error("当前没有效果");
+    const i = Number(index);
+    card.attrBonus = (card.attrBonus || []).filter((_, idx) => idx !== i);
+    markDirty();
+    renderEffectPanel();
+    renderJson();
+    return card.attrBonus;
   },
   /** 给效果加一个触发流程（和「+ 新触发」按钮一致） */
   addTrigger(event = "unitTurnStart") {
@@ -1403,42 +2237,86 @@ const edit = {
   currentFlow: () => buildFlowJson(),
   validate: () => validateProject(project),
   triggerLabel: flowTriggerLabel,
-  /** 导入内容（内容包 / 单张卡 / 工程） */
+  /** 导入内容（卡包 / 内容包 / 单张卡 / 工程） */
   importContent,
-  /** 导出内容包（units / skills / effects 三份） */
-  exportContent() {
-    const content = projectToContent(project);
-    // 文件名与卡组目录一致：data/pack/<卡组>/单位.json 技能.json 效果.json
-    saveTextFile(PACK_FILES.units, content.units);
-    saveTextFile(PACK_FILES.skills, content.skills);
-    saveTextFile(PACK_FILES.effects, content.effects);
-    return content;
+  /** 新建卡包（不传 id 时自动生成 pack2 / pack3…） */
+  addPack(id, name) {
+    const packId = id || newPackId();
+    if (packEntry(packId)) throw new Error(`卡包 id 已存在：${packId}`);
+    const pack = createPack(packId, name || `新卡包 ${packId}`);
+    packsOfProject().push(pack);
+    active.packId = pack.id;
+    markDirty();
+    renderAll();
+    return pack;
+  },
+  /** 重命名卡包（只改显示名） */
+  setPackName(id, name) {
+    const ok = renamePack(id, name);
+    if (ok) {
+      markDirty();
+      renderAll();
+    }
+    return ok;
+  },
+  /** 修改卡包 id（级联改卡 id 与所有引用） */
+  setPackId(oldId, newId) {
+    const res = renamePackId(oldId, newId);
+    if (res.ok) {
+      markDirty();
+      renderAll();
+    }
+    return res;
+  },
+  /** 把一张卡切到另一个卡包 */
+  setCardPack(kind, id, packId) {
+    const list = kind === "unit" ? project.characters : kind === "skill" ? project.skills : project.effects;
+    const card = (list || []).find((c) => c.id === id);
+    if (!card) return false;
+    const ok = moveCardToPack(card, packId);
+    if (ok) {
+      markDirty();
+      renderAll();
+    }
+    return ok;
+  },
+  /** 导出指定卡包（默认当前标签页所在的卡包） */
+  exportPackFile(id = active.packId) {
+    return exportPack(id);
+  },
+  /** 取一个卡包文件对象（不下载） */
+  packFile(id = currentPackId()) {
+    return packFileOf(project, id);
   },
 };
 
-function saveTextFile(name, data) {
-  try {
-    localStorage.setItem("caeworld:export:" + name, JSON.stringify(data));
-  } catch {
-    /* 文件太大就只弹下载 */
-  }
-  downloadJson(name, data);
-}
-
-/** 导出：工程 + 内容包 + 当前流程 */
+/** 导出快照：整个工程 + 当前卡包文件 + 当前流程 */
 function exportSnapshot() {
+  const id = currentPackId();
   return {
     project: JSON.parse(JSON.stringify(project)),
-    content: JSON.parse(JSON.stringify(projectToContent(project))),
+    pack: JSON.parse(JSON.stringify(packFileOf(project, id))),
     flow: currentFlow() ? buildFlowJson() : null,
   };
 }
 
 export { setProject, projectToContent, edit, importContent, flowFromContent, unitCardToCharacter };
 
+/** 模组启用 / 停用后重新汇总卡包（编辑器已经初始化过时用） */
+export async function refreshEditorPacks() {
+  normalizeProject(project);
+  const ok = await hydrateFromPacks();
+  if (ok) {
+    renderAll();
+    markDirty();
+  }
+}
+
 export async function initEditor() {
-  if (!project.character) project.character = createCharacter();
+  normalizeProject(project);
+  if (!project.characters.length) project.characters.push(createCharacter());
   if (!project.pack) project.pack = PACK;
+  if (!currentCharacter()) active.character = project.characters[0] || null;
   if (!currentSkill()) active.skill = (project.skills || [])[0] || null;
   if (!currentEffect()) active.effect = (project.effects || [])[0] || null;
   setupForms();
@@ -1449,14 +2327,11 @@ export async function initEditor() {
   });
   switchTab("character");
   renderCharacter();
-  // 本地没有存过工程时，用 data/pack/<卡组>/ 里的内置卡起手
-  const fresh = !(project.skills.length || project.effects.length || project.character.name);
-  if (fresh) {
-    const ok = await hydrateFromPack();
-    if (ok) {
-      renderAll();
-      markDirty();
-    }
+  // 把默认包 + 已启用模组里的卡补进工程；已有编辑按 id 保留
+  const ok = await hydrateFromPacks();
+  if (ok) {
+    renderAll();
+    markDirty();
   }
 }
 
@@ -1503,7 +2378,7 @@ function renderPalette() {
 }
 
 /* ================================================================== */
-/* 导入内容包（把 data/*.json 或别的工程弄进来继续改）                    */
+/* 导入卡包 / 内容包（把 data/*.json 或别的卡包弄进来继续改）              */
 /* ================================================================== */
 function acceptDropOnCharacter(e) {
   e.preventDefault();
@@ -1522,15 +2397,36 @@ function acceptDropOnCharacter(e) {
   }
 }
 
+/**
+ * 触发浏览器下载一个 JSON 文件。
+ * 兼容性要点（之前「有时按导出没反应」的原因）：
+ *  · 锚点必须挂进文档再 click，部分浏览器对游离节点不生效；
+ *  · 只下载一个文件（多文件连发会被浏览器当自动下载拦截）；
+ *  · 生成 / 点击失败时退回剪贴板，并给出可见提示。
+ * @returns {boolean} 是否已触发下载
+ */
 function downloadJson(name, data) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  const text = JSON.stringify(data, null, 2);
+  let url = null;
+  try {
+    const blob = new Blob([text], { type: "application/json" });
+    url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.rel = "noopener";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // 部分移动端浏览器要在点击后稍等才读取 blob，太早 revoke 会导致空文件
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    return true;
+  } catch (err) {
+    if (url) setTimeout(() => URL.revokeObjectURL(url), 4000);
+    copyText(text);
+    return false;
+  }
 }
 
 /** 把注册表里的单位卡转回角色表单需要的形状 */
@@ -1539,6 +2435,8 @@ function unitCardToCharacter(card) {
   Object.assign(ch, {
     id: card.id,
     name: card.name,
+    pack: card.pack || DEFAULT_PACK_ID,
+    packName: card.packName || (card.pack === DEFAULT_PACK_ID || !card.pack ? DEFAULT_PACK_NAME : String(card.pack)),
     quality: card.quality,
     level: card.level,
     baseHp: card.baseHp,
@@ -1553,7 +2451,6 @@ function unitCardToCharacter(card) {
     invincible: card.invincible,
     image: card.image || "",
     skillIds: (card.skills || []).slice(),
-    effectIds: (card.effects || []).slice(),
     resistances: Object.fromEntries(
       RESISTANCE_ATTRIBUTES.map((a) => [a, Number(card.resistances?.[a] ?? createCharacter().resistances[a]) || 0])
     ),
@@ -1567,11 +2464,99 @@ function unitCardToCharacter(card) {
  *  - 内容包 { units:[], skills:[], effects:[] } / 单张技能卡 / 单张效果卡 → 合并进来
  * 单位卡、技能卡里的流程会转成编辑器画布上的积木（位置按节点顺序自动排）。
  */
-function importContent(doc) {
-  if (doc && doc.kind === "caeworld-editor-project") {
+/** 文件名推导卡包 id（去掉扩展名） */
+function packIdFromFile(file) {
+  const raw = file && file.name ? String(file.name).replace(/\.[^.]+$/, "") : "";
+  return isValidPackId(raw) ? raw : "imported";
+}
+
+/** 按 id 替换或追加一张卡 */
+function upsertCard(list, card) {
+  const idx = list.findIndex((x) => x && x.id === card.id);
+  if (idx >= 0) list[idx] = card;
+  else list.push(card);
+}
+
+/** 导入卡包文件（工程 + 内容合并格式） */
+function importPackDoc(doc, file) {
+  const id = isValidPackId(doc.id) ? String(doc.id) : packIdFromFile(file);
+  const name = String(doc.name || id);
+  const meta = ensurePack(id, name);
+  meta.name = name;
+  if (doc.version !== undefined) meta.version = Math.max(1, Math.floor(Number(doc.version) || 1));
+  meta.author = String(doc.author || "");
+  meta.description = String(doc.description || "");
+
+  let n = 0;
+  for (const u of Array.isArray(doc.units) ? doc.units : []) {
+    if (!u || !u.id) continue;
+    const ch = unitCardToCharacter(u);
+    ch.pack = id;
+    ch.packName = name;
+    upsertCard(project.characters || (project.characters = []), ch);
+    n += 1;
+  }
+  for (const s of Array.isArray(doc.skills) ? doc.skills : []) {
+    if (!s || !s.id) continue;
+    const card = createSkill(s.id, s.name);
+    project.removedSkillIds = (project.removedSkillIds || []).filter((x) => x !== card.id);
+    card.type = s.type || "active";
+    card.description = s.description || "";
+    card.pack = id;
+    card.packName = name;
+    card.flow = flowFromContent(s.flow);
+    if (s.ui) card.ui = clone(s.ui);
+    upsertCard(project.skills || (project.skills = []), card);
+    n += 1;
+  }
+  for (const e of Array.isArray(doc.effects) ? doc.effects : []) {
+    if (!e || !e.id) continue;
+    const def = createEffect(e.id, e.name);
+    def.flags = Array.isArray(e.flags) ? e.flags.filter((x) => x !== "negative") : [];
+    def.polarity = effectPolarityOf(e);
+    def.stackable = Boolean(e.stackable);
+    def.maxStacks = Number.isFinite(Number(e.maxStacks)) ? Math.max(0, Math.floor(Number(e.maxStacks))) : 1;
+    def.description = e.description || "";
+    def.pack = id;
+    def.packName = name;
+    def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
+    def.autoConsume = Boolean(e.autoConsume);
+    def.triggers = (e.triggers || [])
+      .map((t) => ({
+        block: {
+          id: (t && (t.id || (t.block && t.block.id))) || "",
+          event: (t && (t.event || (t.block && t.block.event))) || "unitTurnStart",
+          unitScope: (t && (t.unitScope || (t.block && t.block.unitScope))) || "self",
+        },
+      }))
+      .filter((t) => t.block.id);
+    def.flows = {};
+    for (const t of def.triggers) def.flows[t.block.id] = flowFromContent((e.flows || {})[t.block.id]);
+    if (e.ui) def.ui = clone(e.ui);
+    upsertCard(project.effects || (project.effects = []), def);
+    n += 1;
+  }
+  active.packId = id;
+  markDirty();
+  normalizeProject(project);
+  renderAll();
+  switchTab("packs");
+  setStatus(`已导入卡包「${name}」：${n} 张卡`, "ok");
+}
+
+function importContent(doc, file) {
+  if (!doc || typeof doc !== "object") {
+    setStatus("不是有效的 JSON", "bad");
+    return;
+  }
+  if (doc.kind === PROJECT_KIND) {
     setProject(doc);
     markDirty();
-    setStatus("已导入编辑器工程", "ok");
+    setStatus("已导入工程（包含全部卡包）", "ok");
+    return;
+  }
+  if (doc.kind === PACK_KIND) {
+    importPackDoc(doc, file);
     return;
   }
   const units = doc.units || (doc.kind === "units" ? [doc] : []);
@@ -1586,19 +2571,30 @@ function importContent(doc) {
     setStatus("没识别出单位/技能/效果内容", "bad");
     return;
   }
+  // 旧内容包 / 单卡：统一归到一个卡包（优先用文件自带 pack，其次文件名）
+  const packId = isValidPackId(doc.pack) ? String(doc.pack) : packIdFromFile(file);
+  const packName = String(doc.packName || doc.modname || doc.name || packId);
+  ensurePack(packId, packName);
   let n = 0;
-  if (units.length) {
-    project.character = unitCardToCharacter(units[0]);
+  let importedCharacter = null;
+  for (const u of units) {
+    const ch = unitCardToCharacter(u);
+    ch.pack = packId;
+    ch.packName = packName;
+    upsertCard(project.characters || (project.characters = []), ch);
+    importedCharacter = ch;
     n += 1;
   }
   for (const s of skills) {
     const card = createSkill(s.id, s.name);
+    project.removedSkillIds = (project.removedSkillIds || []).filter((id) => id !== card.id);
     card.type = s.type || "active";
     card.description = s.description || "";
+    card.pack = packId;
+    card.packName = packName;
     card.flow = flowFromContent(s.flow);
-    const idx = (project.skills || []).findIndex((x) => x.id === card.id);
-    if (idx >= 0) project.skills[idx] = card;
-    else project.skills.push(card);
+    if (s.ui) card.ui = clone(s.ui);
+    upsertCard(project.skills || (project.skills = []), card);
     n += 1;
   }
   for (const e of effects) {
@@ -1608,23 +2604,31 @@ function importContent(doc) {
     def.stackable = Boolean(e.stackable);
     def.maxStacks = Number.isFinite(Number(e.maxStacks)) ? Math.max(0, Math.floor(Number(e.maxStacks))) : 1;
     def.description = e.description || "";
+    def.pack = packId;
+    def.packName = packName;
+    def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
+    def.autoConsume = Boolean(e.autoConsume);
     def.triggers = (e.triggers || []).map((t) => ({ block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" } }));
     def.flows = {};
     for (const t of def.triggers) def.flows[t.block.id] = flowFromContent((e.flows || {})[t.block.id]);
-    const idx = (project.effects || []).findIndex((x) => x.id === def.id);
-    if (idx >= 0) project.effects[idx] = def;
-    else project.effects.push(def);
+    if (e.ui) def.ui = clone(e.ui);
+    upsertCard(project.effects || (project.effects = []), def);
     n += 1;
   }
-  // 导入完就能直接进战斗：把新技能/效果挂到当前角色上
-  if (skills.length) project.character.skillIds = [...new Set([...(project.character.skillIds || []), ...skills.map((x) => x.id)])];
-  if (effects.length) project.character.effectIds = [...new Set([...(project.character.effectIds || []), ...effects.map((x) => x.id)])];
-  active.skill = project.skills[0] || null;
-  active.effect = project.effects[0] || null;
+  if (importedCharacter) active.character = importedCharacter;
+  // 导入完就能直接进战斗：把新技能挂到当前角色上（效果不挂载，只能在战斗中附加）
+  const mountTarget = currentCharacter() || (project.characters || [])[0];
+  if (mountTarget && skills.length) {
+    mountTarget.skillIds = [...new Set([...(mountTarget.skillIds || []), ...skills.map((x) => x.id)])];
+  }
+  active.skill = skills.length ? project.skills.find((s) => s.id === skills[0].id) || project.skills[0] || null : project.skills[0] || null;
+  active.effect = effects.length ? project.effects.find((e) => e.id === effects[0].id) || project.effects[0] || null : project.effects[0] || null;
   active.triggerId = null;
+  active.packId = packId;
   markDirty();
+  renderAll();
   switchTab(units.length ? "character" : skills.length ? "skills" : "effects");
-  setStatus(`已导入 ${n} 项内容（技能/效果已挂到当前角色）`, "ok");
+  setStatus(`已导入 ${n} 项内容到卡包「${packName}」（技能已挂到当前角色）`, "ok");
 }
 
 /** 引擎流程 → 画布流程（补上位置；没有位置的按网格排开） */
@@ -1647,7 +2651,7 @@ function readJsonFile(file, done) {
   const reader = new FileReader();
   reader.onload = () => {
     try {
-      done(JSON.parse(String(reader.result)));
+      done(JSON.parse(String(reader.result)), file);
     } catch (err) {
       setStatus("读取失败：" + err.message, "bad");
     }
@@ -1701,7 +2705,7 @@ function validateFlow() {
   return r.ok;
 }
 
-/** 下方两个 JSON：执行流程（当前流程）+ 存档（整个工程 + 生成的内容包） */
+/** 下方两个 JSON：执行流程（当前流程）+ 存档（当前卡包的卡包文件） */
 function renderJson() {
   const flowBox = $("#json-flow");
   if (flowBox) {
@@ -1710,21 +2714,8 @@ function renderJson() {
   }
   const saveBox = $("#json-save");
   if (saveBox) {
-    saveBox.textContent = JSON.stringify(
-      {
-        project: {
-          schema: project.schema,
-          kind: project.kind,
-          updatedAt: project.updatedAt,
-          character: project.character,
-          skills: project.skills,
-          effects: project.effects,
-        },
-        content: projectToContent(project),
-      },
-      null,
-      2
-    );
+    const packId = currentPackId();
+    saveBox.textContent = JSON.stringify(packFileOf(project, packId), null, 2);
   }
   validateFlow();
 }
@@ -1741,7 +2732,13 @@ function flushSaveSync() {
 }
 
 function setupForms() {
-  const ch = () => project.character;
+  const ch = () => {
+    const cur = currentCharacter();
+    if (cur) return cur;
+    if (!(project.characters || []).length) project.characters.push(createCharacter());
+    active.character = project.characters[0];
+    return active.character;
+  };
   const bind = (id, fn) => {
     const el = $("#" + id);
     if (!el) return;
@@ -1775,6 +2772,16 @@ function setupForms() {
   bind("f-occupy", (el) => (ch().occupiesSlot = el.checked));
   bind("f-count", (el) => (ch().countsAsUnit = el.checked));
   bind("f-invincible", (el) => (ch().invincible = el.checked));
+  $("#f-pack")?.addEventListener("change", (e) => {
+    const card = currentCharacter();
+    if (!card) return;
+    if (!moveCardToPack(card, e.target.value)) {
+      renderCharacter();
+      return;
+    }
+    markDirty();
+    renderAll();
+  });
 
   $("#f-image-file")?.addEventListener("change", (e) => {
     const file = e.target.files && e.target.files[0];
@@ -1808,27 +2815,41 @@ function setupForms() {
     markDirty();
     renderJson();
   });
-  $("#ed-mount-effects")?.addEventListener("change", (e) => {
-    const id = e.target.value;
-    const list = ch().effectIds || (ch().effectIds = []);
-    ch().effectIds = e.target.checked ? [...new Set([...list, id])] : list.filter((x) => x !== id);
-    markDirty();
-    renderJson();
+  // 顶部三个标签：角色 / 技能 / 效果。
+  $$(".ed-tab").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
 
-  // 顶部三个标签：角色 / 技能 / 效果。之前只改了 is-active 的样式，没接 switchTab，
-  // 结果点「设计技能」「设计效果」页面毫无反应（技能与效果共用一个面板，靠这段切左栏）。
-  $$(".ed-tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      // 切到技能 / 效果时，若当前没有选中项就落到第一张卡上，避免左栏空白
-      if (btn.dataset.tab === "skills" && !currentSkill() && project.skills[0]) active.skill = project.skills[0];
-      if (btn.dataset.tab === "effects" && !currentEffect() && project.effects[0]) active.effect = project.effects[0];
-      switchTab(btn.dataset.tab);
-    });
+  $("#btn-new-character")?.addEventListener("click", () => edit.newCharacter());
+  $("#ed-character-list")?.addEventListener("change", (e) => {
+    active.character = project.characters[Number(e.target.value)] || null;
+    renderAll();
+  });
+  $("#ed-character-pack")?.addEventListener("change", (e) => {
+    active.characterPack = e.target.value || PACK_ALL;
+    if (!active.character || !packMatch(active.character, active.characterPack)) {
+      active.character = (project.characters || []).find((c) => packMatch(c, active.characterPack)) || null;
+    }
+    renderAll();
   });
 
   $("#btn-new-skill")?.addEventListener("click", () => edit.newSkill());
   $("#btn-new-effect")?.addEventListener("click", () => edit.newEffect());
+  $("#ed-skill-pack")?.addEventListener("change", (e) => {
+    active.skillPack = e.target.value || PACK_ALL;
+    if (!active.skill || !packMatch(active.skill, active.skillPack)) {
+      active.skill = (project.skills || []).find((s) => packMatch(s, active.skillPack)) || null;
+    }
+    renderAll();
+  });
+  $("#ed-effect-pack")?.addEventListener("change", (e) => {
+    active.effectPack = e.target.value || PACK_ALL;
+    if (!active.effect || !packMatch(active.effect, active.effectPack)) {
+      active.effect = (project.effects || []).find((x) => packMatch(x, active.effectPack)) || null;
+      active.triggerId = null;
+    }
+    renderAll();
+  });
   $("#ed-skill-list")?.addEventListener("change", (e) => {
     active.skill = project.skills[Number(e.target.value)] || null;
     renderAll();
@@ -1847,8 +2868,11 @@ function setupForms() {
     const s = currentSkill();
     if (!s || !confirm(`删除技能「${s.name}」？`)) return;
     project.skills = project.skills.filter((x) => x !== s);
-    project.character.skillIds = (project.character.skillIds || []).filter((x) => x !== s.id);
-    active.skill = project.skills[0] || null;
+    project.removedSkillIds = [...new Set([...(project.removedSkillIds || []), s.id])];
+    for (const ch of project.characters || []) {
+      ch.skillIds = (ch.skillIds || []).filter((x) => x !== s.id);
+    }
+    active.skill = (project.skills || []).find((x) => packMatch(x, active.skillPack)) || null;
     canvasState.selectedId = null;
     markDirty();
     renderAll();
@@ -1876,13 +2900,32 @@ function setupForms() {
       active.triggerId = card.triggers[0] ? card.triggers[0].block.id : null;
       markDirty();
       renderAll();
+      return;
+    }
+    if (e.target.closest('[data-action="add-attrbonus"]')) {
+      edit.addAttrBonus();
+      return;
+    }
+    if (e.target.closest('[data-action="delete-attrbonus"]')) {
+      const btn = e.target.closest("[data-index]");
+      edit.removeAttrBonus(Number(btn && btn.dataset.index));
     }
   });
 
-  $("#btn-export")?.addEventListener("click", exportProject);
-  $("#btn-export-content")?.addEventListener("click", () => {
-    edit.exportContent();
-    setStatus(`已导出卡组文件（${PACK_FILES.units} / ${PACK_FILES.skills} / ${PACK_FILES.effects}）`, "ok");
+  $("#btn-export")?.addEventListener("click", openExportModal);
+  $("#btn-export-cancel")?.addEventListener("click", closeExportModal);
+  $("#btn-export-confirm")?.addEventListener("click", () => {
+    const sel = $("#ed-export-pack");
+    if (sel && sel.value) {
+      active.packId = sel.value;
+      renderPackPanel();
+      renderJson();
+      exportPack(sel.value);
+    }
+    closeExportModal();
+  });
+  $("#ed-export-modal")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeExportModal();
   });
   $("#btn-import")?.addEventListener("click", () => $("#import-file")?.click());
   const cardCol = $("#ed-card-preview");
@@ -1899,16 +2942,70 @@ function setupForms() {
     });
   }
   $("#import-file")?.addEventListener("change", importProject);
-  $("#import-content-file")?.addEventListener("change", (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (file) readJsonFile(file, importContent);
-    e.target.value = "";
-  });
   $("#btn-save")?.addEventListener("click", () => {
     clearTimeout(saveTimer);
     flushSave();
   });
-  $("#btn-copy-save")?.addEventListener("click", () => copyText(JSON.stringify(projectToContent(project), null, 2)));
+  $("#btn-copy-save")?.addEventListener("click", () => {
+    copyText(JSON.stringify(packFileOf(project, currentPackId()), null, 2));
+  });
+
+  // 卡包面板
+  $("#ed-pack-list")?.addEventListener("change", (e) => {
+    active.packId = e.target.value || null;
+    renderPackPanel();
+    renderJson();
+  });
+  $("#btn-new-pack")?.addEventListener("click", () => {
+    const id = newPackId();
+    const pack = createPack(id, `新卡包 ${id}`);
+    packsOfProject().push(pack);
+    active.packId = id;
+    markDirty();
+    renderAll();
+    setStatus(`已新建卡包「${pack.name}」`, "ok");
+  });
+  const onPackForm = (e) => onPackFormInput(e);
+  $("#ed-pack-form")?.addEventListener("input", onPackForm);
+  $("#ed-pack-form")?.addEventListener("change", onPackForm);
+  $("#ed-pack-form")?.addEventListener("click", (e) => {
+    if (e.target.closest('[data-action="apply-pack-id"]')) {
+      const meta = packEntry(active.packId);
+      const input = $("#ed-pack-form [data-pack-id-input]");
+      if (!meta || !input) return;
+      const res = renamePackId(meta.id, input.value);
+      if (!res.ok) {
+        setStatus(res.error || "修改包 ID 失败", "bad");
+        return;
+      }
+      markDirty();
+      renderAll();
+      setStatus(`已把包 ID 改为「${active.packId}」`, "ok");
+      return;
+    }
+    if (e.target.closest('[data-action="export-pack"]') && active.packId) {
+      exportPack(active.packId);
+    }
+  });
+  $("#ed-pack-cards")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-pack-card]");
+    if (!btn) return;
+    const [kind, ...rest] = String(btn.dataset.packCard).split(":");
+    const id = rest.join(":");
+    const card = allCards().find((c) => c.id === id);
+    if (!card) return;
+    if (kind === "unit") {
+      active.character = card;
+      switchTab("character");
+    } else if (kind === "skill") {
+      active.skill = card;
+      switchTab("skills");
+    } else {
+      active.effect = card;
+      active.triggerId = null;
+      switchTab("effects");
+    }
+  });
   $("#btn-copy-flow")?.addEventListener("click", () => copyText($("#json-flow")?.textContent || "{}"));
 
   setupSaveDock();

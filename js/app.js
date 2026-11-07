@@ -171,8 +171,10 @@ async function boot() {
   $("#loading-tip").textContent = tips[Math.floor(Math.random() * tips.length)] || "";
 
   initTabs(nav, (itemId) => {
+    if (itemId === "library") openLibrary();
     if (itemId === "editor") openEditor();
     if (itemId === "training") openTraining();
+    if (itemId === "mod-manager") openModManager();
   });
 
   $(".cw-tip-refresh")?.addEventListener("click", () => tip.refresh());
@@ -199,9 +201,11 @@ async function boot() {
       applyBanner($("#stage-picture"), picked);
       document.body.classList.remove("is-loading");
       document.title = "Cae'sWorld · 主菜单";
-      // 直接带 hash 打开（#training / #editor）也能进对应页面
+      // 直接带 hash 打开（#training / #editor / #library / #mods）也能进对应页面
       if (location.hash === "#training") openTraining();
       else if (location.hash === "#editor") openEditor();
+      else if (location.hash === "#library") openLibrary();
+      else if (location.hash === "#mods") openModManager();
     }, leaving);
   }, hold);
 
@@ -213,28 +217,92 @@ async function boot() {
 /* 编辑器                                                              */
 /* ------------------------------------------------------------------ */
 let editorLoaded = false;
+let editorModule = null;
+
+const SUBPAGE_SELECTORS = ["#editor-page", "#library-page", "#mod-page", "#training-page", "#battle-page"];
+
+/** 打开某个子页面前，先把其它子页面收起来（主菜单也隐藏） */
+function hideSubpages(except = null) {
+  for (const sel of SUBPAGE_SELECTORS) {
+    const el = $(sel);
+    if (el && el !== except) el.hidden = true;
+  }
+  const menu = $("#main-menu");
+  if (menu) menu.hidden = true;
+}
+
+/** 关闭子页面后，只有确实没有其它子页面时才回主菜单 */
+function showMenuIfNoSubpage() {
+  const anyOpen = SUBPAGE_SELECTORS.some((sel) => {
+    const el = $(sel);
+    return el && !el.hidden;
+  });
+  if (anyOpen) return;
+  const menu = $("#main-menu");
+  if (menu) menu.hidden = false;
+}
 
 async function openEditor() {
   const page = $("#editor-page");
-  const menu = $("#main-menu");
   if (!page) return;
+  hideSubpages(page);
   page.hidden = false;
-  if (menu) menu.hidden = true;
   location.hash = "#editor";
   if (!editorLoaded) {
-    const mod = await import("./editor-view.js");
-    await mod.initEditor();
+    editorModule = await import("./editor-view.js");
+    await editorModule.initEditor();
     editorLoaded = true;
+  } else {
+    // 模组可能刚被启用 / 停用：重新汇总一次卡包，但不重复绑定表单与画布
+    await editorModule?.refreshEditorPacks?.();
   }
 }
 
 function closeEditor() {
   const page = $("#editor-page");
-  const menu = $("#main-menu");
   if (!page || page.hidden) return;
   page.hidden = true;
-  if (menu) menu.hidden = false;
-  history.replaceState(null, "", location.pathname + location.search);
+  showMenuIfNoSubpage();
+}
+
+/* ------------------------------------------------------------------ */
+/* 卡牌库                                                              */
+/* ------------------------------------------------------------------ */
+async function openLibrary() {
+  const page = $("#library-page");
+  if (!page) return;
+  hideSubpages(page);
+  page.hidden = false;
+  location.hash = "#library";
+  const mod = await import("./library-view.js");
+  await mod.initLibrary();
+}
+
+function closeLibrary() {
+  const page = $("#library-page");
+  if (!page || page.hidden) return;
+  page.hidden = true;
+  showMenuIfNoSubpage();
+}
+
+/* ------------------------------------------------------------------ */
+/* 模组管理                                                            */
+/* ------------------------------------------------------------------ */
+async function openModManager() {
+  const page = $("#mod-page");
+  if (!page) return;
+  hideSubpages(page);
+  page.hidden = false;
+  location.hash = "#mods";
+  const mod = await import("./mod-view.js");
+  await mod.initModManager();
+}
+
+function closeModManager() {
+  const page = $("#mod-page");
+  if (!page || page.hidden) return;
+  page.hidden = true;
+  showMenuIfNoSubpage();
 }
 
 /* ------------------------------------------------------------------ */
@@ -242,10 +310,9 @@ function closeEditor() {
 /* ------------------------------------------------------------------ */
 async function openTraining() {
   const page = $("#training-page");
-  const menu = $("#main-menu");
   if (!page) return;
+  hideSubpages(page);
   page.hidden = false;
-  if (menu) menu.hidden = true;
   location.hash = "#training";
   const mod = await import("./training-view.js");
   await mod.initTraining();
@@ -259,13 +326,13 @@ function closeTraining() {
   if (page.hidden && !battleOpen) return;
   page.hidden = true;
   if (battle) battle.hidden = true;
-  const menu = $("#main-menu");
-  if (menu) menu.hidden = false;
-  history.replaceState(null, "", location.pathname + location.search);
+  showMenuIfNoSubpage();
 }
 
 window.addEventListener("hashchange", () => {
   if (location.hash !== "#editor") closeEditor();
+  if (location.hash !== "#library") closeLibrary();
+  if (location.hash !== "#mods") closeModManager();
   if (location.hash !== "#training") closeTraining();
 });
 

@@ -12,14 +12,13 @@
  * 不滚页面：.tw-stage 固定设计尺寸，JS 等比缩放 + 居中（见 training-stage.js）。
  */
 import {
-  loadPack,
   DEFAULT_PACK,
   ContentRegistry,
-  projectToRegistryInput,
   resolveImage,
   PLACEHOLDER_IMAGE,
   QUALITY_LABEL,
 } from "../engine/index.js";
+import { loadContentPacks } from "./mods.js";
 import { createStageScaler } from "./training-stage.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -38,7 +37,6 @@ const LIB_LABEL = { red: "牌库 1", blue: "牌库 2" };
 
 const PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
 const STORAGE_KEY = "caeworld:training:v1";
-const EDITOR_KEY = `caeworld:editor-project:${PACK}`;
 const MAX_DECK = 20;
 const MAX_FIELD = 8;
 
@@ -55,12 +53,23 @@ let hadStoredConfig = false;
 let firstLoad = true;
 
 let config = defaultConfig();
-let library = { pack: PACK, registry: null, units: [], byId: new Map(), errors: [], loaded: false };
+let library = {
+  pack: PACK,
+  packs: [],
+  registry: null,
+  units: [],
+  byId: new Map(),
+  errors: [],
+  loaded: false,
+};
+/** 两侧牌库的卡包筛选：all / default / 模组包 id / editor */
+const libPack = { red: "all", blue: "all" };
 
 const refs = {
   cols: null,
   libList: {},
   libCount: {},
+  libPack: {},
   filter: {},
   deckList: {},
   deckCount: {},
@@ -150,51 +159,20 @@ function makeDeckId() {
 /* ------------------------------------------------------------------ */
 async function loadLibrary() {
   const errors = [];
-  const merged = {
-    units: new Map(),
-    skills: new Map(),
-    effects: new Map(),
-  };
-  const put = (map, list) => {
-    for (const card of list || []) {
-      if (card && typeof card.id === "string" && card.id) map.set(card.id, card);
-    }
-  };
-
-  // 1) 内容包（data/pack/<卡组>/）
+  let content = null;
   try {
-    const pack = await loadPack(PACK);
-    if (pack) {
-      put(merged.units, pack.units);
-      put(merged.skills, pack.skills);
-      put(merged.effects, pack.effects);
-      if (pack.errors && pack.errors.length) errors.push(...pack.errors);
-    }
+    content = await loadContentPacks({ includeEditor: true });
+    errors.push(...(content.errors || []));
   } catch (err) {
-    errors.push(`内容包读取失败：${String(err.message || err)}`);
-  }
-
-  // 2) 编辑器本地工程（正在设计的角色 / 技能 / 效果也能直接拿来测）
-  try {
-    const raw = localStorage.getItem(EDITOR_KEY) || localStorage.getItem("caeworld:editor-project");
-    if (raw) {
-      const project = JSON.parse(raw);
-      if (project && project.kind === "caeworld-editor-project") {
-        const content = projectToRegistryInput(project);
-        put(merged.units, content.units);
-        put(merged.skills, content.skills);
-        put(merged.effects, content.effects);
-      }
-    }
-  } catch (err) {
-    errors.push(`编辑器工程读取失败：${String(err.message || err)}`);
+    errors.push(`牌库读取失败：${String((err && err.message) || err)}`);
+    content = { packs: [], units: [], skills: [], effects: [] };
   }
 
   const registry = new ContentRegistry();
   const res = registry.load({
-    units: [...merged.units.values()],
-    skills: [...merged.skills.values()],
-    effects: [...merged.effects.values()],
+    units: content.units || [],
+    skills: content.skills || [],
+    effects: content.effects || [],
   });
   if (!res.ok) {
     for (const fail of res.failed) errors.push(`${fail.kind} ${fail.id || "(无 id)"} 未载入：${fail.errors.join("；")}`);
@@ -202,7 +180,15 @@ async function loadLibrary() {
 
   const units = [...registry.units.values()].map((card) => ({ card }));
   const byId = new Map(units.map((u) => [u.card.id, u]));
-  library = { pack: PACK, registry, units, byId, errors, loaded: true };
+  library = {
+    pack: PACK,
+    packs: content.packs || [],
+    registry,
+    units,
+    byId,
+    errors,
+    loaded: true,
+  };
 }
 
 /** 过滤掉已不存在于牌库里的单位（删卡 / 换卡组后） */
@@ -301,6 +287,7 @@ function cacheRefs() {
   for (const side of SIDES) {
     refs.libList[side] = $(`[data-lib-list="${side}"]`);
     refs.libCount[side] = $(`[data-lib-count="${side}"]`);
+    refs.libPack[side] = $(`[data-lib-pack="${side}"]`);
     refs.filter[side] = $(`[data-lib-filter="${side}"]`);
     refs.deckList[side] = $(`[data-deck-list="${side}"]`);
     refs.deckCount[side] = $(`[data-deck-count="${side}"]`);
@@ -328,6 +315,7 @@ function libPanel(side) {
     </header>
     <div class="tlib-filter">
       <input type="search" data-lib-filter="${side}" placeholder="筛选单位…" autocomplete="off" />
+      <select data-lib-pack="${side}" title="按默认包 / 模组包筛选"></select>
     </div>
     <div class="tlib-list" data-lib-list="${side}"></div>
   </section>`;
@@ -360,6 +348,7 @@ function deckPanel(side) {
 /* ------------------------------------------------------------------ */
 function renderAll() {
   if (!library.loaded) return;
+  renderPackFilters();
   for (const side of SIDES) {
     renderLibrary(side);
     renderDeck(side);
@@ -368,6 +357,32 @@ function renderAll() {
   syncSettings();
   renderStartHint();
   refreshAdaptive();
+}
+
+function libraryPackOptions() {
+  const map = new Map();
+  for (const { card } of library.units) {
+    const id = card.pack || "default";
+    if (!map.has(id)) map.set(id, card.packName || (id === "default" ? "默认包" : id));
+  }
+  return [...map.entries()]
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+}
+
+function renderPackFilters() {
+  const opts = libraryPackOptions();
+  for (const side of SIDES) {
+    const el = refs.libPack[side];
+    if (!el) continue;
+    if (libPack[side] !== "all" && !opts.some((p) => p.id === libPack[side])) libPack[side] = "all";
+    el.innerHTML =
+      `<option value="all">全部卡包</option>` +
+      opts
+        .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`)
+        .join("");
+    el.value = libPack[side];
+  }
 }
 
 function countMap(side) {
@@ -380,8 +395,10 @@ function renderLibrary(side) {
   const list = refs.libList[side];
   if (!list) return;
   const needle = (refs.filter[side]?.value || "").trim().toLowerCase();
+  const packFilter = libPack[side] || "all";
   const counts = countMap(side);
   const items = library.units.filter(({ card }) => {
+    if (packFilter !== "all" && (card.pack || "default") !== packFilter) return false;
     if (!needle) return true;
     return `${card.name} ${card.id}`.toLowerCase().includes(needle);
   });
@@ -567,6 +584,10 @@ function bindEvents() {
   // 牌库筛选
   for (const side of SIDES) {
     refs.filter[side]?.addEventListener("input", () => renderLibrary(side));
+    refs.libPack[side]?.addEventListener("change", (e) => {
+      libPack[side] = e.target.value || "all";
+      renderLibrary(side);
+    });
   }
 
   // 面板内所有按钮（牌库加入 / 卡组增删移 / 卡组保存切换删除）

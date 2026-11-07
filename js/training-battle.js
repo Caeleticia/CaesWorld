@@ -609,7 +609,8 @@ export function openBattle({ registry, config, onExit }) {
   /* ---------------- 数据面板 ---------------- */
   function effectDesc(def) {
     if (!def) return "（效果不存在）";
-    return def.description || "（这个效果还没有填写描述）";
+    const auto = def.autoConsume ? "（自动消耗：持有者行动、流程触发后减 1 层）" : "";
+    return (def.description || "（这个效果还没有填写描述）") + auto;
   }
 
   function buffDesc(buff) {
@@ -627,7 +628,6 @@ export function openBattle({ registry, config, onExit }) {
       resistDownPct: "抗性降低",
       damageTakenPct: "受到伤害提升",
       vulnPct: "易伤",
-      defReducePct: "防御减免",
       atkMul: "攻击力倍率",
       defMul: "防御力倍率",
       hpMul: "生命值倍率",
@@ -697,18 +697,6 @@ export function openBattle({ registry, config, onExit }) {
         tag: "增益",
       });
     }
-    for (const eid of card.effects || []) {
-      const def = s.registry.getEffect(eid);
-      if (!def) continue;
-      effects.push({
-        name: def.name,
-        stacks: null,
-        desc: effectDesc(def),
-        polarity: effectPolarityOf(def),
-        tag: "常驻",
-      });
-    }
-
     const resist = stats.resistances || {};
     const skills = s.battle.allSkillsOf(unit);
 
