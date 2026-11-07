@@ -221,7 +221,7 @@
   <main id="training-page" class="tw-page" hidden>
     <div class="tw-stage" id="training-stage">
       <header class="tw-topbar">
-        <a class="btn small" id="training-back" href="#menu">← 返回</a>
+        <button class="btn small" id="training-back" type="button">← 返回</button>
         <div class="tw-title">测试 · 训练场 <span class="tw-sub" id="training-pack"></span></div>
         <div class="tw-top-right"><span class="tw-hint" id="training-hint"></span></div>
       </header>
@@ -240,12 +240,12 @@
       <footer class="tcfg-settings">
         <div class="tset-grid">
           <label class="tset"><span>场上最多单位</span>
-            <input id="set-max-units" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" />
+            <input id="set-max-units" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" aria-label="场上最多单位数" />
           </label>
-          <label class="tset"><input id="set-red-inv" type="checkbox" /><span>红方无敌</span></label>
-          <label class="tset"><input id="set-blue-inv" type="checkbox" /><span>蓝方无敌</span></label>
-          <label class="tset"><input id="set-red-ai" type="checkbox" /><span>人机红方</span></label>
-          <label class="tset"><input id="set-blue-ai" type="checkbox" checked /><span>人机蓝方</span></label>
+          <label class="tset"><input id="set-red-inv" type="checkbox" aria-label="红方无敌" /><span>红方无敌</span></label>
+          <label class="tset"><input id="set-blue-inv" type="checkbox" aria-label="蓝方无敌" /><span>蓝方无敌</span></label>
+          <label class="tset"><input id="set-red-ai" type="checkbox" aria-label="人机红方" /><span>人机红方</span></label>
+          <label class="tset"><input id="set-blue-ai" type="checkbox" checked aria-label="人机蓝方" /><span>人机蓝方</span></label>
         </div>
         <div class="tstart">
           <p class="tstart-hint" id="tstart-hint"></p>
@@ -310,24 +310,7 @@
     </div>
   </main>
 
-  <script>
-/* TEMP DEBUG */
-(function () {
-  const show = (msg) => {
-    let el = document.getElementById('tmp-err');
-    if (!el) {
-      el = document.createElement('pre');
-      el.id = 'tmp-err';
-      el.style.cssText = 'position:fixed;z-index:9999;left:0;top:0;margin:0;padding:4px;background:#fff;color:#c00;font:11px monospace;white-space:pre-wrap;max-width:100%;';
-      document.body.appendChild(el);
-    }
-    el.textContent += msg + '\n';
-  };
-  window.addEventListener('error', (e) => show('ERR ' + e.message + ' @ ' + (e.filename || '') + ':' + e.lineno));
-  window.addEventListener('unhandledrejection', (e) => show('REJ ' + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason)));
-  window.__tmpShow = show;
-})();
-</script>
+  
 <script type="module" src="js/app.js"></script>
 </body>
 </html>
