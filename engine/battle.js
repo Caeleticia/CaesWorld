@@ -161,6 +161,8 @@ export function createBattle(setup) {
   const events = [];
   let muted = false;
   let triggerDepth = 0;
+  /** 退场处理嵌套深度：所有退场触发跑完后再做一次战斗结算 */
+  let exitDepth = 0;
   let summonSeq = 0;
   let lastEndedAction = null;
   let pendingPick = null;
@@ -551,7 +553,15 @@ export function createBattle(setup) {
     const globalEvent = eventType === "turnStart" || eventType === "turnEnd";
     const candidates = [];
     const seen = new Set();
-    for (const u of livingUnits()) {
+    // 退场事件的目标已经不在 livingUnits() 里，但它的「退场时」触发仍然要执行；
+    // 否则最后一个单位退场时，召唤 / 复活类效果会先被战斗结算跳过。
+    const triggerUnits = livingUnits().slice();
+    if (eventType === "unitExit") {
+      for (const t of targets) {
+        if (t && !triggerUnits.includes(t)) triggerUnits.push(t);
+      }
+    }
+    for (const u of triggerUnits) {
       // 效果卡（卡面成员 + 已附加效果）与被动技能的触发流程共用同一套广播
       const sources = [
         ...activeEffectsOf(u).map((effect) => ({ effect, key: effect.id })),
@@ -579,7 +589,9 @@ export function createBattle(setup) {
     triggerDepth += 1;
     try {
       for (const { unit, effect } of candidates) {
-        if (!isAlive(unit)) continue;
+        // unitExit 允许刚退场的单位执行自己的退场触发
+        const exitingOwner = eventType === "unitExit" && unit.exited;
+        if (!isAlive(unit) && !exitingOwner) continue;
         const flows = effect.flows || {};
         const sameEvent = (ev) =>
           ev === eventType ||
@@ -600,6 +612,15 @@ export function createBattle(setup) {
           }
           // 触发流程在「该效果所在单位」的策略下执行；流程里的「自己」= 该单位
           const env = flowEnv(unit, effect, frame);
+          // 同一张卡可能有多个触发，每个触发可以单独选「自己」指谁
+          const triggerNode = prepared.nodes.get(block.id);
+          const scope = triggerNode && triggerNode.options && triggerNode.options.unitScope;
+          if (scope === "target") {
+            const target = frame.targets.find((t) => t && t.key === unit.key) || frame.targets[0];
+            if (target) env.self = target;
+          } else if (scope === "self") {
+            env.self = unit;
+          }
           try {
             runFlow(prepared, env, { triggerNode: prepared.nodes.has(block.id) ? block.id : undefined });
           } catch (err) {
@@ -901,14 +922,21 @@ export function createBattle(setup) {
     if (cause !== EXIT_CAUSE.DEATH && cause !== EXIT_CAUSE.PARENT) {
       log(BATTLE_EVENT.EXIT, { unit: u.uid, cause });
     }
-    const children = livingUnits().filter((c) => c.parentKey === u.key);
-    for (const c of children) {
-      c.state = UNIT_STATES[2];
-      c.hp = 0;
-      exitUnit(c, EXIT_CAUSE.PARENT);
+    exitDepth += 1;
+    try {
+      const children = livingUnits().filter((c) => c.parentKey === u.key);
+      for (const c of children) {
+        c.state = UNIT_STATES[2];
+        c.hp = 0;
+        exitUnit(c, EXIT_CAUSE.PARENT);
+      }
+      emit("unitExit", [u]);
+    } finally {
+      exitDepth -= 1;
     }
-    emit("unitExit", [u]);
-    checkEnd();
+    // 退场触发（包括嵌套退场）全部跑完后再结算，避免最后一个单位的
+    // 召唤 / 复活被 checkEnd 抢先判负。
+    if (exitDepth === 0) checkEnd();
   }
 
   function forceExit(u, extra = {}) {
@@ -1321,23 +1349,32 @@ export function createBattle(setup) {
           log(BATTLE_EVENT.FLOW_ERROR, { owner: A.uid, skillId: skill.id, errors: prepared.errors });
           return skill;
         }
-        // 技能流程：触发积木的「自己」默认指施放者，可选「触发的单位」
-        const triggerNode = [...prepared.nodes.values()].find((n) => n.type === "trigger");
-        const scope = triggerNode ? triggerNode.options.unitScope : "self";
-        const env = flowEnv(A, null);
-        if (scope === "target") {
-          const cur = prevSkillTargets[0];
-          if (cur) env.self = cur;
-        }
+        // 技能流程里可能有多个「触发」；释放技能时执行所有 skillCastSelf 触发，
+        // 每个触发只跑它自己后面的内容。没有 cast 触发时兼容旧流程，跑第一个触发。
+        const triggers = [...prepared.nodes.values()].filter((n) => n.type === "trigger");
+        const castTriggers = triggers.filter(
+          (n) => n.options && (n.options.event === "skillCastSelf" || n.options.event === "skillCast")
+        );
+        const startTriggers = castTriggers.length ? castTriggers : triggers.slice(0, 1);
+
         // 没有指定目标时，技能默认把最近的敌方单位作为「当前目标」（与数据式技能一致）
         if (!prevSkillTargets.length) {
           const autoTarget = selectTarget(state.units, otherSide(A.side));
           if (autoTarget) prevSkillTargets = [autoTarget];
         }
-        try {
-          runFlow(prepared, env);
-        } catch (err) {
-          log(BATTLE_EVENT.FLOW_ERROR, { owner: A.uid, skillId: skill.id, reason: String((err && err.message) || err) });
+        for (const trigger of startTriggers) {
+          const env = flowEnv(A, null);
+          // 每个触发可以单独选「自己」指谁
+          if (trigger.options && trigger.options.unitScope === "target") {
+            const cur = prevSkillTargets[0];
+            if (cur) env.self = cur;
+          }
+          try {
+            runFlow(prepared, env, { triggerNode: trigger.id });
+          } catch (err) {
+            log(BATTLE_EVENT.FLOW_ERROR, { owner: A.uid, skillId: skill.id, reason: String((err && err.message) || err) });
+          }
+          if (state.status !== "running" || !isAlive(A)) break;
         }
         return skill;
       }
