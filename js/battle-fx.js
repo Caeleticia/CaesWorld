@@ -59,7 +59,8 @@ function colorOf(spec) {
 
 function attrPair(spec) {
   if (typeof spec === "string" && ATTRIBUTE_INFO[spec]) {
-    return { upper: ATTRIBUTE_INFO[spec].upper, lower: ATTRIBUTE_INFO[spec].lower };
+    // ATTRIBUTE_INFO 里是不带 # 的十六进制，canvas 需要 #rrggbb
+    return { upper: `#${ATTRIBUTE_INFO[spec].upper}`, lower: `#${ATTRIBUTE_INFO[spec].lower}` };
   }
   if (typeof spec === "string" && spec.startsWith("#")) {
     const c = hexToHsl(spec);
@@ -113,6 +114,16 @@ export class BattleFX {
   }
 
   clear() {
+    for (const b of this.bullets) {
+      if (b.settled) continue;
+      b.settled = true;
+      if (b.timer) clearTimeout(b.timer);
+      try {
+        b.resolve();
+      } catch {
+        /* ignore */
+      }
+    }
     this.bullets.length = 0;
     this.particles.length = 0;
     this.texts.length = 0;
@@ -134,15 +145,22 @@ export class BattleFX {
     if (this.raf || this.destroyed) return;
     this.last = 0;
     const tick = (ts) => {
+      this.raf = 0;
       if (this.destroyed) return;
       const dt = this.last ? clamp((ts - this.last) / 1000, 0, 0.05) : 0.016;
       this.last = ts;
-      this._update(dt);
-      this._draw();
+      try {
+        this._update(dt);
+        this._draw();
+      } catch (err) {
+        // 表现层异常不能把战斗流程卡死：清空本帧、等下次重新起循环
+        console.warn("[训练场] 特效绘制出错", err);
+        this.clear();
+        return;
+      }
       if (this.bullets.length || this.particles.length || this.texts.length || this.auras.length) {
         this.raf = requestAnimationFrame(tick);
       } else {
-        this.raf = 0;
         this.ctx.clearRect(0, 0, this.w, this.h);
       }
     };
@@ -241,6 +259,11 @@ export class BattleFX {
         resolve();
         return;
       }
+      // 后台标签页不跑动画（rAF 会被暂停），直接结算，别把战斗流程卡住
+      if (this.hidden) {
+        resolve();
+        return;
+      }
       const a = centerOf(from);
       const b = centerOf(to);
       let dx = b.x - a.x;
@@ -273,9 +296,18 @@ export class BattleFX {
         color,
         size: 7,
         trailTimer: 0,
+        settled: false,
         resolve,
         onHit: opts.onHit || null,
+        timer: 0,
       };
+      // 兜底：即使动画循环被意外中断，也不能让战斗流程永远等下去
+      bullet.timer = setTimeout(() => {
+        if (bullet.settled) return;
+        bullet.settled = true;
+        this.bullets = this.bullets.filter((b) => b !== bullet);
+        resolve();
+      }, tHit * 1000 + 1200);
       this.bullets.push(bullet);
       this._ensureLoop();
     });
@@ -313,6 +345,9 @@ export class BattleFX {
   }
 
   _hit(b) {
+    if (b.settled) return;
+    b.settled = true;
+    if (b.timer) clearTimeout(b.timer);
     const color = b.color;
     this._spawnExplosion(b.x, b.y, color, { count: 15, power: 1 });
     if (typeof b.onHit === "function") {
@@ -344,7 +379,7 @@ export class BattleFX {
 
   /* ---------------- 爆炸 / 光环 ---------------- */
   explode(rectOrPoint, opts = {}) {
-    if (this.destroyed) return;
+    if (this.destroyed || this.hidden) return;
     const p = "x" in rectOrPoint ? centerOf(rectOrPoint) : rectOrPoint;
     const color = colorOf(opts.color || opts.attribute);
     this._spawnExplosion(p.x, p.y, color, {
@@ -405,7 +440,7 @@ export class BattleFX {
    * @param {{attribute?:string,color?:string,kind?:string,size?:number}} [opts]
    */
   aura(rect, opts = {}) {
-    if (this.destroyed) return;
+    if (this.destroyed || this.hidden) return;
     const c =
       opts.kind === "heal"
         ? colorOf(opts.color || "#59C98A")
@@ -490,7 +525,7 @@ export class BattleFX {
    * @param {{attribute?:string,color?:string,kind?:string,crit?:boolean,size?:number,life?:number}} [opts]
    */
   floatText(at, text, opts = {}) {
-    if (this.destroyed) return;
+    if (this.destroyed || this.hidden) return;
     const p = "x" in at && "y" in at ? { x: at.x + (at.w || 0) / 2, y: at.y + (at.h || 0) * 0.36 } : at;
     const pair = attrPair(opts.color || opts.attribute);
     const kind = opts.kind || "damage";
@@ -548,6 +583,11 @@ export class BattleFX {
     }
     ctx.restore();
     ctx.globalAlpha = 1;
+  }
+
+  /** 页面在后台：不跑 rAF，也不阻塞战斗 */
+  get hidden() {
+    return typeof document !== "undefined" && document.hidden;
   }
 
   /** 画面上还有一个飞弹/跳字/粒子（给外部判断节奏用） */

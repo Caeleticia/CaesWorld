@@ -19,7 +19,9 @@ import {
   createBattle,
   BATTLE_MODE,
   ATTRIBUTE_INFO,
+  EFFECT_POLARITY_LABEL,
   QUALITY_LABEL,
+  effectPolarityOf,
   resolveImage,
   PLACEHOLDER_IMAGE,
 } from "../engine/index.js";
@@ -47,6 +49,7 @@ const sideKey = (side) => (side === "ally" ? "red" : "blue");
 
 /** 当前打开的战斗会话（同一时间只有一个） */
 let current = null;
+
 
 /**
  * 打开训练对战。
@@ -76,6 +79,8 @@ export function openBattle({ registry, config, onExit }) {
     destroyed: false,
     busy: true,
     pending: null,
+    /** 玩家本次技能选中的目标：供「选择单位」积木优先采用 */
+    preferredTargets: [],
     timers: new Set(),
     sleepers: new Map(),
     displayHp: new Map(),
@@ -131,6 +136,8 @@ export function openBattle({ registry, config, onExit }) {
     const d = STAGE_DESIGN[s.scaler?.orient || "landscape"];
     const ratio = (window.devicePixelRatio || 1) * (s.scaler?.scale || 1);
     s.fx?.resize(d.w, d.h, ratio);
+    // 转屏后卡牌可用空间变了，重新算格子与卡宽（否则 --card-w 还是旧方向的）
+    if (s.battle && !s.destroyed) syncUnits();
   });
   const design = STAGE_DESIGN[s.scaler.orient];
   s.fx = new BattleFX(refs.canvas);
@@ -153,7 +160,14 @@ export function openBattle({ registry, config, onExit }) {
         ...(config.redInvincible ? ["ally"] : []),
         ...(config.blueInvincible ? ["enemy"] : []),
       ],
-      chooseTargets: ({ candidates }) => (candidates && candidates.length ? candidates[0] : null),
+      chooseTargets: ({ candidates, multiple }) => {
+        const list = candidates || [];
+        if (!list.length) return null;
+        // 玩家手动选过的目标优先；其余情况才回落到第一个候选
+        const preferred = (s.preferredTargets || []).filter((uid) => list.some((c) => c.uid === uid));
+        const picked = preferred.length ? preferred : list;
+        return multiple ? picked : picked[0];
+      },
       onEvent: (ev) => {
         if (s.capture) s.capture.push(ev);
       },
@@ -276,10 +290,13 @@ export function openBattle({ registry, config, onExit }) {
     wrap.className = "tbt-unit";
     wrap.dataset.uid = pub.uid;
     wrap.dataset.side = pub.side;
+    const hasArt = Boolean(card.image);
     wrap.innerHTML = `
-      <button class="tbt-card" type="button" data-uid="${escapeHtml(pub.uid)}" data-quality="${escapeHtml(card.quality || "white")}">
+      <button class="tbt-card" type="button" data-uid="${escapeHtml(pub.uid)}" data-quality="${escapeHtml(card.quality || "white")}"
+              data-no-art="${hasArt ? "0" : "1"}">
         <img class="tbt-card-img" src="${resolveImage(card.image)}" alt="" draggable="false"
              onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
+        <span class="tbt-card-monogram" aria-hidden="true">${escapeHtml(firstChar(pub.name))}</span>
         <span class="tbt-card-shade"></span>
         <span class="tbt-card-name"></span>
         <span class="tbt-card-lv"></span>
@@ -287,7 +304,7 @@ export function openBattle({ registry, config, onExit }) {
         <span class="tbt-card-hpbar"><i></i></span>
         <span class="tbt-card-hptext"></span>
       </button>
-      <div class="tbt-status"></div>`;
+      <div class="tbt-statuses"></div>`;
     return wrap;
   };
 
@@ -332,10 +349,11 @@ export function openBattle({ registry, config, onExit }) {
 
     // 卡面外状态 / 效果图标
     const statuses = statusesOf(unit);
-    const sig = statuses.map((x) => x.key).join("|");
+    // 签名要带上层数 / 剩余次数，否则叠加后图标标题不刷新
+    const sig = statuses.map((x) => `${x.key}:${x.title}`).join("|");
     if (s.statusSig.get(pub.uid) !== sig) {
       s.statusSig.set(pub.uid, sig);
-      const box = wrap.querySelector(".tbt-status");
+      const box = wrap.querySelector(".tbt-statuses");
       if (box) {
         box.innerHTML = statuses
           .slice(0, 5)
@@ -361,12 +379,12 @@ export function openBattle({ registry, config, onExit }) {
     if (invincible) out.push({ key: "inv", glyph: "无", cls: "is-invincible", title: "无敌" });
     for (const layer of unit.effects || []) {
       const def = s.registry.getEffect(layer.id);
-      const negative = Boolean(def?.flags?.includes("negative"));
+      const polarity = effectPolarityOf(def);
       out.push({
         key: `e:${layer.id}`,
         glyph: firstChar(def?.name || layer.id),
-        cls: negative ? "is-bad" : "is-good",
-        title: `${def?.name || layer.id} ${layer.stacks} 层`,
+        cls: polarity === "negative" ? "is-bad" : polarity === "special" ? "is-special" : "is-good",
+        title: `${def?.name || layer.id}${def?.stackable ? ` ${layer.stacks} 层` : ""} · ${EFFECT_POLARITY_LABEL[polarity]}`,
       });
     }
     for (const buff of unit.buffs || []) {
@@ -479,10 +497,9 @@ export function openBattle({ registry, config, onExit }) {
     const active = activeUnit();
     let statusText = "战斗结束";
     if (pb.status === "running") {
-      if (pb.phase === "select") statusText = `${sideName(side)}行动 · 选单位`;
+      if (pb.phase === "select") statusText = `${sideName(side)}行动`;
       else if (pb.phase === "act") statusText = `${active ? active.name : sideName(side)} 行动中`;
       else statusText = "战斗结束";
-      if (!isHumanSide(side)) statusText += "（人机）";
     }
     if (refs.status) {
       refs.status.textContent = statusText;
@@ -564,25 +581,23 @@ export function openBattle({ registry, config, onExit }) {
         sk.type === "active"
           ? `<button class="tbt-skill ${s.pending?.index === i ? "is-targeting" : ""}" type="button" data-skill="${i}">
                <b>${escapeHtml(sk.name)}</b>
-               <span>${sk.requiresTarget ? "需要选择目标" : "自动选择目标"}</span>
+               <span>手动选择目标</span>
              </button>`
           : ""
       )
       .join("");
     const targetTip = s.pending
-      ? `<div class="tbt-act-hint"><b>选择目标</b> · 点击一个${sideName(
+      ? `<div class="tbt-act-hint"><b>选择目标</b> · 点击${sideName(
           active.side === "ally" ? "enemy" : "ally"
-        )}单位；<button class="btn tiny" type="button" data-cancel>取消</button></div>`
-      : `<div class="tbt-act-hint"><b>${escapeHtml(active.name)}</b> 行动 · 选择一个技能，或结束行动</div>`;
+        )}单位 <button class="btn tiny" type="button" data-cancel>取消</button></div>`
+      : `<div class="tbt-act-hint">选择一个技能，或结束行动</div>`;
     el.innerHTML = `
       <div class="tbt-act-head">
         <img class="tbt-act-portrait" src="${resolveImage(card.image)}" alt="" draggable="false"
              onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
         <span class="tbt-act-name">
           <b>${escapeHtml(active.name)}</b>
-          <span>HP ${Math.ceil(active.hp)} / ${Math.ceil(s.battle.statsOf(active).hp)} · 攻击 ${fmt(
-            s.battle.statsOf(active).atk
-          )}</span>
+          <span>HP ${Math.ceil(active.hp)} / ${Math.ceil(s.battle.statsOf(active).hp)}</span>
         </span>
         <button class="btn tiny" type="button" data-info="${escapeHtml(active.uid)}">数据</button>
       </div>
@@ -667,9 +682,9 @@ export function openBattle({ registry, config, onExit }) {
       const def = s.registry.getEffect(layer.id);
       effects.push({
         name: def?.name || layer.id,
-        stacks: layer.stacks,
+        stacks: def?.stackable ? layer.stacks : null,
         desc: effectDesc(def),
-        negative: Boolean(def?.flags?.includes("negative")),
+        polarity: effectPolarityOf(def),
         tag: layer.inheritedFrom ? "继承" : "",
       });
     }
@@ -678,7 +693,7 @@ export function openBattle({ registry, config, onExit }) {
         name: buff.label,
         stacks: null,
         desc: buffDesc(buff),
-        negative: false,
+        polarity: null,
         tag: "增益",
       });
     }
@@ -689,7 +704,7 @@ export function openBattle({ registry, config, onExit }) {
         name: def.name,
         stacks: null,
         desc: effectDesc(def),
-        negative: Boolean(def?.flags?.includes("negative")),
+        polarity: effectPolarityOf(def),
         tag: "常驻",
       });
     }
@@ -736,8 +751,14 @@ export function openBattle({ registry, config, onExit }) {
                   <div class="tbd-eff-head">
                     <span>${escapeHtml(eff.name)}</span>
                     ${eff.stacks ? `<em>${eff.stacks} 层</em>` : ""}
-                    ${eff.tag ? `<em class="${eff.negative ? "neg" : ""}">${escapeHtml(eff.tag)}</em>` : ""}
-                    ${eff.negative && !eff.tag ? `<em class="neg">负面</em>` : ""}
+                    ${
+                      eff.polarity
+                        ? `<em class="${
+                            eff.polarity === "negative" ? "neg" : eff.polarity === "special" ? "special" : "pos"
+                          }">${EFFECT_POLARITY_LABEL[eff.polarity]}</em>`
+                        : ""
+                    }
+                    ${eff.tag ? `<em>${escapeHtml(eff.tag)}</em>` : ""}
                   </div>
                   <p>${escapeHtml(eff.desc)}</p>
                 </div>`
@@ -809,9 +830,10 @@ export function openBattle({ registry, config, onExit }) {
     setDisplayHp(ev.target, ev.hpAfter);
     const cls = sideKey(target.side) === "red" ? "is-red" : "is-blue";
     const amount = ev.finalDamage > 0 ? fmt(ev.finalDamage) : "免疫";
+    const from = attacker ? `[${attacker.side === "ally" ? "红" : "蓝"}]${attacker.name}` : "?";
     addLog(
-      `${attacker ? attacker.name : "?"} → ${target.name}  ${amount}${ev.crit ? "（暴击）" : ""}${
-        ev.isTrueDamage ? " · 本源" : ` · ${attrName(ev.attribute)}`
+      `${from} → [${target.side === "ally" ? "红" : "蓝"}]${target.name}  ${amount}${ev.crit ? "（暴击）" : ""}${
+        ev.isAdditionalDamage ? " · 附加" : ev.isTrueDamage ? " · 本源" : ` · ${attrName(ev.attribute)}`
       }`,
       cls
     );
@@ -901,7 +923,10 @@ export function openBattle({ registry, config, onExit }) {
           const def = s.registry.getEffect(ev.effect);
           const rect = rectOf(ev.unit);
           if (rect) s.fx.aura(rect, { kind: "buff" });
-          if (unit) addLog(`${unit.name} 叠加「${def?.name || ev.effect}」×${ev.stacks}`, "is-sys");
+          if (unit) {
+            const label = def?.name || ev.effect;
+            addLog(def?.stackable ? `${unit.name} 叠加「${label}」×${ev.stacks}` : `${unit.name} 获得「${label}」`, "is-sys");
+          }
           syncUnits();
           await sleep(120);
           break;
@@ -943,7 +968,11 @@ export function openBattle({ registry, config, onExit }) {
           addLog(`流程提示：${msg}`, "is-sys");
           break;
         }
-        case "turn:start":
+        case "turn:start": {
+          updateHeader();
+          refreshAll();
+          break;
+        }
         case "turn:end":
         case "round:end":
         case "attack":
@@ -980,6 +1009,8 @@ export function openBattle({ registry, config, onExit }) {
     if (s.busy || s.destroyed) return;
     s.pending = null;
     s.busy = true;
+    // 玩家点选的目标同时交给「选择单位」积木优先采用
+    s.preferredTargets = targetUid ? [targetUid] : [];
     refreshAll();
     let events = [];
     try {
@@ -989,10 +1020,12 @@ export function openBattle({ registry, config, onExit }) {
     } catch (err) {
       console.warn("[训练场] 使用技能失败", err);
       addLog(`技能使用失败：${String(err.message || err)}`, "is-sys");
+      s.preferredTargets = [];
       s.busy = false;
       refreshAll();
       return;
     }
+    s.preferredTargets = [];
     await playEvents(events);
     if (s.destroyed) return;
     if (s.battle.state.status === "running") {
@@ -1196,14 +1229,10 @@ export function openBattle({ registry, config, onExit }) {
     if (!active) return;
     const skill = s.battle.allSkillsOf(active)[index];
     if (!skill) return;
-    if (!skill.requiresTarget) {
-      executeSkill(index, null);
-      return;
-    }
+    // 非人机单位：即使只有一个敌人，也由玩家手动点选目标
     const enemies = s.battle.publicBattle().units.filter((u) => u.side !== active.side && u.state === "alive");
-    if (!enemies.length) return;
-    if (enemies.length === 1) {
-      executeSkill(index, enemies[0].uid);
+    if (!enemies.length) {
+      executeSkill(index, null);
       return;
     }
     s.pending = { index };

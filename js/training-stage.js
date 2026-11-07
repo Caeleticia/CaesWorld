@@ -12,7 +12,7 @@
 
 export const STAGE_DESIGN = Object.freeze({
   landscape: Object.freeze({ w: 960, h: 470 }),
-  portrait: Object.freeze({ w: 430, h: 860 }),
+  portrait: Object.freeze({ w: 430, h: 900 }),
 });
 
 /** 当前该用横屏还是竖屏布局：宽 >= 高 就是横屏 */
@@ -51,7 +51,12 @@ export function createStageScaler(page, stage, onChange) {
 
   const schedule = () => {
     if (raf) return;
-    raf = requestAnimationFrame(apply);
+    // 后台标签页里 rAF 会被暂停，用定时器兜底（可见时仍然走 rAF）
+    if (typeof document !== "undefined" && document.hidden) {
+      raf = setTimeout(apply, 40);
+    } else {
+      raf = requestAnimationFrame(apply);
+    }
   };
 
   apply();
@@ -70,6 +75,7 @@ export function createStageScaler(page, stage, onChange) {
     },
     destroy() {
       if (raf) cancelAnimationFrame(raf);
+      if (raf) clearTimeout(raf);
       raf = 0;
       window.removeEventListener("resize", schedule);
       window.removeEventListener("orientationchange", schedule);

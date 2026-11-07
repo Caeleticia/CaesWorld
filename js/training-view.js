@@ -284,7 +284,7 @@ async function refreshLibrary() {
   if (hint) {
     hint.textContent = library.errors.length
       ? `牌库有 ${library.errors.length} 处问题`
-      : `牌库 ${library.units.length} 张 · 卡组 ${PACK}`;
+      : `牌库 ${library.units.length} 张`;
   }
   if (library.errors.length) console.warn("[训练场] 牌库问题：", library.errors);
 }
@@ -525,8 +525,7 @@ function renderStartHint() {
   }
   refs.startHint.classList.remove("is-bad");
   refs.startBtn.disabled = false;
-  const total = config.red.length + config.blue.length;
-  refs.startHint.textContent = `红 ${config.red.length} · 蓝 ${config.blue.length} · 场上最多 ${config.maxUnits}（共 ${total} 个单位）`;
+  refs.startHint.textContent = `红 ${config.red.length} · 蓝 ${config.blue.length} 个单位`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -537,7 +536,11 @@ function refreshAdaptive() {
   const orient = scaler.orient;
   if (refs.seg) {
     refs.seg.dataset.side = activeSide;
-    $$(".tw-seg-btn", refs.seg).forEach((btn) => btn.classList.toggle("is-active", btn.dataset.side === activeSide));
+    $$(".tw-seg-btn", refs.seg).forEach((btn) => {
+      const on = btn.dataset.side === activeSide;
+      btn.classList.toggle("is-active", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+    });
   }
   const panels = $$(".tcfg-cols > .tcfg-panel", page);
   const portrait = orient === "portrait";
@@ -601,7 +604,8 @@ function bindEvents() {
   // 开始对战
   refs.startBtn?.addEventListener("click", () => startMatch());
 
-  // 返回主菜单（hashchange 由 app.js 处理）
+  // 返回主菜单：用 location.hash 触发 app.js 的 hashchange（不要用 <a href="#menu">，
+  // 页面带 <base href="./">，fragment 链接会被解析成站点根目录造成整页刷新）
   $("#training-back")?.addEventListener("click", () => {
     location.hash = "#menu";
   });

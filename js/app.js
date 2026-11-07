@@ -240,8 +240,6 @@ function closeEditor() {
 /* ------------------------------------------------------------------ */
 /* 训练场                                                              */
 /* ------------------------------------------------------------------ */
-let trainingLoaded = false;
-
 async function openTraining() {
   const page = $("#training-page");
   const menu = $("#main-menu");
@@ -249,14 +247,8 @@ async function openTraining() {
   page.hidden = false;
   if (menu) menu.hidden = true;
   location.hash = "#training";
-  if (!trainingLoaded) {
-    const mod = await import("./training-view.js");
-    await mod.initTraining();
-    trainingLoaded = true;
-  } else {
-    const mod = await import("./training-view.js");
-    await mod.initTraining();
-  }
+  const mod = await import("./training-view.js");
+  await mod.initTraining();
 }
 
 function closeTraining() {
