@@ -16,7 +16,7 @@ import { createBattle } from "./battle.js";
 import { validateUnitCard, createUnitCard } from "./units.js";
 import { validateSkillCard, createSkillCard } from "./skills.js";
 import { normalizeSlot } from "./targeting.js";
-import { EFFECT_POLARITIES, parseId } from "./constants.js";
+import { EFFECT_POLARITIES, parseId, validateEffectAttrBonus } from "./constants.js";
 
 export const SCHEMA_VERSION = 1;
 /** 内置槽位名 */
@@ -96,6 +96,7 @@ export function validateContent(doc) {
       const n = Number(raw.maxStacks);
       if (!Number.isFinite(n) || n < 0) errors.push(`效果 ${id}: maxStacks 必须是 ≥ 0 的数字`);
     }
+    for (const e of validateEffectAttrBonus(raw && raw.attrBonus)) errors.push(`效果 ${id}: ${e}`);
   }
 
   for (const unit of units) {
@@ -103,9 +104,6 @@ export function validateContent(doc) {
     if (!card) continue;
     for (const sid of card.skills) {
       if (!skillIds.has(sid)) errors.push(`单位 ${card.id} 引用了不存在的技能 ${sid}`);
-    }
-    for (const eid of card.effects) {
-      if (effects.length && !effectIds.has(eid)) errors.push(`单位 ${card.id} 引用了不存在的效果 ${eid}`);
     }
   }
 

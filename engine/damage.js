@@ -6,10 +6,13 @@
  *   伤害值 = 攻击积木给的数值(默认 A 攻击力)
  *          * (1 + A 伤害提升%) * (1 + A 对应属性伤害提升%)
  *          * (暴击 ? 1 + A 暴击伤害 : 1)
- *   防御减伤率 = 1 - (A等级 + 10) / (A等级 + 10 + B防御力 * (1 - A 减防%))
+ *   防御减伤率 = 1 - (5*A等级 + 500) / (B防御力 + 5*A等级 + 500)
  *   抗性减伤率 = B对应属性抗性 * (1 - B抗性降低%) - A对应属性穿透   （可以为负 → 额外增伤）
  *   易伤率     = B受到伤害提升% * B易伤%
  *   最终伤害   = 伤害值 * (1 - 防御减伤率) * (1 - 抗性减伤率) * (1 + 易伤率)
+ *
+ * 减防不单列在公式里：减防效果直接修正受击方的防御力（效果属性修正 / 加成为负），
+ * 参与计算的 B防御力 已经是修正后的值。
  *
  * 特例
  *  - 本源(origin)伤害：无视任何加成、防御、抗性、免伤/易伤、无敌与护盾，
@@ -28,15 +31,15 @@ import { clamp, rollChance } from "./math.js";
 const boost = (x) => Math.max(0, 1 + (Number(x) || 0));
 
 /**
- * 防御减伤率 = 1 - (A等级+10)/(A等级+10 + B防御*(1-减防%))。
+ * 防御减伤率 = 1 - (5*A等级+500)/(5*A等级+500 + B防御力)。
  * 上限 1（完全免疫）；不额外设 99% 之类的封顶——按公式取值。
+ * 减防由受击方面板直接承担（防御力已被修正），这里不再收减防参数。
  * @param {number} attackerLevel A 的等级
- * @param {number} defense B 的防御力（已含加成）
- * @param {number} [defReducePct] A 的防御减免百分比
+ * @param {number} defense B 的防御力（已含加成 / 减防修正）
  */
-export function defenseReduction(attackerLevel, defense, defReducePct = 0) {
-  const num = (Number(attackerLevel) || 0) + 10;
-  const def = Math.max(0, Number(defense) || 0) * (1 - (Number(defReducePct) || 0));
+export function defenseReduction(attackerLevel, defense) {
+  const num = 5 * (Number(attackerLevel) || 0) + 500;
+  const def = Math.max(0, Number(defense) || 0);
   const rate = 1 - num / (num + def);
   return clamp(rate, 0, 1);
 }
@@ -73,7 +76,7 @@ export function damageRange(attacker, skillValue, attribute = "physical") {
  * 目标侧的减伤系数（不含暴击）。
  */
 export function damageTakenFactor(attacker, target, attribute = "physical") {
-  const defRate = defenseReduction(attacker.level, target.def, attacker.defReducePct);
+  const defRate = defenseReduction(attacker.level, target.def);
   const resRate = resistanceReduction(
     target.resistances?.[attribute] ?? 0,
     target.resistDownPct,

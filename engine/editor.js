@@ -1,19 +1,51 @@
 /**
- * editor.js —— 编辑器工程（纯数据）
+ * editor.js —— 编辑器工程与卡包（纯数据）
  *
- * 编辑器存的是「工程」：角色、技能、效果各一张卡，卡上的流程是积木流程。
- * 由工程生成正式内容包（与 data/pack/<卡组>/单位.json、技能.json、效果.json 同构），
- * 战斗引擎读的是内容包，不是工程。
+ * 编辑器里同时存在多个「卡包」：角色、技能、效果都带 pack 字段归到某个卡包。
+ * 「卡包」把原来的工程与内容包合并成一份文件：
+ *   { schema, kind: "caeworld-pack", id, name, version, author, description,
+ *     units: [...], skills: [...], effects: [...] }
+ * 其中 units 是内容包形状的单位卡，skills / effects 额外保留 `ui` 与流程里的 `pos`，
+ * 所以同一份文件既能被战斗引擎当内容包读，也能导回编辑器继续改。
  *
  * 积木存档里额外带 `ui`（位置、常量、提示），战斗引擎会忽略它。
  */
 import { createUnitCard, validateUnitCard } from "./units.js";
 import { createSkillCard, validateSkillCard } from "./skills.js";
-import { EFFECT_POLARITIES, effectPolarityOf, parseId } from "./constants.js";
+import {
+  EFFECT_POLARITIES,
+  effectPolarityOf,
+  normalizeEffectAttrBonus,
+  parseId,
+  validateEffectAttrBonus,
+} from "./constants.js";
 import { prepareFlow, FLOW_SCHEMA } from "./flow.js";
 
 export const PROJECT_SCHEMA = 1;
 export const PROJECT_KIND = "caeworld-editor-project";
+/** 卡包文件的 kind：工程 + 内容合并成的一份文件 */
+export const PACK_KIND = "caeworld-pack";
+/** 「全部卡包」筛选下新建内容时使用的独立草稿包 */
+export const DRAFT_PACK_ID = "draft";
+export const DRAFT_PACK_NAME = "草稿包";
+
+/** 卡包 id 会作为卡 id 的第一段，不能含 "_"、不能叫 all */
+export const PACK_ID_PATTERN = /^[A-Za-z0-9.-]+$/;
+
+export function isValidPackId(id) {
+  return typeof id === "string" && id.length > 0 && id !== "all" && PACK_ID_PATTERN.test(id);
+}
+
+/** 新建卡包元信息 */
+export function createPack(id = DRAFT_PACK_ID, name = DRAFT_PACK_NAME) {
+  return {
+    id: String(id),
+    name: String(name || id),
+    version: 1,
+    author: "",
+    description: "",
+  };
+}
 
 /** 新建空工程 */
 export function createProject() {
@@ -21,7 +53,11 @@ export function createProject() {
     schema: PROJECT_SCHEMA,
     kind: PROJECT_KIND,
     updatedAt: null,
-    character: createCharacter(),
+    pack: null,
+    /** 工程里包含的卡包：{ id, name, version, author, description } */
+    packs: [createPack("default", "默认包")],
+    /** 一个工程可以包含多个角色；编辑器里可选一个进行编辑 */
+    characters: [createCharacter()],
     skills: [],
     effects: [],
   };
@@ -31,6 +67,9 @@ export function createCharacter() {
   return {
     id: "custom_unit_char",
     name: "",
+    /** 所属卡包：default / 模组包 id；用于编辑器与卡牌库筛选 */
+    pack: "default",
+    packName: "默认包",
     quality: "white",
     level: 90,
     baseHp: 5000,
@@ -47,8 +86,70 @@ export function createCharacter() {
     invincible: false,
     image: "",
     skillIds: [],
-    effectIds: [],
   };
+}
+
+/** 工程里的全部角色。兼容旧工程的单个 character 字段。 */
+export function charactersOf(project) {
+  if (!project || typeof project !== "object") return [];
+  if (Array.isArray(project.characters) && project.characters.length) return project.characters;
+  if (project.character) return [project.character];
+  return [];
+}
+
+/** 旧工程迁移到多角色格式（原地修改并返回） */
+export function normalizeProject(project) {
+  if (!project || typeof project !== "object") return createProject();
+  if (!Array.isArray(project.characters) || !project.characters.length) {
+    project.characters = project.character ? [project.character] : [createCharacter()];
+  }
+  delete project.character;
+  if (!Array.isArray(project.skills)) project.skills = [];
+  if (!Array.isArray(project.effects)) project.effects = [];
+  if (!Array.isArray(project.removedSkillIds)) project.removedSkillIds = [];
+  // 卡包清单：以项目上的 packs 为准，再按卡上的 pack 字段补全缺失的包
+  if (!Array.isArray(project.packs)) project.packs = [];
+  const known = new Map();
+  for (const pack of project.packs) {
+    if (!pack || typeof pack !== "object" || !pack.id) continue;
+    pack.id = String(pack.id);
+    pack.name = pack.name ? String(pack.name) : pack.id;
+    if (!known.has(pack.id)) known.set(pack.id, pack);
+  }
+  project.packs = [...known.values()];
+
+  const ensurePack = (id, name) => {
+    const packId = String(id || "default");
+    let pack = known.get(packId);
+    if (!pack) {
+      pack = createPack(packId, name || (packId === "default" ? "默认包" : packId));
+      project.packs.push(pack);
+      known.set(packId, pack);
+    } else if (!pack.name) pack.name = name || packId;
+    return pack;
+  };
+
+  for (const ch of project.characters) {
+    if (!ch) continue;
+    if (ch.pack === undefined || ch.pack === null || ch.pack === "") ch.pack = "default";
+    // 效果不能初始挂载：旧工程里的 effectIds 直接丢弃
+    delete ch.effectIds;
+  }
+  for (const card of [...project.characters, ...project.skills, ...project.effects]) {
+    if (!card) continue;
+    if (card.pack === undefined || card.pack === null || card.pack === "") card.pack = "default";
+    const pack = ensurePack(card.pack, card.packName);
+    // 以卡包清单里的名字为准，避免重命名后卡上还是旧名字
+    card.pack = pack.id;
+    card.packName = pack.name;
+  }
+  ensurePack("default", "默认包");
+  for (const effect of project.effects) {
+    if (!effect) continue;
+    effect.attrBonus = normalizeEffectAttrBonus(effect.attrBonus);
+    effect.autoConsume = Boolean(effect.autoConsume);
+  }
+  return project;
 }
 
 export function createSkill(id = "custom_skill_new", name = "新技能") {
@@ -57,6 +158,8 @@ export function createSkill(id = "custom_skill_new", name = "新技能") {
     name,
     type: "active",
     description: "",
+    pack: "default",
+    packName: "默认包",
     flow: emptyFlow(),
     ui: defaultUi(),
   };
@@ -74,6 +177,12 @@ export function createEffect(id = "custom_effect_new", name = "新效果") {
     /** 层数上限：0 = 无上限，默认 1 */
     maxStacks: 1,
     description: "",
+    pack: "default",
+    packName: "默认包",
+    /** 属性修正：效果附着期间给持有者提供的面板加成，可空、可多条 */
+    attrBonus: [],
+    /** 自动消耗：持有者行动时，对应流程触发后自动移除一层 */
+    autoConsume: false,
     triggers: [],
     flows: {},
     ui: defaultUi(),
@@ -132,22 +241,45 @@ export function resolveImage(path) {
 /* ------------------------------------------------------------------ */
 
 /**
- * 校验工程。返回 { ok, errors, byCard: { character: [], skills: {}, effects: {} } }
+ * 校验工程。返回 { ok, errors, byCard: { characters: {}, character: [], skills: {}, effects: {} } }
  */
 export function validateProject(project) {
   const errors = [];
-  const byCard = { character: [], skills: {}, effects: {} };
+  const byCard = { character: [], characters: {}, skills: {}, effects: {} };
   if (!project || typeof project !== "object") {
     return { ok: false, errors: ["工程必须是对象"], byCard };
   }
-  const ch = project.character || createCharacter();
-  const chErrors = [];
-  const unitCard = characterToUnit(ch);
-  const v = validateUnitCard(unitCard);
-  if (!v.ok) chErrors.push(...v.errors.filter((e) => !/^(skills|effects)\[/.test(e)));
-  if (ch.image && typeof ch.image !== "string") chErrors.push("卡面图片路径必须是字符串");
-  byCard.character = chErrors;
-  errors.push(...chErrors.map((e) => `角色: ${e}`));
+  // 卡包清单：id 唯一、格式合法
+  const packIds = new Set();
+  for (const pack of project.packs || []) {
+    if (!pack || typeof pack !== "object" || !pack.id) {
+      errors.push("卡包: 缺少 id");
+      continue;
+    }
+    if (!isValidPackId(pack.id)) errors.push(`卡包 ${pack.id}: id 只能包含字母 / 数字 / . / -，且不能是 all`);
+    if (packIds.has(pack.id)) errors.push(`卡包 id 重复：${pack.id}`);
+    packIds.add(pack.id);
+  }
+
+  const characters = charactersOf(project);
+  if (!characters.length) {
+    const chErrors = ["工程至少需要一个角色"];
+    byCard.character = chErrors;
+    errors.push(...chErrors.map((e) => `角色: ${e}`));
+  }
+  const characterIds = new Set();
+  for (const ch of characters) {
+    const chErrors = [];
+    const unitCard = characterToUnit(ch);
+    const v = validateUnitCard(unitCard);
+    if (!v.ok) chErrors.push(...v.errors.filter((e) => !/^skills\[/.test(e)));
+    if (ch.image && typeof ch.image !== "string") chErrors.push("卡面图片路径必须是字符串");
+    if (characterIds.has(ch.id)) chErrors.push(`角色 id 重复：${ch.id}`);
+    characterIds.add(ch.id);
+    byCard.characters[ch.id] = chErrors;
+    if (!byCard.character.length) byCard.character = chErrors;
+    errors.push(...chErrors.map((e) => `角色 ${ch.name || ch.id}: ${e}`));
+  }
 
   const skillIds = new Set();
   for (const skill of project.skills || []) {
@@ -179,6 +311,10 @@ export function validateProject(project) {
       const n = Number(effect.maxStacks);
       if (!Number.isFinite(n) || n < 0) list.push(`层数上限必须是 ≥ 0 的数字：${effect.maxStacks}`);
     }
+    list.push(...validateEffectAttrBonus(effect.attrBonus));
+    if (effect.autoConsume !== undefined && typeof effect.autoConsume !== "boolean") {
+      list.push("自动消耗必须是布尔值");
+    }
     if (effectIds.has(effect.id)) list.push(`效果 id 重复：${effect.id}`);
     effectIds.add(effect.id);
     for (const t of effect.triggers || []) {
@@ -190,11 +326,10 @@ export function validateProject(project) {
     errors.push(...list.map((e) => `效果 ${effect.name || effect.id}: ${e}`));
   }
 
-  for (const sid of ch.skillIds || []) {
-    if (!skillIds.has(sid)) errors.push(`角色挂载了不存在的技能 ${sid}`);
-  }
-  for (const eid of ch.effectIds || []) {
-    if (!effectIds.has(eid)) errors.push(`角色挂载了不存在的效果 ${eid}`);
+  for (const ch of characters) {
+    for (const sid of ch.skillIds || []) {
+      if (!skillIds.has(sid)) errors.push(`角色 ${ch.name || ch.id} 挂载了不存在的技能 ${sid}`);
+    }
   }
 
   return { ok: errors.length === 0, errors, byCard };
@@ -228,8 +363,9 @@ export function characterToUnit(ch) {
     countsAsUnit: ch.countsAsUnit,
     invincible: ch.invincible,
     skills: (ch.skillIds || []).slice(),
-    effects: (ch.effectIds || []).slice(),
   });
+  if (ch.pack) base.pack = String(ch.pack);
+  if (ch.packName) base.packName = String(ch.packName);
   if (ch.image) base.image = ch.image;
   return base;
 }
@@ -245,6 +381,8 @@ export function skillToContent(skill) {
     format: "flow",
     flow: skill.flow ? normalizeFlow(skill.flow) : emptyFlow(),
   });
+  if (skill.pack) card.pack = String(skill.pack);
+  if (skill.packName) card.packName = String(skill.packName);
   if (skill.description) card.description = skill.description;
   return card;
 }
@@ -259,6 +397,8 @@ export function effectToContent(effect) {
     stackable: Boolean(effect.stackable),
     maxStacks: Number.isFinite(maxStacks) ? Math.max(0, maxStacks) : 1,
     description: effect.description || "",
+    ...(effect.pack ? { pack: String(effect.pack) } : {}),
+    ...(effect.packName ? { packName: String(effect.packName) } : {}),
     triggers: (effect.triggers || []).map((t) => ({ ...t.block })),
     flows: Object.fromEntries(
       (effect.triggers || []).map((t) => [
@@ -266,7 +406,55 @@ export function effectToContent(effect) {
         normalizeFlow((effect.flows || {})[t.block.id] || emptyFlow()),
       ])
     ),
-    attrBonus: (effect.attrBonus || []).slice(),
+    attrBonus: normalizeEffectAttrBonus(effect.attrBonus),
+    autoConsume: Boolean(effect.autoConsume),
+  };
+}
+
+/** 卡包里的技能卡：内容包形状 + 编辑器位置信息 */
+function skillToPackCard(skill) {
+  const card = skillToContent(skill);
+  card.flow = skill.flow ? structuredClone(skill.flow) : emptyFlow();
+  if (skill.ui) card.ui = structuredClone(skill.ui);
+  return card;
+}
+
+/** 卡包里的效果卡：内容包形状 + 编辑器位置信息 */
+function effectToPackCard(effect) {
+  const card = effectToContent(effect);
+  card.flows = Object.fromEntries(
+    (effect.triggers || []).map((t) => [
+      t.block.id,
+      (effect.flows || {})[t.block.id] ? structuredClone(effect.flows[t.block.id]) : emptyFlow(),
+    ])
+  );
+  if (effect.ui) card.ui = structuredClone(effect.ui);
+  return card;
+}
+
+/**
+ * 把一个卡包导出成「卡包文件」（工程 + 内容合并）。
+ * 只包含 pack 字段等于该卡包的卡；返回的对象可直接 JSON 序列化下载。
+ */
+export function packFileOf(project, packId) {
+  const id = String(packId || "");
+  const meta = (project.packs || []).find((p) => p && p.id === id) || createPack(id, id);
+  const inPack = (card) => Boolean(card) && (card.pack || "default") === id;
+  const characters = charactersOf(project).filter(inPack);
+  const skills = (project.skills || []).filter(inPack);
+  const effects = (project.effects || []).filter(inPack);
+  return {
+    schema: 1,
+    kind: PACK_KIND,
+    id,
+    name: meta.name || id,
+    version: Number.isFinite(Number(meta.version)) ? Number(meta.version) : 1,
+    author: meta.author || "",
+    description: meta.description || "",
+    updatedAt: project.updatedAt || null,
+    units: characters.map(characterToUnit),
+    skills: skills.map(skillToPackCard),
+    effects: effects.map(effectToPackCard),
   };
 }
 
@@ -300,8 +488,9 @@ export function normalizeFlow(flow) {
  * @returns {{units: object, skills: object, effects: object}}
  */
 export function projectToContent(project) {
+  const characters = charactersOf(project);
   return {
-    units: { schema: 1, kind: "units", units: [characterToUnit(project.character || createCharacter())] },
+    units: { schema: 1, kind: "units", units: characters.map(characterToUnit) },
     skills: { schema: 1, kind: "skills", skills: (project.skills || []).map(skillToContent) },
     effects: { schema: 1, kind: "effects", effects: (project.effects || []).map(effectToContent) },
   };

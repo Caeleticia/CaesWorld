@@ -2,7 +2,8 @@
  * units.js —— 单位卡：默认值、规范化、校验
  *
  * 一张单位卡 = 名字 + 基础数值 + 三项开关 + 技能 id 列表 + 可选的条件加成(bonuses)。
- * 「效果加成」不写在卡上，而是由加成系统实时叠算（见 modifiers.js）。
+ * 「效果加成」不写在卡上，而是由加成系统实时叠算（见 modifiers.js）；
+ * 效果也不能初始挂在单位上——只能在战斗中用「附加效果」积木附加。
  */
 import {
   RESISTANCE_ATTRIBUTES,
@@ -45,8 +46,6 @@ export function createUnitDefaults() {
     skills: [],
     /** 可选：条件加成（常驻 buff），格式见 modifiers.js → fromBonusOverrides */
     bonuses: [],
-    /** 可选：常驻效果（效果挂载在角色身上，效果存在时才可能触发） */
-    effects: [],
     /** 可选：成员效果。[{ effect, block, flow }] —— 角色自带、不可移除的效果，只在这张单位卡上生效 */
     members: [],
   };
@@ -60,7 +59,8 @@ export function createUnitCard(input = {}) {
   card.resistances = resistanceFill(input.resistances ?? base.resistances);
   card.skills = Array.isArray(input.skills) ? input.skills.slice() : [];
   card.bonuses = Array.isArray(input.bonuses) ? input.bonuses.map((b) => ({ ...b })) : [];
-  card.effects = Array.isArray(input.effects) ? input.effects.slice() : [];
+  // 旧数据里可能残留 effects（角色初始挂载效果）：这个能力已移除，读入时直接丢弃
+  delete card.effects;
   card.members = Array.isArray(input.members) ? input.members.map((m) => structuredClone(m)) : [];
   return card;
 }
@@ -155,15 +155,6 @@ export function validateUnitCard(card) {
 
   if (card.bonuses !== undefined && !Array.isArray(card.bonuses)) {
     errors.push("bonuses 必须是数组");
-  }
-  if (!Array.isArray(card.effects)) {
-    errors.push("effects 必须是数组");
-  } else {
-    card.effects.forEach((eid, i) => {
-      const p = parseId(eid);
-      if (!p.ok) errors.push(`effects[${i}]: ${p.error}`);
-      else if (p.kind !== "effect") errors.push(`effects[${i}] 类型段应为 effect：${eid}`);
-    });
   }
 
   return { ok: errors.length === 0, errors };

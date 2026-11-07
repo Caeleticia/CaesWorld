@@ -87,6 +87,93 @@ export function effectPolarityOf(def) {
   return "positive";
 }
 
+/**
+ * 效果「属性修正」可用的键：效果附着期间给持有者提供的面板加成。
+ *
+ *   atkPct / atkFlat / defPct / defFlat / hpPct / hpFlat —— 三项基础面板
+ *   critRate / critDamage / speed                        —— 暴击与速度
+ *   dmgBoostPct / damageTakenPct / vulnPct / resistDownPct —— 伤害类百分比
+ *   physical / magic / spirit                            —— 三系抗性（百分点）
+ *   attrDmgBoostPct.<系> / attrPenPct.<系>                —— 三系伤害提升 / 三系抗性穿透
+ *
+ * 「<系>」取 physical / magic / spirit；本源是真实伤害，既不吃伤害提升也没有抗性可穿，故不提供。
+ * 百分比一律存小数（5% = 0.05）；数值项直接相加。
+ */
+export const EFFECT_ATTR_BONUS_KEYS = Object.freeze([
+  "atkPct",
+  "atkFlat",
+  "defPct",
+  "defFlat",
+  "hpPct",
+  "hpFlat",
+  "critRate",
+  "critDamage",
+  "speed",
+  "dmgBoostPct",
+  "damageTakenPct",
+  "vulnPct",
+  "resistDownPct",
+  "physical",
+  "magic",
+  "spirit",
+  "attrDmgBoostPct.physical",
+  "attrDmgBoostPct.magic",
+  "attrDmgBoostPct.spirit",
+  "attrPenPct.physical",
+  "attrPenPct.magic",
+  "attrPenPct.spirit",
+]);
+
+/** 三系抗性：属性修正里按「百分点」加到面板抗性上 */
+const RESIST_ATTR_BONUS = Object.freeze(["physical", "magic", "spirit"]);
+
+/**
+ * 解析一条属性修正（兼容旧格式 { attr:"atk", pct:true }）。
+ * @returns {{mod: string, value: number}|{resistance: string, value: number}|null}
+ */
+export function effectAttrBonusTarget(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const value = Number(entry.value);
+  if (!Number.isFinite(value)) return null;
+  const attr = String(entry.attr || "");
+  // 旧格式：atk / def / hp + pct 开关
+  if (attr === "atk" || attr === "def" || attr === "hp") {
+    return { mod: `${attr}${entry.pct ? "Pct" : "Flat"}`, value };
+  }
+  // 三系抗性：直接加到面板抗性上（pct 开关无意义）
+  if (RESIST_ATTR_BONUS.includes(attr)) return { resistance: attr, value };
+  if (EFFECT_ATTR_BONUS_KEYS.includes(attr)) return { mod: attr, value };
+  return null;
+}
+
+/** 归一化为当前格式 [{ attr, value }]，丢弃无法识别的项 */
+export function normalizeEffectAttrBonus(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const entry of list) {
+    const target = effectAttrBonusTarget(entry);
+    if (!target) continue;
+    out.push({ attr: target.mod || target.resistance, value: target.value });
+  }
+  return out;
+}
+
+/** 校验属性修正数组；返回错误文案（空数组 = 合法） */
+export function validateEffectAttrBonus(list, path = "attrBonus") {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) return [`${path} 必须是数组`];
+  const errors = [];
+  list.forEach((entry, i) => {
+    if (!entry || typeof entry !== "object") {
+      errors.push(`${path}[${i}] 必须是对象`);
+      return;
+    }
+    if (!Number.isFinite(Number(entry.value))) errors.push(`${path}[${i}].value 必须是数字`);
+    else if (!effectAttrBonusTarget(entry)) errors.push(`${path}[${i}].attr 无法识别：${entry.attr}`);
+  });
+  return errors;
+}
+
 /** 阵营 */
 export const SIDES = Object.freeze(["ally", "enemy"]);
 

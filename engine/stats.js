@@ -59,8 +59,6 @@ export function computeStats(card, acc = emptyAccum()) {
     damageTakenPct: a.damageTakenPct,
     /** 易伤效果 */
     vulnPct: a.vulnPct,
-    /** 防御减免百分比（作为 A 时作用于目标的防御力） */
-    defReducePct: a.defReducePct,
     resistances,
   };
 }

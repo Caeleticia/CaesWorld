@@ -7,13 +7,19 @@
  */
 import { createUnitCard, validateUnitCard } from "./units.js";
 import { createSkillCard, validateSkillCard } from "./skills.js";
-import { EFFECT_POLARITIES, effectPolarityOf, parseId } from "./constants.js";
+import {
+  EFFECT_POLARITIES,
+  effectPolarityOf,
+  normalizeEffectAttrBonus,
+  parseId,
+  validateEffectAttrBonus,
+} from "./constants.js";
 
 export class ContentRegistry {
   constructor() {
     this.units = new Map();
     this.skills = new Map();
-    /** 效果卡：{ id, name, flags, polarity, stackable, maxStacks, triggers, flows, attrBonus } */
+    /** 效果卡：{ id, name, flags, polarity, stackable, maxStacks, triggers, flows, attrBonus, autoConsume } */
     this.effects = new Map();
     this.errors = [];
   }
@@ -58,7 +64,7 @@ export class ContentRegistry {
     else if (parsed.kind !== "effect") errors.push(`效果卡的 id 类型段应为 effect：${def.id}`);
     if (def.name !== undefined && typeof def.name !== "string") errors.push("name 必须是字符串");
     if (def.triggers !== undefined && !Array.isArray(def.triggers)) errors.push("triggers 必须是数组");
-    if (def.attrBonus !== undefined && !Array.isArray(def.attrBonus)) errors.push("attrBonus 必须是数组");
+    errors.push(...validateEffectAttrBonus(def.attrBonus));
     if (def.polarity !== undefined && def.polarity !== null && def.polarity !== "" && !EFFECT_POLARITIES.includes(def.polarity)) {
       errors.push(`polarity 必须是 ${EFFECT_POLARITIES.join("/")}：${def.polarity}`);
     }
@@ -68,6 +74,9 @@ export class ContentRegistry {
     if (def.maxStacks !== undefined) {
       const n = Number(def.maxStacks);
       if (!Number.isFinite(n) || n < 0) errors.push(`maxStacks 必须是 ≥ 0 的数字：${def.maxStacks}`);
+    }
+    if (def.autoConsume !== undefined && typeof def.autoConsume !== "boolean") {
+      errors.push("autoConsume 必须是布尔值");
     }
     if (errors.length) {
       this.errors.push(`效果 ${def.id || "(无 id)"}: ${errors.join("；")}`);
@@ -90,8 +99,12 @@ export class ContentRegistry {
       maxStacks: Number.isFinite(maxStacks) ? Math.max(0, maxStacks) : 1,
       triggers: Array.isArray(def.triggers) ? def.triggers.map((t) => ({ ...t })) : [],
       flows: typeof def.flows === "object" && def.flows ? structuredClone(def.flows) : {},
-      attrBonus: Array.isArray(def.attrBonus) ? def.attrBonus.map((a) => ({ ...a })) : [],
+      attrBonus: normalizeEffectAttrBonus(def.attrBonus),
+      /** 自动消耗：持有者行动时，流程触发后自动移除一层 */
+      autoConsume: Boolean(def.autoConsume),
       description: def.description || "",
+      ...(def.pack ? { pack: String(def.pack) } : {}),
+      ...(def.packName ? { packName: String(def.packName) } : {}),
     });
     return { ok: true, errors: [] };
   }

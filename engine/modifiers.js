@@ -10,7 +10,9 @@
  *   damageTakenPct    B 受到伤害提升效果
  *   vulnPct           B 易伤效果
  *   critRate / critDamage   暴击率 / 暴击伤害（可被加成）
- *   defReducePct      防御减免百分比（写在「攻击方/A」的统计上，作用于 B 的防御）
+ *
+ * 「减防」不是这里的独立加成项：减防效果直接修正受击方的防御力（defPct / defFlat 为负），
+ * 参与伤害计算的已经是修正后的防御力。
  *
  * 百分比一律存小数（5% = 0.05）。叠加规则：
  *   同一键的加成项直接相加（攻击力降低直接记成负的百分比加成）。
@@ -38,7 +40,6 @@ export const BONUS_KEYS = Object.freeze([
   "vulnPct",
   "critRate",
   "critDamage",
-  "defReducePct",
   "speed",
 ]);
 
@@ -59,7 +60,6 @@ export function emptyAccum() {
     vulnPct: 0,
     critRate: 0,
     critDamage: 0,
-    defReducePct: 0,
     speed: 0,
     attrDmgBoostPct: attrZero(0),
     attrPenPct: attrZero(0),
