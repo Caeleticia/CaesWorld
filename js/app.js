@@ -172,6 +172,7 @@ async function boot() {
 
   initTabs(nav, (itemId) => {
     if (itemId === "editor") openEditor();
+    if (itemId === "training") openTraining();
   });
 
   $(".cw-tip-refresh")?.addEventListener("click", () => tip.refresh());
@@ -198,6 +199,9 @@ async function boot() {
       applyBanner($("#stage-picture"), picked);
       document.body.classList.remove("is-loading");
       document.title = "Cae'sWorld · 主菜单";
+      // 直接带 hash 打开（#training / #editor）也能进对应页面
+      if (location.hash === "#training") openTraining();
+      else if (location.hash === "#editor") openEditor();
     }, leaving);
   }, hold);
 
@@ -227,13 +231,50 @@ async function openEditor() {
 function closeEditor() {
   const page = $("#editor-page");
   const menu = $("#main-menu");
-  if (page) page.hidden = true;
+  if (!page || page.hidden) return;
+  page.hidden = true;
+  if (menu) menu.hidden = false;
+  history.replaceState(null, "", location.pathname + location.search);
+}
+
+/* ------------------------------------------------------------------ */
+/* 训练场                                                              */
+/* ------------------------------------------------------------------ */
+let trainingLoaded = false;
+
+async function openTraining() {
+  const page = $("#training-page");
+  const menu = $("#main-menu");
+  if (!page) return;
+  page.hidden = false;
+  if (menu) menu.hidden = true;
+  location.hash = "#training";
+  if (!trainingLoaded) {
+    const mod = await import("./training-view.js");
+    await mod.initTraining();
+    trainingLoaded = true;
+  } else {
+    const mod = await import("./training-view.js");
+    await mod.initTraining();
+  }
+}
+
+function closeTraining() {
+  const page = $("#training-page");
+  if (!page) return;
+  const battle = $("#battle-page");
+  const battleOpen = battle && !battle.hidden;
+  if (page.hidden && !battleOpen) return;
+  page.hidden = true;
+  if (battle) battle.hidden = true;
+  const menu = $("#main-menu");
   if (menu) menu.hidden = false;
   history.replaceState(null, "", location.pathname + location.search);
 }
 
 window.addEventListener("hashchange", () => {
   if (location.hash !== "#editor") closeEditor();
+  if (location.hash !== "#training") closeTraining();
 });
 
 boot().catch((err) => {

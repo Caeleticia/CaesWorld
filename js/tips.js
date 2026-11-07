@@ -121,7 +121,7 @@ export function mountTip(el, tips, options = {}) {
     timer = 0;
   }
 
-  // 先占位，避免闪烁
+  // 先放默认文案，避免首帧空白
   setText(placeholder);
   refresh();
   start();

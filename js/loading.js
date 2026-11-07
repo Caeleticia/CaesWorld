@@ -79,13 +79,25 @@ export function mountProgress(els) {
   return { render, fail };
 }
 
-/** 等一帧，保证进度条先画出来再干下一件事 */
+/**
+ * 等一帧，保证进度条先画出来再干下一件事。
+ * 后台标签页里 rAF 可能被浏览器暂停（document.hidden），此时用定时器兜底，
+ * 否则载入流程会永远停在第一步。
+ */
 export const nextFrame = () =>
   new Promise((resolve) => {
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const hidden = typeof document !== "undefined" && document.hidden;
+    if (typeof requestAnimationFrame === "function" && !hidden) {
+      requestAnimationFrame(() => requestAnimationFrame(done));
+      setTimeout(done, 120);
     } else {
-      setTimeout(resolve, 0);
+      setTimeout(done, 16);
     }
   });
 
