@@ -106,7 +106,10 @@ export function normalizeProject(project) {
   delete project.character;
   if (!Array.isArray(project.skills)) project.skills = [];
   if (!Array.isArray(project.effects)) project.effects = [];
+  // 删除过的卡 id：重开编辑器时不会从默认包 / 模组里补回来
+  if (!Array.isArray(project.removedUnitIds)) project.removedUnitIds = [];
   if (!Array.isArray(project.removedSkillIds)) project.removedSkillIds = [];
+  if (!Array.isArray(project.removedEffectIds)) project.removedEffectIds = [];
   // 卡包清单：以项目上的 packs 为准，再按卡上的 pack 字段补全缺失的包
   if (!Array.isArray(project.packs)) project.packs = [];
   const known = new Map();
