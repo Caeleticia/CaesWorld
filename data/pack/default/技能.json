@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "kind": "skills",
+  "skills": [
+    {
+      "name": "黏液拍击",
+      "id": "default_skill_slimebeat",
+      "type": "active",
+      "targets": 1,
+      "requiresTarget": true,
+      "effects": [
+        {
+          "kind": "damage",
+          "target": "enemy"
+        }
+      ]
+    },
+    {
+      "name": "本源侵蚀",
+      "id": "default_skill_originburn",
+      "type": "active",
+      "targets": 1,
+      "requiresTarget": true,
+      "effects": [
+        {
+          "kind": "damage",
+          "target": "enemy",
+          "attribute": "origin"
+        }
+      ]
+    },
+    {
+      "name": "血性",
+      "id": "default_skill_bloodlust",
+      "type": "passive",
+      "requiresTarget": false,
+      "effects": []
+    }
+  ]
+}

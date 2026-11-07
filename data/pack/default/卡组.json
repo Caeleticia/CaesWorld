@@ -1,0 +1,12 @@
+{
+  "name": "默认卡组",
+  "pack": "default",
+  "version": 1,
+  "author": "Cae'sWorld",
+  "description": "内置的初始卡：两部单位卡与两部技能卡。",
+  "files": {
+    "units": "单位.json",
+    "skills": "技能.json",
+    "effects": "效果.json"
+  }
+}
