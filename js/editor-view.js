@@ -25,6 +25,7 @@ import {
   PLACEHOLDER_IMAGE as PLACEHOLDER,
   resolveImage,
   RESISTANCE_ATTRIBUTES,
+  effectPolarityOf,
 } from "../engine/index.js";
 
 /** 卡组：工程与内容包都按卡组存在 data/pack/<卡组>/ 里 */
@@ -41,12 +42,17 @@ const escapeHtml = (s) =>
 /* ================================================================== */
 let project = loadProject();
 
-let active = { tab: "character", skillId: null, effectId: null, triggerId: null };
+let active = { tab: "character", skill: null, effect: null, triggerId: null };
 
 /** 换一个工程（导入用）；页面上的表单与画布一起重绘 */
 function setProject(p) {
   project = stripLegacyFields(p);
-  active = { tab: "character", skillId: p.skills[0] ? p.skills[0].id : null, effectId: p.effects[0] ? p.effects[0].id : null, triggerId: null };
+  active = {
+    tab: "character",
+    skill: (project.skills || [])[0] || null,
+    effect: (project.effects || [])[0] || null,
+    triggerId: null,
+  };
   renderAll();
   switchTab("character");
 }
@@ -98,7 +104,10 @@ async function hydrateFromPack() {
     for (const def of pack.effects) {
       if (project.effects.some((x) => x.id === def.id)) continue;
       const e = createEffect(def.id, def.name);
-      e.flags = (def.flags || []).slice();
+      e.flags = Array.isArray(def.flags) ? def.flags.filter((f) => f !== "negative") : [];
+      e.polarity = effectPolarityOf(def);
+      e.stackable = Boolean(def.stackable);
+      e.maxStacks = Number.isFinite(Number(def.maxStacks)) ? Math.max(0, Math.floor(Number(def.maxStacks))) : 1;
       e.triggers = (def.triggers || []).map((t) => ({ block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" } }));
       e.flows = {};
       for (const t of e.triggers) e.flows[t.block.id] = flowFromContent((def.flows || {})[t.block.id]);
@@ -109,8 +118,8 @@ async function hydrateFromPack() {
     const effectIds = (project.character.effectIds || []).filter((id) => project.effects.some((e) => e.id === id));
     project.character.skillIds = skillIds;
     project.character.effectIds = effectIds;
-    active.skillId = active.skillId || (project.skills[0] ? project.skills[0].id : null);
-    active.effectId = active.effectId || (project.effects[0] ? project.effects[0].id : null);
+    if (!currentSkill()) active.skill = project.skills[0] || null;
+    if (!currentEffect()) active.effect = project.effects[0] || null;
     setStatus(`已载入卡组「${PACK}」：角色 ${pack.units.length} · 技能 ${pack.skills.length} · 效果 ${pack.effects.length}`, "ok");
     return true;
   } catch (err) {
@@ -156,11 +165,13 @@ function setStatus(text, kind = "") {
 /* 当前正在编辑的卡                                                    */
 /* ================================================================== */
 function currentSkill() {
-  return (project.skills || []).find((s) => s.id === active.skillId) || null;
+  const list = project.skills || [];
+  return active.skill && list.includes(active.skill) ? active.skill : null;
 }
 
 function currentEffect() {
-  return (project.effects || []).find((e) => e.id === active.effectId) || null;
+  const list = project.effects || [];
+  return active.effect && list.includes(active.effect) ? active.effect : null;
 }
 
 /** 当前标签页对应的「牌」（技能或效果） */
@@ -172,9 +183,16 @@ function currentCard() {
 
 /** 编辑器当前状态的精简视图（控制台调试用） */
 export function getView() {
+  const skill = currentSkill();
+  const effect = currentEffect();
   return {
     pack: PACK,
-    active: { ...active },
+    active: {
+      tab: active.tab,
+      skillId: skill ? skill.id : null,
+      effectId: effect ? effect.id : null,
+      triggerId: active.triggerId,
+    },
     character: project.character.name || "",
     skills: project.skills.map((s) => s.id),
     effects: project.effects.map((e) => e.id),
@@ -264,19 +282,23 @@ function renderCardsList() {
   }
   const skillList = $("#ed-skill-list");
   if (skillList) {
+    const skills = project.skills || [];
     skillList.innerHTML =
-      (project.skills || [])
-        .map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name || s.id)} · ${escapeHtml(s.id)}</option>`)
+      skills
+        .map((s, i) => `<option value="${i}">${escapeHtml(s.name || s.id)} · ${escapeHtml(s.id)}</option>`)
         .join("") || `<option value="">（无）</option>`;
-    if (active.skillId) skillList.value = active.skillId;
+    const idx = skills.indexOf(active.skill);
+    if (idx >= 0) skillList.value = String(idx);
   }
   const effectList = $("#ed-effect-list");
   if (effectList) {
+    const effects = project.effects || [];
     effectList.innerHTML =
-      (project.effects || [])
-        .map((e) => `<option value="${escapeHtml(e.id)}">${escapeHtml(e.name || e.id)} · ${escapeHtml(e.id)}</option>`)
+      effects
+        .map((e, i) => `<option value="${i}">${escapeHtml(e.name || e.id)} · ${escapeHtml(e.id)}</option>`)
         .join("") || `<option value="">（无）</option>`;
-    if (active.effectId) effectList.value = active.effectId;
+    const idx = effects.indexOf(active.effect);
+    if (idx >= 0) effectList.value = String(idx);
   }
 }
 
@@ -348,6 +370,14 @@ function renderEffectPanel() {
     box.innerHTML = `<p class="hint">还没有效果。点「新建效果」开始。</p>`;
     return;
   }
+  // 旧工程 / 旧内容包兼容：没有倾向时从旧的 negative 标记迁移，迁移后不再保留 negative 标记
+  e.flags = Array.isArray(e.flags) ? e.flags : [];
+  const inferredPolarity = effectPolarityOf(e);
+  if (e.flags.includes("negative")) e.flags = e.flags.filter((f) => f !== "negative");
+  e.polarity = inferredPolarity;
+  if (typeof e.stackable !== "boolean") e.stackable = false;
+  const maxStacks = Number(e.maxStacks);
+  e.maxStacks = Number.isFinite(maxStacks) ? Math.max(0, Math.floor(maxStacks)) : 1;
   e.triggers = e.triggers || [];
   if (!e.triggers.some((t) => t.block.id === active.triggerId)) {
     active.triggerId = e.triggers[0] ? e.triggers[0].block.id : null;
@@ -355,11 +385,30 @@ function renderEffectPanel() {
   box.innerHTML = `
     ${field("效果名", `<input data-effect="name" value="${escapeHtml(e.name)}" />`)}
     ${field("效果 id", `<input data-effect="id" value="${escapeHtml(e.id)}" />`, "扩展包_类型_标识，类型必须是 effect")}
+    ${field(
+      "倾向",
+      select('data-effect="polarity"', [
+        ["positive", "正面"],
+        ["negative", "负面"],
+        ["special", "特殊"],
+      ], e.polarity),
+      "必选：正面 / 负面 / 特殊（特殊不会被按正面或负面移除）"
+    )}
     <div class="chips">
-      <span>标记：</span>
-      <label><input type="checkbox" data-effect-flag="negative" ${(e.flags || []).includes("negative") ? "checked" : ""} /> 负面（可被「移除一个负面效果」移除）</label>
       <label><input type="checkbox" data-effect-flag="unremovable" ${(e.flags || []).includes("unremovable") ? "checked" : ""} /> 不可解除（需勾选「强制移除」）</label>
     </div>
+    <div class="form-row">
+      <label class="form-check"><input type="checkbox" data-effect-stack="1" ${e.stackable ? "checked" : ""} /> 层数计数</label>
+    </div>
+    ${
+      e.stackable
+        ? field(
+            "层数上限",
+            `<input type="number" min="0" step="1" data-effect-number="maxStacks" value="${e.maxStacks}" />`,
+            "默认 1；0 表示无上限"
+          )
+        : ""
+    }
     ${field("说明", `<textarea data-effect="description" rows="2">${escapeHtml(e.description || "")}</textarea>`)}
     <div class="trigger-head">
       <span>触发流程</span>
@@ -491,6 +540,37 @@ function renderFlow() {
   renderJson();
 }
 
+/**
+ * 积木的输入端口。运算积木的输入口是动态的（a/b 或 in1、in2…），
+ * 单靠 catalog.ports 画不出来——这里按当前选项与已连接数补出来。
+ */
+function dataInputPorts(node, flow) {
+  const def = blockDef(node.type);
+  if (!def) return [];
+  const base = def.ports.filter((p) => p.direction === "in");
+  if (node.type !== "math") return base;
+  const connected = (flow.links || []).filter((l) => l.to === node.id).length;
+  return inputPortIds(def, node.options || {}, connected).map((id, i) => ({
+    id,
+    label: id === "a" ? "a" : id === "b" ? "b" : `值 ${i + 1}`,
+    direction: "in",
+    type: "number",
+  }));
+}
+
+/** 切换运算类型后，清掉不再存在的输入口连线（例如 add 的 b → round 只有一个 a） */
+function pruneMathInputs(flow, node) {
+  const def = blockDef("math");
+  const op = node.options && node.options.operator;
+  const unlimited = op === "max" || op === "min";
+  const allowed = unlimited ? null : new Set(inputPortIds(def, node.options || {}, 0));
+  flow.links = (flow.links || []).filter((l) => {
+    if (l.to !== node.id) return true;
+    if (unlimited) return /^in\d+$/.test(l.portTo);
+    return allowed.has(l.portTo);
+  });
+}
+
 function renderBlock(node, flow) {
   const def = blockDef(node.type);
   if (!node.pos || !Number.isFinite(node.pos.x) || !Number.isFinite(node.pos.y)) node.pos = { x: 60, y: 60 };
@@ -503,7 +583,7 @@ function renderBlock(node, flow) {
   el.style.setProperty("--block-color", def.color);
   if (canvasState.selectedId === node.id) el.classList.add("is-selected");
 
-  const inPorts = def.ports.filter((p) => p.direction === "in");
+  const inPorts = dataInputPorts(node, flow);
   const outPorts = def.ports.filter((p) => p.direction === "out");
   const flowIn = inPorts.find((p) => !p.type);
   const flowOuts = outPorts.filter((p) => !p.type);
@@ -562,6 +642,10 @@ function optionsHtml(node) {
       html += `<label class="opt opt-check"><input type="checkbox" data-option="${o.key}" ${opts[o.key] ? "checked" : ""}/><span>${escapeHtml(o.label || o.key)}</span></label>`;
     } else if (o.control === "number") {
       html += `<label class="opt"><span>${escapeHtml(o.label || o.key)}</span><input type="number" data-option="${o.key}" value="${escapeHtml(opts[o.key] ?? "")}"/></label>`;
+    } else if (o.control === "text") {
+      html += `<label class="opt"><span>${escapeHtml(o.label || o.key)}</span><input type="text" data-option="${o.key}" value="${escapeHtml(
+        opts[o.key] ?? ""
+      )}" placeholder="键入字符串"/></label>`;
     }
   }
   const constKeys = { summon: ["unitId"], summonChild: ["unitId"], giveSkill: ["skillId"], attachEffect: ["effectId"], removeEffect: ["effectId"] }[node.type] || [];
@@ -708,8 +792,29 @@ function removeLink(id) {
   if (!flow) return;
   flow.links = (flow.links || []).filter((l) => linkId(l) !== id);
   markDirty();
-  redrawLinks();
-  renderJson();
+  // math 的无限输入会因断开而收口，跟着重绘积木
+  if (flow.nodes.some((n) => n.type === "math" && ["max", "min"].includes(n.options && n.options.operator))) {
+    refreshFlowView();
+  } else {
+    redrawLinks();
+    renderJson();
+  }
+}
+
+function findInputPort(flow, node, portId) {
+  const def = blockDef(node.type);
+  const base = def.ports.find((p) => p.id === portId && p.direction === "in");
+  if (base) return base;
+  if (node.type === "math") {
+    const op = node.options && node.options.operator;
+    const unlimited = op === "max" || op === "min";
+    const connected = (flow.links || []).filter((l) => l.to === node.id && l.portTo !== portId).length;
+    const list = inputPortIds(def, node.options || {}, connected);
+    if (list.includes(portId) || (unlimited && /^in\d+$/.test(portId))) {
+      return { id: portId, direction: "in", type: "number" };
+    }
+  }
+  return null;
 }
 
 function addLink(from, port, to, portTo) {
@@ -720,8 +825,7 @@ function addLink(from, port, to, portTo) {
   if (!fromNode || !toNode) return;
   const def = blockDef(fromNode.type);
   const outPort = def.ports.find((p) => p.id === port && p.direction === "out");
-  const targetDef = blockDef(toNode.type);
-  const inPort = targetDef.ports.find((p) => p.id === portTo && p.direction === "in");
+  const inPort = findInputPort(flow, toNode, portTo);
   if (!outPort || !inPort) return;
   const fType = outPort.type || null;
   const tType = inPort.type || null;
@@ -743,8 +847,8 @@ function addLink(from, port, to, portTo) {
   }
   flow.links.push({ id: `${from}.${port}->${to}.${portTo}`, from, port, to, portTo });
   markDirty();
-  redrawLinks();
-  renderJson();
+  // 运算积木的端口数量会随连接数变化，重绘整块画布才能长出/收起输入口
+  refreshFlowView();
 }
 
 function refreshFlowView() {
@@ -1038,6 +1142,7 @@ function onBlockOptionChange(e) {
   }
   if (changed) {
     markDirty();
+    if (node.type === "math" && e.target.dataset.option === "operator") pruneMathInputs(flow, node);
     renderJson();
     if (e.target.tagName === "SELECT") renderFlow();
   }
@@ -1049,7 +1154,7 @@ function applySkillField(card, key, value) {
     const old = card.id;
     card.id = String(value || "").trim();
     project.character.skillIds = (project.character.skillIds || []).map((x) => (x === old ? card.id : x));
-    active.skillId = card.id;
+    active.skill = card;
   } else card[key] = String(value ?? "");
 }
 
@@ -1069,15 +1174,40 @@ function onEffectFormInput(e) {
   if (!card) return;
   const flag = e.target.dataset.effectFlag;
   if (flag) {
-    card.flags = card.flags || [];
+    card.flags = Array.isArray(card.flags) ? card.flags : [];
     card.flags = e.target.checked ? [...new Set([...card.flags, flag])] : card.flags.filter((f) => f !== flag);
+    markDirty();
+    renderJson();
+    return;
+  }
+  if (e.target.dataset.effectStack !== undefined) {
+    card.stackable = Boolean(e.target.checked);
+    if (!card.stackable) {
+      const n = Number(card.maxStacks);
+      card.maxStacks = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 1;
+    }
+    markDirty();
+    // 「层数上限」只在勾选「层数计数」时显示
+    renderEffectPanel();
+    renderJson();
+    return;
+  }
+  if (e.target.dataset.effectNumber) {
+    const key = e.target.dataset.effectNumber;
+    const n = Number(e.target.value);
+    if (key === "maxStacks") card.maxStacks = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 1;
     markDirty();
     renderJson();
     return;
   }
   const key = e.target.dataset.effect;
   if (!key) return;
-  if (key === "id") card.id = e.target.value.trim();
+  if (key === "id") {
+    const old = card.id;
+    card.id = e.target.value.trim();
+    project.character.effectIds = (project.character.effectIds || []).map((x) => (x === old ? card.id : x));
+    active.effect = card;
+  } else if (key === "polarity") card.polarity = e.target.value || "positive";
   else card[key] = e.target.value;
   markDirty();
   renderCardsList();
@@ -1133,8 +1263,23 @@ const edit = {
     return project;
   },
   setProject,
-  setActive(patch) {
-    Object.assign(active, patch);
+  setActive(patch = {}) {
+    const next = { ...patch };
+    // 兼容旧调用：按 id 指定技能/效果时转成对象引用；之后一切编辑都认对象，改 id 不会丢当前卡
+    if ("skillId" in next) {
+      next.skill = (project.skills || []).find((s) => s.id === next.skillId) || null;
+      delete next.skillId;
+    }
+    if ("effectId" in next) {
+      next.effect = (project.effects || []).find((e) => e.id === next.effectId) || null;
+      delete next.effectId;
+    }
+    Object.assign(active, next);
+    if (active.skill && !(project.skills || []).includes(active.skill)) active.skill = null;
+    if (active.effect && !(project.effects || []).includes(active.effect)) active.effect = null;
+    if (!active.tab) active.tab = "character";
+    if (active.tab === "skills" && !currentSkill() && project.skills[0]) active.skill = project.skills[0];
+    if (active.tab === "effects" && !currentEffect() && project.effects[0]) active.effect = project.effects[0];
     switchTab(active.tab);
   },
   /** 修改角色字段 */
@@ -1160,7 +1305,7 @@ const edit = {
     const sid = id || uniqueId(project.skills.map((x) => x.id), "custom_skill_new");
     const card = createSkill(sid, name || "新技能");
     project.skills.push(card);
-    active.skillId = sid;
+    active.skill = card;
     markDirty();
     switchTab("skills");
     return card;
@@ -1169,7 +1314,7 @@ const edit = {
     const eid = id || uniqueId(project.effects.map((x) => x.id), "custom_effect_new");
     const card = createEffect(eid, name || "新效果");
     project.effects.push(card);
-    active.effectId = eid;
+    active.effect = card;
     active.triggerId = null;
     markDirty();
     switchTab("effects");
@@ -1191,8 +1336,17 @@ const edit = {
     const card = currentEffect();
     if (!card) throw new Error("当前没有效果");
     if (key === "flags") card.flags = Array.isArray(value) ? value.slice() : [];
-    else if (key === "id") card.id = String(value || "").trim();
-    else card[key] = String(value ?? "");
+    else if (key === "id") {
+      const old = card.id;
+      card.id = String(value || "").trim();
+      project.character.effectIds = (project.character.effectIds || []).map((x) => (x === old ? card.id : x));
+      active.effect = card;
+    } else if (key === "polarity") card.polarity = ["positive", "negative", "special"].includes(value) ? value : "positive";
+    else if (key === "stackable") card.stackable = Boolean(value);
+    else if (key === "maxStacks") {
+      const n = Number(value);
+      card.maxStacks = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 1;
+    } else card[key] = String(value ?? "");
     markDirty();
     renderEffectPanel();
     renderCardsList();
@@ -1285,8 +1439,8 @@ export { setProject, projectToContent, edit, importContent, flowFromContent, uni
 export async function initEditor() {
   if (!project.character) project.character = createCharacter();
   if (!project.pack) project.pack = PACK;
-  active.skillId = active.skillId || (project.skills[0] ? project.skills[0].id : null);
-  active.effectId = active.effectId || (project.effects[0] ? project.effects[0].id : null);
+  if (!currentSkill()) active.skill = (project.skills || [])[0] || null;
+  if (!currentEffect()) active.effect = (project.effects || [])[0] || null;
   setupForms();
   setupCanvas();
   document.querySelector("#btn-back")?.addEventListener("click", () => {
@@ -1449,7 +1603,10 @@ function importContent(doc) {
   }
   for (const e of effects) {
     const def = createEffect(e.id, e.name);
-    def.flags = (e.flags || []).slice();
+    def.flags = Array.isArray(e.flags) ? e.flags.filter((f) => f !== "negative") : [];
+    def.polarity = effectPolarityOf(e);
+    def.stackable = Boolean(e.stackable);
+    def.maxStacks = Number.isFinite(Number(e.maxStacks)) ? Math.max(0, Math.floor(Number(e.maxStacks))) : 1;
     def.description = e.description || "";
     def.triggers = (e.triggers || []).map((t) => ({ block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" } }));
     def.flows = {};
@@ -1462,8 +1619,8 @@ function importContent(doc) {
   // 导入完就能直接进战斗：把新技能/效果挂到当前角色上
   if (skills.length) project.character.skillIds = [...new Set([...(project.character.skillIds || []), ...skills.map((x) => x.id)])];
   if (effects.length) project.character.effectIds = [...new Set([...(project.character.effectIds || []), ...effects.map((x) => x.id)])];
-  active.skillId = project.skills[0] ? project.skills[0].id : null;
-  active.effectId = project.effects[0] ? project.effects[0].id : null;
+  active.skill = project.skills[0] || null;
+  active.effect = project.effects[0] || null;
   active.triggerId = null;
   markDirty();
   switchTab(units.length ? "character" : skills.length ? "skills" : "effects");
@@ -1664,8 +1821,8 @@ function setupForms() {
   $$(".ed-tab").forEach((btn) => {
     btn.addEventListener("click", () => {
       // 切到技能 / 效果时，若当前没有选中项就落到第一张卡上，避免左栏空白
-      if (btn.dataset.tab === "skills" && !currentSkill() && project.skills[0]) active.skillId = project.skills[0].id;
-      if (btn.dataset.tab === "effects" && !currentEffect() && project.effects[0]) active.effectId = project.effects[0].id;
+      if (btn.dataset.tab === "skills" && !currentSkill() && project.skills[0]) active.skill = project.skills[0];
+      if (btn.dataset.tab === "effects" && !currentEffect() && project.effects[0]) active.effect = project.effects[0];
       switchTab(btn.dataset.tab);
     });
   });
@@ -1673,11 +1830,11 @@ function setupForms() {
   $("#btn-new-skill")?.addEventListener("click", () => edit.newSkill());
   $("#btn-new-effect")?.addEventListener("click", () => edit.newEffect());
   $("#ed-skill-list")?.addEventListener("change", (e) => {
-    active.skillId = e.target.value;
+    active.skill = project.skills[Number(e.target.value)] || null;
     renderAll();
   });
   $("#ed-effect-list")?.addEventListener("change", (e) => {
-    active.effectId = e.target.value;
+    active.effect = project.effects[Number(e.target.value)] || null;
     active.triggerId = null;
     renderAll();
   });
@@ -1689,9 +1846,9 @@ function setupForms() {
     if (!e.target.closest('[data-action="delete-skill"]')) return;
     const s = currentSkill();
     if (!s || !confirm(`删除技能「${s.name}」？`)) return;
-    project.skills = project.skills.filter((x) => x.id !== s.id);
+    project.skills = project.skills.filter((x) => x !== s);
     project.character.skillIds = (project.character.skillIds || []).filter((x) => x !== s.id);
-    active.skillId = project.skills[0] ? project.skills[0].id : null;
+    active.skill = project.skills[0] || null;
     canvasState.selectedId = null;
     markDirty();
     renderAll();
