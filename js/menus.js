@@ -30,7 +30,10 @@ export const MENUS = [
     label: "设计",
     icon: "design",
     color: "#a58bff",
-    items: [{ id: "editor", label: "编辑器" }],
+    items: [
+      { id: "library", label: "卡牌库" },
+      { id: "editor", label: "编辑器" },
+    ],
   },
   {
     id: "mod",
