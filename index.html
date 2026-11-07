@@ -105,6 +105,7 @@
             <select id="ed-character-list" class="grow" title="选择要编辑的角色"></select>
             <select id="ed-character-pack" class="pack-filter" title="按卡包筛选角色"></select>
             <button class="btn small" id="btn-new-character" type="button">新建角色</button>
+            <button class="btn small danger" id="btn-delete-character" type="button" data-action="delete-character" disabled>删除角色</button>
           </div>
           <h2>角色数据</h2>
           <div class="form-grid">
@@ -164,6 +165,7 @@
               <select id="ed-skill-list" class="grow"></select>
               <select id="ed-skill-pack" class="pack-filter" title="按卡包筛选技能"></select>
               <button class="btn small" id="btn-new-skill" type="button" data-action="new-skill">新建技能</button>
+              <button class="btn small danger" id="btn-delete-skill" type="button" data-action="delete-skill" disabled>删除技能</button>
             </div>
             <div id="ed-skill-form" class="form-form"></div>
           </div>
@@ -172,6 +174,7 @@
               <select id="ed-effect-list" class="grow"></select>
               <select id="ed-effect-pack" class="pack-filter" title="按卡包筛选效果"></select>
               <button class="btn small" id="btn-new-effect" type="button" data-action="new-effect">新建效果</button>
+              <button class="btn small danger" id="btn-delete-effect" type="button" data-action="delete-effect" disabled>删除效果</button>
             </div>
             <div id="ed-effect-form" class="form-form"></div>
           </div>
@@ -236,6 +239,18 @@
         <div class="ed-modal-actions">
           <button class="btn small" id="btn-export-cancel" type="button">取消</button>
           <button class="btn small" id="btn-export-confirm" type="button">导出</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 删除角色 / 技能 / 效果：二次确认 -->
+    <div class="ed-modal" id="ed-delete-modal" hidden>
+      <div class="ed-modal-box" role="dialog" aria-modal="true" aria-labelledby="ed-delete-title">
+        <h2 id="ed-delete-title">删除</h2>
+        <p class="muted" id="ed-delete-desc"></p>
+        <div class="ed-modal-actions">
+          <button class="btn small" id="btn-delete-cancel" type="button">取消</button>
+          <button class="btn small danger" id="btn-delete-confirm" type="button">删除</button>
         </div>
       </div>
     </div>
