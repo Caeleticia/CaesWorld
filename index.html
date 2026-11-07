@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="css/menu.css" />
   <link rel="stylesheet" href="css/editor.css" />
   <link rel="stylesheet" href="css/training.css" />
+  <link rel="stylesheet" href="css/subpage.css" />
 </head>
 <body class="is-loading">
 
@@ -83,11 +84,9 @@
       <div class="editor-title">编辑器 <span id="ed-status" class="ed-status"></span></div>
       <div class="editor-actions">
         <button class="btn small" id="btn-save" type="button">保存</button>
-        <button class="btn small" id="btn-export" type="button">导出工程</button>
-        <button class="btn small" id="btn-export-content" type="button">导出内容包</button>
+        <button class="btn small" id="btn-export" type="button">导出卡包</button>
         <button class="btn small" id="btn-import" type="button">导入</button>
         <input type="file" id="import-file" accept="application/json" hidden />
-        <input type="file" id="import-content-file" accept="application/json" hidden />
       </div>
     </header>
 
@@ -95,16 +94,23 @@
       <button class="ed-tab is-active" data-tab="character" type="button">设计角色</button>
       <button class="ed-tab" data-tab="skills" type="button">设计技能</button>
       <button class="ed-tab" data-tab="effects" type="button">设计效果</button>
+      <button class="ed-tab" data-tab="packs" type="button">卡包</button>
     </nav>
 
     <!-- 角色 -->
     <section class="ed-panel" data-panel="character">
       <div class="ed-columns">
         <div class="ed-col ed-col-form">
+          <div class="list-head">
+            <select id="ed-character-list" class="grow" title="选择要编辑的角色"></select>
+            <select id="ed-character-pack" class="pack-filter" title="按卡包筛选角色"></select>
+            <button class="btn small" id="btn-new-character" type="button">新建角色</button>
+          </div>
           <h2>角色数据</h2>
           <div class="form-grid">
             <label class="form-field"><span>名字</span><input id="f-name" /></label>
-            <label class="form-field"><span>id</span><input id="f-id" placeholder="custom_unit_xxx" /><em>扩展包_类型_标识</em></label>
+            <label class="form-field"><span>id</span><input id="f-id" placeholder="draft_unit_xxx" /><em>扩展包_类型_标识</em></label>
+            <label class="form-field"><span>所属卡包</span><select id="f-pack"></select></label>
             <label class="form-field"><span>品质</span>
               <select id="f-quality">
                 <option value="white">白</option><option value="blue">蓝</option><option value="gold">金</option><option value="rainbow">彩</option>
@@ -144,8 +150,7 @@
           <p class="muted" id="ed-unit-stats"></p>
           <h2>挂载技能</h2>
           <div class="mount-list" id="ed-mount-skills"></div>
-          <h2>挂载效果</h2>
-          <div class="mount-list" id="ed-mount-effects"></div>
+          <p class="muted">效果不能初始挂载，只能在战斗中用「附加效果」积木附加。</p>
         </div>
       </div>
     </section>
@@ -157,6 +162,7 @@
           <div id="ed-skill-col">
             <div class="list-head">
               <select id="ed-skill-list" class="grow"></select>
+              <select id="ed-skill-pack" class="pack-filter" title="按卡包筛选技能"></select>
               <button class="btn small" id="btn-new-skill" type="button" data-action="new-skill">新建技能</button>
             </div>
             <div id="ed-skill-form" class="form-form"></div>
@@ -164,6 +170,7 @@
           <div id="ed-effect-col" hidden>
             <div class="list-head">
               <select id="ed-effect-list" class="grow"></select>
+              <select id="ed-effect-pack" class="pack-filter" title="按卡包筛选效果"></select>
               <button class="btn small" id="btn-new-effect" type="button" data-action="new-effect">新建效果</button>
             </div>
             <div id="ed-effect-form" class="form-form"></div>
@@ -177,6 +184,8 @@
               <span id="zoom-label">100%</span>
               <button class="btn tiny" id="btn-zoom-in" type="button">＋</button>
               <button class="btn tiny" id="btn-fit" type="button">适应</button>
+              <button class="btn tiny" id="btn-locate" type="button" title="把视角移动到离视口中心最近的积木">定位</button>
+              <button class="btn tiny" id="btn-tidy" type="button" title="自动整理积木位置">整理</button>
               <button class="btn tiny danger" id="btn-delete-block" type="button" disabled>删除积木</button>
               <button class="btn tiny danger" id="btn-clear-flow" type="button">清空</button>
             </div>
@@ -200,12 +209,43 @@
       </div>
     </section>
 
+    <!-- 卡包 -->
+    <section class="ed-panel" data-panel="packs">
+      <div class="ed-columns ed-columns-pack">
+        <div class="ed-col ed-col-form">
+          <div class="list-head">
+            <select id="ed-pack-list" class="grow" title="选择要管理 / 导出的卡包"></select>
+            <button class="btn small" id="btn-new-pack" type="button">新建卡包</button>
+          </div>
+          <div id="ed-pack-form" class="form-form"></div>
+        </div>
+        <div class="ed-col ed-col-pack-cards">
+          <h2>卡包内容</h2>
+          <p class="muted">角色 / 技能 / 效果按「所属卡包」归到这里；导出时只导出这个卡包里的卡。</p>
+          <div id="ed-pack-cards" class="pack-card-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 导出卡包：先选卡包 -->
+    <div class="ed-modal" id="ed-export-modal" hidden>
+      <div class="ed-modal-box" role="dialog" aria-modal="true" aria-label="导出卡包">
+        <h2>导出卡包</h2>
+        <p class="muted">选择一个卡包，导出为卡包文件（工程 + 内容合并，可直接导入回来）。</p>
+        <select id="ed-export-pack"></select>
+        <div class="ed-modal-actions">
+          <button class="btn small" id="btn-export-cancel" type="button">取消</button>
+          <button class="btn small" id="btn-export-confirm" type="button">导出</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 实时存档 JSON：桌面端贴在编辑区底部，移动端固定屏幕下方，可折叠成悬浮球 -->
     <section class="json-save-panel" id="json-save-panel" aria-label="存档 JSON">
       <div class="json-head">
-        <strong>存档 JSON（积木 / 填写 / 连接 / 位置）</strong>
+        <strong>存档 JSON（当前卡包）</strong>
         <span class="json-head-actions">
-          <button class="btn tiny" id="btn-copy-save" type="button">复制内容包</button>
+          <button class="btn tiny" id="btn-copy-save" type="button">复制卡包</button>
           <button class="btn tiny json-collapse-btn" id="btn-collapse-save" type="button"
                   aria-controls="json-save" aria-expanded="true" title="折叠成悬浮球">—</button>
         </span>
@@ -215,6 +255,49 @@
     <!-- 折叠后的小悬浮球：收缩到屏幕边缘，显示 js -->
     <button class="json-fab" id="json-fab" type="button" hidden aria-controls="json-save-panel" aria-expanded="false"
             aria-label="展开存档 JSON" title="展开存档 JSON">js</button>
+  </main>
+
+  <!-- ======================= 设计 / 卡牌库 ======================= -->
+  <main id="library-page" class="subpage" hidden>
+    <header class="subpage-topbar">
+      <button class="btn small" id="library-back" type="button">← 返回</button>
+      <div class="subpage-title">设计 · 卡牌库 <small id="library-status"></small></div>
+      <div class="subpage-actions">
+        <button class="btn small" id="library-refresh" type="button">刷新</button>
+      </div>
+    </header>
+    <section class="subpage-body">
+      <div class="sub-toolbar">
+        <select id="library-pack" title="按默认包 / 模组包筛选"></select>
+        <div class="sub-tabs" role="tablist" aria-label="卡牌类型">
+          <button class="sub-tab is-active" type="button" data-lib-tab="units" role="tab">单位</button>
+          <button class="sub-tab" type="button" data-lib-tab="skills" role="tab">技能</button>
+          <button class="sub-tab" type="button" data-lib-tab="effects" role="tab">效果</button>
+        </div>
+        <input id="library-search" type="search" placeholder="搜索名字 / id…" autocomplete="off" />
+        <span class="sub-count" id="library-count">0</span>
+      </div>
+      <div id="library-list" class="card-grid"></div>
+    </section>
+  </main>
+
+  <!-- ======================= 模组 / 模组管理 ======================= -->
+  <main id="mod-page" class="subpage" hidden>
+    <header class="subpage-topbar">
+      <button class="btn small" id="mod-back" type="button">← 返回</button>
+      <div class="subpage-title">模组 · 模组管理 <small id="mod-status"></small></div>
+      <div class="subpage-actions">
+        <button class="btn small" id="mod-import" type="button">导入模组</button>
+        <input type="file" id="mod-file" accept=".json,.js,.txt,application/json,text/plain" hidden />
+        <button class="btn small" id="mod-refresh" type="button">刷新</button>
+      </div>
+    </header>
+    <section class="subpage-body">
+      <p class="mod-hint">
+        服务器模组从 <code>mods/index.txt</code> 读取清单、从 <code>mods/</code> 读取模组文件；导入的模组保存在浏览器本地，启用 / 停用只影响本地。
+      </p>
+      <div id="mod-list" class="mod-list"></div>
+    </section>
   </main>
 
   <!-- ======================= 测试 / 训练场：配置 ======================= -->
