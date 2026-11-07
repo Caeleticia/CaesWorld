@@ -126,9 +126,9 @@ import { ContentRegistry, createBattle, serializeBattle, restoreBattle } from ".
 | `constants.js` | 四系属性、品质、技能类型、单位默认数值、id 规则 |
 | `math.js` | 四系表工具、浮点近似、可复现随机（mulberry32） |
 | `units.js` | 单位卡：默认值、规范化、校验 |
-| `skills.js` | 技能卡：默认值、校验、倍率、效果列表 |
+| `skills.js` | 技能卡：默认值、校验、效果列表 |
 | `modifiers.js` | 效果加成累加器（所有「加成」的唯一入口） |
-| `stats.js` | 实时面板：攻击力 / 防御力 / 生命值 / 暴击 / 四系抗性 |
+| `stats.js` | 实时面板：攻击力 / 防御力 / 生命值 / 暴击 / 三系抗性（本源无抗性） |
 | `damage.js` | 伤害公式（纯函数，返回完整过程记录） |
 | `targeting.js` | 站位、占位、计数、索敌 |
 | `buffs.js` | 运行时效果（持续次数、标签、属性限定） |
@@ -150,7 +150,7 @@ import { ContentRegistry, createBattle, serializeBattle, restoreBattle } from ".
   "critRate": 0.05,
   "critDamage": 0.5,
   "speed": 100,                      // 新增：只决定行动顺序（默认 100）
-  "resistances": { "physical": 0.05, "magic": 0.05, "spirit": 0.05, "origin": 0.05 },
+  "resistances": { "physical": 0.05, "magic": 0.05, "spirit": 0.05 },
   "occupiesSlot": true,              // 是否占位
   "countsAsUnit": true,              // 是否计数
   "invincible": false,               // 是否无敌（无条件）
@@ -160,6 +160,8 @@ import { ContentRegistry, createBattle, serializeBattle, restoreBattle } from ".
 ```
 
 百分比一律存小数（5% = `0.05`）。省略的字段取默认值（`createUnitCard` 会补全）。
+
+本源是真实伤害，`resistances` 只有 `physical / magic / spirit` 三系；旧数据里的 `origin` 抗性会被忽略。
 
 ### 要不要有速度？
 
@@ -172,8 +174,6 @@ import { ContentRegistry, createBattle, serializeBattle, restoreBattle } from ".
   "name": "黏液拍击",
   "id": "default_skill_slimebeat",   // 类型段必须是 skill
   "type": "active",                  // active 主动 / passive 被动
-  "attribute": "physical",           // physical 物理 / magic 魔法 / spirit 精神 / origin 本源
-  "multiplier": 1,                   // 或 { "physical": 1.2, "magic": 0 }；省略 = 1
   "valueSource": "atk",              // 技能指定的数值：实时攻击力（默认）或固定数字
   "targets": 1,
   "requiresTarget": true,
@@ -186,6 +186,8 @@ import { ContentRegistry, createBattle, serializeBattle, restoreBattle } from ".
 ```
 
 `buff.def` 可以直接写 `"atkFlat": "ATTACKER"`，施放时替换成施放者当前攻击力。
+
+技能本身不带属性与倍率：伤害由流程里的「攻击」积木完成，属性与数值都在积木上指定。数据式旧接口的伤害效果可用 `attribute` 指定属性（省略按 `physical`）。
 
 ## 效果加成（实时计算）
 
@@ -204,7 +206,7 @@ import { ContentRegistry, createBattle, serializeBattle, restoreBattle } from ".
 A 打 B，伤害属性 attr：
 
 ```
-伤害值 = 技能指定的数值(默认 A 攻击力) × 技能倍率
+伤害值 = 攻击积木给的数值(默认 A 攻击力)
        × (1 + A 伤害提升%) × (1 + A 对应属性伤害提升%)
        × (暴击 ? 1 + A 暴击伤害 : 1)
 
@@ -218,7 +220,7 @@ A 打 B，伤害属性 attr：
 数值约定：
 
 - **白板互打**：A攻1000打B防500（等级都 90、抗性 5%）= `1000 × (100/600) × 0.95 = 158.33`。
-- **本源伤害**：无视任何加成、防御、抗性、免伤/易伤/无敌，不暴击；伤害 = 技能数值 × 倍率（本源技能用**卡面基础攻击力**，不吃加成）。「本源技能里施加的 buff」本身照常生效，只是该次本源伤害不算加成。
+- **本源伤害**：无视任何加成、防御、抗性、免伤/易伤/无敌，不暴击；伤害 = 指定数值（本源攻击用**卡面基础攻击力**，不吃加成）。「本源技能里施加的 buff」本身照常生效，只是该次本源伤害不算加成。
 - **无敌**：伤害记 0，计算过程照常返回（`targetInvincible: true`）。
 - **防护**：防御减伤率封顶 99%；`(1+x)` 遇到负加成最多归零，不会出现负伤害或「减伤变增伤」。
 - **暴击判定**：不传 `crit` 时按 A 的暴击率掷骰（随机源是种子决定的可复现 RNG）。
@@ -258,13 +260,17 @@ createBattle({ registry, units: [{ cardId, side, slot }], seed })
 
 主菜单 → 设计 → 编辑器（或地址后加 `#editor`）。三个标签：**设计角色 / 设计技能 / 设计效果**。
 
+界面按宽度自动适配：
+- **桌面端（>900px）**：左表单 / 右流程双栏，积木盒是流程区左侧的竖排列表，画布占满剩余高度。
+- **移动端（≤900px）**：单栏纵向滚动，积木盒变成画布上方的横向积木条（每组 5 行、整体横向滑动，不用再在组内上下滚）；「存档 JSON」默认折叠成底部悬浮条，点「js」展开，展开时页面底部预留对应高度，不会盖住最后一段内容。
+
 ## 设计角色
-- 填写名字、id、品质、等级、基础生命/攻击/防御、暴击率/暴击伤害、速度、标签、四系抗性、占位/计数/无敌
+- 填写名字、id、品质、等级、基础生命/攻击/防御、暴击率/暴击伤害、速度、标签、三系抗性（本源无抗性）、占位/计数/无敌
 - 卡面图片：填路径（默认用内置占位图）、选本地图片（内嵌成 data URL）、一键回到占位图
 - 右侧实时预览卡面，并勾选要「挂载」的技能 / 效果（技能由角色为主体执行，效果挂在角色身上，存在时才可能触发）
 
 ## 设计技能 / 效果
-- 技能：选择/新建技能，填名字、id（`扩展包_类型_标识`）、主动/被动、属性、倍率
+- 技能：选择/新建技能，填名字、id（`扩展包_类型_标识`）、主动/被动；攻击方式与数值在流程里搭（「攻击」积木上选属性、接数值）
 - 效果：选择/新建效果，勾选「负面 / 不可解除」，加「触发流程」（每块触发积木对应一条流程，事件在积木上选）
 
 ## 拖积木（积木块总览）

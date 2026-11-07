@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#E5FFFF" />
   <meta name="color-scheme" content="light" />
   <meta name="description" content="Cae'sWorld —— 每个人都能做卡牌。" />
-  <title>Cae'sWorld · 每个人都能做卡牌</title>
+  <title>Cae'sWorld</title>
   <!-- data/tips.txt、assets/banner/index.txt 在 file:// 下会被浏览器按 CORS 拦住，此时走内置兜底 -->
   <meta name="cw-tips-source" content="fallback" />
 
@@ -51,7 +51,7 @@
     <aside class="sidebar" aria-label="主菜单导航">
       <div class="sidebar-brand">
         <h1 class="cw-title cw-title--small"><span class="cw-title-a">Cae's</span><span class="cw-title-b">World</span></h1>
-        <p class="cw-slogan">每个人都能做卡牌</p>
+        <p class="cw-slogan">by caeleticia</p>
       </div>
 
       <div class="cw-tip cw-tip--side" aria-label="你知道吗">
@@ -125,11 +125,10 @@
             <label class="form-check"><input id="f-invincible" type="checkbox" /> 无敌</label>
           </div>
           <fieldset class="resist-box">
-            <legend>各属性抗性</legend>
+            <legend>各系抗性（本源为真实伤害，无抗性）</legend>
             <label>物理 <input id="f-res-physical" type="number" step="0.01" /></label>
             <label>魔法 <input id="f-res-magic" type="number" step="0.01" /></label>
             <label>精神 <input id="f-res-spirit" type="number" step="0.01" /></label>
-            <label>本源 <input id="f-res-origin" type="number" step="0.01" /></label>
           </fieldset>
           <div class="form-row">
             <label class="btn small">选择图片<input id="f-image-file" type="file" accept="image/*" hidden /></label>
@@ -200,11 +199,21 @@
       </div>
     </section>
 
-    <!-- 实时存档 JSON -->
-    <section class="json-save-panel">
-      <div class="json-head"><strong>存档 JSON（积木 / 填写 / 连接 / 位置）</strong><button class="btn tiny" id="btn-copy-save" type="button">复制内容包</button></div>
-      <pre id="json-save">{}</pre>
+    <!-- 实时存档 JSON：桌面端贴在编辑区底部，移动端固定屏幕下方，可折叠成悬浮球 -->
+    <section class="json-save-panel" id="json-save-panel" aria-label="存档 JSON">
+      <div class="json-head">
+        <strong>存档 JSON（积木 / 填写 / 连接 / 位置）</strong>
+        <span class="json-head-actions">
+          <button class="btn tiny" id="btn-copy-save" type="button">复制内容包</button>
+          <button class="btn tiny json-collapse-btn" id="btn-collapse-save" type="button"
+                  aria-controls="json-save" aria-expanded="true" title="折叠成悬浮球">—</button>
+        </span>
+      </div>
+      <pre id="json-save" class="json-save-body"></pre>
     </section>
+    <!-- 折叠后的小悬浮球：收缩到屏幕边缘，显示 js -->
+    <button class="json-fab" id="json-fab" type="button" hidden aria-controls="json-save-panel" aria-expanded="false"
+            aria-label="展开存档 JSON" title="展开存档 JSON">js</button>
   </main>
 
   <script type="module" src="js/app.js"></script>
