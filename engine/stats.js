@@ -10,7 +10,7 @@
  * 层叠乘子(atkMul/defMul/hpMul)乘在括号外，供 buff / 场景效果使用。
  * 本源伤害不使用这些面板数值（见 damage.js）。
  */
-import { ATTRIBUTES } from "./constants.js";
+import { ATTRIBUTES, RESISTANCE_ATTRIBUTES } from "./constants.js";
 import { emptyAccum } from "./modifiers.js";
 import { attrZero } from "./math.js";
 
@@ -33,8 +33,8 @@ export function computeStats(card, acc = emptyAccum()) {
   const def = (card.baseDef * (1 + a.defPct) + a.defFlat) * defMul;
   const hp = (card.baseHp * (1 + a.hpPct) + a.hpFlat) * hpMul;
 
-  const resistances = attrZero(0);
-  for (const attr of ATTRIBUTES) {
+  const resistances = {};
+  for (const attr of RESISTANCE_ATTRIBUTES) {
     resistances[attr] = card.resistances?.[attr] ?? 0;
   }
 

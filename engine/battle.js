@@ -16,6 +16,7 @@
  */
 import {
   ATTRIBUTES,
+  RESISTANCE_ATTRIBUTES,
   TRUE_DAMAGE_ATTRIBUTE,
   UNIT_STATES,
 } from "./constants.js";
@@ -23,7 +24,7 @@ import { createRng } from "./math.js";
 import { addBonus, emptyAccum } from "./modifiers.js";
 import { computeStats } from "./stats.js";
 import { calculateDamage } from "./damage.js";
-import { normalizeEffects, multiplierFor } from "./skills.js";
+import { normalizeEffects } from "./skills.js";
 import { buffToBonus, buffExpired, createBuff, hasTag, resetBuffSequence } from "./buffs.js";
 import { canPlace, normalizeSlot, otherSide, selectTarget, sideOf, DEFAULT_SLOTS } from "./targeting.js";
 import { prepareFlow, runFlow } from "./flow.js";
@@ -32,6 +33,11 @@ export const BATTLE_EVENT = Object.freeze({
   BATTLE_START: "battle:start",
   TURN_START: "turn:start",
   TURN_END: "turn:end",
+  /** 回合（round）：side 模式下「全场单位各行动一次」算一回合 */
+  ROUND_START: "round:start",
+  ROUND_END: "round:end",
+  /** 轮到某一方选择行动单位（side 模式） */
+  SIDE_TURN: "side:turn",
   ACTION_START: "action:start",
   ACTION_SKIP: "action:skip",
   SKILL: "skill",
@@ -51,6 +57,26 @@ export const BATTLE_EVENT = Object.freeze({
   DEATH: "death",
   FLOW_ERROR: "flow:error",
   BATTLE_END: "battle:end",
+});
+
+/**
+ * 战斗模式：
+ *   speed —— 按速度排序，每个单位轮流行动（旧流程，默认）
+ *   side  —— 训练场流程：每回合双方各自入场新单位 → 触发回合开始效果 →
+ *            红方先手、双方交替各选 1 个未行动单位行动 1 次 → 回合结束效果 → 下一回合
+ */
+export const BATTLE_MODE = Object.freeze({
+  SPEED: "speed",
+  SIDE: "side",
+});
+
+/** side 模式的阶段 */
+export const BATTLE_PHASE = Object.freeze({
+  /** 等待当前方选择行动单位 */
+  SELECT: "select",
+  /** 已选中单位，等待使用技能 / 结束行动 */
+  ACT: "act",
+  FINISHED: "finished",
 });
 
 /** 战斗结束（终止）原因 */
@@ -89,6 +115,13 @@ const nextUid = () => `battle:${++seq}`;
  * @param {number} [setup.summonLimit] 每侧计数单位上限（不勾「无视单位上限」时生效）
  * @param {function} [setup.chooseTargets] 玩家选人回调（返回单位或单位数组），传了才允许「选择单位」积木
  * @param {function} [setup.onEvent]
+ *
+ * —— side 模式（训练场）专用 ——
+ * @param {"speed"|"side"} [setup.mode]
+ * @param {{ally?: string[], enemy?: string[]}} [setup.decks] 双方牌组（单位卡 id，按入场顺序）
+ * @param {number} [setup.maxUnits] 每侧场上最多单位数（默认取 summonLimit / slotsPerSide）
+ * @param {"ally"|"enemy"} [setup.firstSide] 先手方（默认 ally = 红方）
+ * @param {string[]} [setup.invincibleSides] 整方无敌（训练场「红方无敌 / 蓝方无敌」）
  */
 export function createBattle(setup) {
   const {
@@ -99,9 +132,25 @@ export function createBattle(setup) {
     onEvent = null,
     slotsPerSide = DEFAULT_SLOTS,
     summonLimit = slotsPerSide,
+    mode = BATTLE_MODE.SPEED,
+    decks = null,
+    maxUnits = null,
+    firstSide = "ally",
+    invincibleSides = [],
   } = setup || {};
 
   if (!registry) throw new Error("createBattle 需要 registry");
+  if (!Object.values(BATTLE_MODE).includes(mode)) throw new Error(`无效战斗模式：${mode}`);
+
+  const sideMode = mode === BATTLE_MODE.SIDE;
+  const fieldSize = Math.max(
+    1,
+    Math.min(24, Math.round(Number(maxUnits) || Number(summonLimit) || Number(slotsPerSide) || DEFAULT_SLOTS))
+  );
+  /** side 模式下格子数与场上单位上限都等于「场上最多单位数」 */
+  const slots = sideMode ? fieldSize : slotsPerSide;
+  const limit = sideMode ? fieldSize : summonLimit;
+  const first = sideOf(firstSide || "ally");
 
   const id = nextUid();
   const rng = createRng(seed);
@@ -128,10 +177,34 @@ export function createBattle(setup) {
     actionSeq: 0,
     cycle: 0,
     maxCycles,
-    slotsPerSide,
-    summonLimit,
+    slotsPerSide: slots,
+    summonLimit: limit,
     units: [],
     events,
+    /** 战斗模式：speed / side */
+    mode,
+    /** side 模式：select / act / finished；speed 模式恒为 act */
+    phase: sideMode ? BATTLE_PHASE.SELECT : BATTLE_PHASE.ACT,
+    /** side 模式：当前轮到哪一方选单位 */
+    sideTurn: first,
+    firstSide: first,
+    /** side 模式：本回合已经行动过的单位 uid */
+    acted: [],
+    /** side 模式：每侧场上最多单位数 */
+    maxUnits: fieldSize,
+    /** 整方无敌 */
+    invincibleSides: Array.isArray(invincibleSides)
+      ? invincibleSides.filter((s) => s === "ally" || s === "enemy")
+      : [],
+    /** side 模式：双方牌组（剩余待入场单位卡 id） */
+    decks: sideMode
+      ? {
+          ally: decks && Array.isArray(decks.ally) ? decks.ally.slice() : [],
+          enemy: decks && Array.isArray(decks.enemy) ? decks.enemy.slice() : [],
+        }
+      : { ally: [], enemy: [] },
+    /** 正在做回合开始入场（此时入场单位本回合可以行动） */
+    deploying: false,
     /** 本回合被「跳过行动」标记的单位 */
     skippedThisTurn: [],
     /** 正在执行技能/效果的上下文（供「当前目标」类积木读取） */
@@ -227,7 +300,7 @@ export function createBattle(setup) {
     return null;
   };
   const isAlive = (u) => Boolean(u) && u.state === UNIT_STATES[0];
-  const isInvincible = (u) => Boolean(u) && u.invincible;
+  const isInvincible = (u) => Boolean(u) && (u.invincible || state.invincibleSides.includes(u.side));
   const livingUnits = () => state.units.filter(isAlive);
   const livingOf = (side) => livingUnits().filter((u) => u.side === side);
   const listSide = (side) => livingOf(side).filter((u) => u.countsAsUnit);
@@ -253,7 +326,7 @@ export function createBattle(setup) {
   function resistancesOf(u) {
     const s = statsOf(u);
     const out = { ...s.resistances };
-    for (const attr of ATTRIBUTES) {
+    for (const attr of RESISTANCE_ATTRIBUTES) {
       if (u.attrBonus[attr]) out[attr] = (out[attr] || 0) + u.attrBonus[attr].flat;
     }
     return out;
@@ -363,26 +436,42 @@ export function createBattle(setup) {
     return out;
   }
 
-  function triggerMatches(effect, eventType) {
+  /**
+   * 判断某个效果/技能卡面上的触发是否响应当前事件。
+   *
+   * @param {object} effect 效果（单位卡 member 会带 __member）
+   * @param {string} eventType 事件类型
+   * @param {object} [info] 事件附加信息
+   *   info.skillId：本次施放的技能 id，用于区分「单位释放该技能」。
+   *   skillCastSelf 只在「施放的正是本技能自己」时成立——
+   *   比对的是触发所在卡面（技能/效果）的 id 与本次施放的 skill.id 是否相同。
+   */
+  function triggerMatches(effect, eventType, info) {
+    const skillId = info && info.skillId;
+    const matchesEvent = (ev) => {
+      if (ev === eventType) return true;
+      // 「始终」：任何数据更新都触发一次
+      if (ev === "always" && eventType === "dataUpdate") return true;
+      // 「单位释放该技能」：本质是 skillCast 的收窄版，只认本技能自己
+      if (ev === "skillCastSelf" && eventType === "skillCast") {
+        return Boolean(skillId) && effect.id === skillId;
+      }
+      return false;
+    };
     if (effect.__member) {
       if (!effect.__member.block || !effect.__member.block.event) return false;
-      const ev = effect.__member.block.event;
-      return ev === eventType || (ev === "always" && eventType === "dataUpdate");
+      return matchesEvent(effect.__member.block.event);
     }
-    return (effect.triggers || []).some((t) => {
-      if (!t || !t.event) return false;
-      if (t.event === eventType) return true;
-      // 「始终」：任何数据更新都触发一次
-      return t.event === "always" && eventType === "dataUpdate";
-    });
+    return (effect.triggers || []).some((t) => t && t.event && matchesEvent(t.event));
   }
 
   /**
    * 广播事件：找出所有「身上有该事件触发」的效果并执行其流程。
    * @param {string} eventType
    * @param {object[]} targets 事件涉及的单位
+   * @param {object} [info] 事件附加信息（如 skillId，用于「单位释放该技能」）
    */
-  function emit(eventType, targets = []) {
+  function emit(eventType, targets = [], info = {}) {
     if (state.status === "finished" && eventType !== "unitExit") return;
     if (triggerDepth > MAX_TRIGGER_DEPTH) {
       log(BATTLE_EVENT.FLOW_ERROR, { event: eventType, reason: "触发嵌套过深" });
@@ -393,7 +482,7 @@ export function createBattle(setup) {
     const seen = new Set();
     for (const u of livingUnits()) {
       for (const effect of activeEffectsOf(u)) {
-        if (!triggerMatches(effect, eventType)) continue;
+        if (!triggerMatches(effect, eventType, info)) continue;
         // 全局事件人人有份；其余事件只有「事件涉及的单位」身上的效果才会触发
         // （受击事件的目标就是正在挨打的单位，所以反伤不会再反向触发攻击方）
         // 事件对象必须带上单位 key（单位由 makeUnit 建立，key = uid）
@@ -407,7 +496,7 @@ export function createBattle(setup) {
     }
     if (!candidates.length) return;
 
-    const frame = { type: eventType, targets };
+    const frame = { type: eventType, targets, info };
     const prevEmitting = emitting;
     emitting = frame;
     emitStack.push(frame);
@@ -416,16 +505,17 @@ export function createBattle(setup) {
       for (const { unit, effect } of candidates) {
         if (!isAlive(unit)) continue;
         const flows = effect.flows || {};
+        const sameEvent = (ev) =>
+          ev === eventType ||
+          (ev === "always" && eventType === "dataUpdate") ||
+          (ev === "skillCastSelf" && eventType === "skillCast" && Boolean(info.skillId) && effect.id === info.skillId);
         const blocks = effect.__member
-          ? [effect.__member.block].filter((b) => b.event === eventType || (b.event === "always" && eventType === "dataUpdate"))
-          : (effect.triggers || []).filter((t) => {
-          if (!t || !t.event) return false;
-          if (t.event === eventType) return true;
-          return t.event === "always" && eventType === "dataUpdate";
-        });
+          ? [effect.__member.block].filter((b) => b && sameEvent(b.event))
+          : (effect.triggers || []).filter((t) => t && t.event && sameEvent(t.event));
         for (const block of blocks) {
           if (state.status === "finished") break;
-          const flow = flows[block.id];
+          // 单位卡 member 的流程挂在 __member.flow 上（不在 effect.flows 里）
+          const flow = effect.__member ? effect.__member.flow : flows[block.id];
           if (!flow) continue;
           const prepared = prepareFlow(flow);
           if (!prepared.ok) {
@@ -478,7 +568,6 @@ export function createBattle(setup) {
           attackerRef: extra && extra.source ? extra.source : owner,
           targetRef: t,
           value,
-          multiplier: 1,
           attribute,
           cause: "flow",
         });
@@ -592,7 +681,6 @@ export function createBattle(setup) {
       attacker: aStats,
       target: bStats,
       skillValue,
-      multiplier: Number(p.multiplier) || 0,
       attribute,
       crit: p.crit,
       noCrit: p.noCrit || isTrue,
@@ -752,28 +840,83 @@ export function createBattle(setup) {
     return null;
   }
 
-  function summonUnits({ unitId, count, label, ignoreLimit, parent, owner }) {
+  /**
+   * 在某一侧生成 1 个单位（入场流程走 summon 事件）。
+   * @returns {object|null} 生成失败（未知卡 / 超出上限 / 没有空格）返回 null
+   */
+  function spawnCard({ unitId, side, label, parent, ignoreLimit = false, markActed = false, cause = "summon" }) {
     const card = registry.getUnit(unitId);
-    if (!card) throw new Error(`未知单位卡：${unitId}`);
-    const side = parent ? parent.side : owner ? owner.side : "enemy";
-    const spawned = [];
-    for (let i = 0; i < count; i += 1) {
-      if (!ignoreLimit && livingOf(side).filter((u) => u.countsAsUnit).length >= state.summonLimit) break;
-      const slot = freeSlotFor(side);
-      if (slot === null) break;
-      const uid = `s${++summonSeq}`;
-      const unit = makeUnit(uid, card, side, slot, undefined, label || card.label);
-      unit.parentKey = parent ? parent.key : null;
-      if (parent) {
-        for (const attr of Object.keys(parent.attrBonus)) unit.attrBonus[attr] = { ...parent.attrBonus[attr] };
-        for (const layer of parent.effects) {
-          unit.effects.push({ id: layer.id, stacks: layer.stacks, inheritedFrom: { source: parent.key, effectId: layer.id } });
-        }
-        recomputeAttrBonuses(unit);
+    if (!card) {
+      log(BATTLE_EVENT.FLOW_ERROR, { reason: `未知单位卡：${unitId}` });
+      return null;
+    }
+    if (!ignoreLimit && livingOf(side).filter((u) => u.countsAsUnit).length >= state.summonLimit) return null;
+    const slot = freeSlotFor(side);
+    if (slot === null) return null;
+    const uid = `s${++summonSeq}`;
+    const unit = makeUnit(uid, card, side, slot, undefined, label || card.label);
+    unit.parentKey = parent ? parent.key : null;
+    if (parent) {
+      for (const attr of Object.keys(parent.attrBonus)) unit.attrBonus[attr] = { ...parent.attrBonus[attr] };
+      for (const layer of parent.effects) {
+        unit.effects.push({ id: layer.id, stacks: layer.stacks, inheritedFrom: { source: parent.key, effectId: layer.id } });
       }
-      state.units.push(unit);
+      recomputeAttrBonuses(unit);
+    }
+    state.units.push(unit);
+    // side 模式：回合中途召唤出来的单位本回合不再行动
+    if (sideMode && markActed && !state.acted.includes(unit.uid)) state.acted.push(unit.uid);
+    log(BATTLE_EVENT.SUMMON, {
+      unit: uid,
+      cardId: unitId,
+      side,
+      slot,
+      parent: unit.parentKey,
+      label: unit.label,
+      cause,
+    });
+    return unit;
+  }
+
+  function summonUnits({ unitId, count, label, ignoreLimit, parent, owner, side: explicitSide, markActed }) {
+    if (!registry.getUnit(unitId)) throw new Error(`未知单位卡：${unitId}`);
+    const side = explicitSide || (parent ? parent.side : owner ? owner.side : "enemy");
+    const spawned = [];
+    const acted = markActed === undefined ? sideMode && !state.deploying : Boolean(markActed);
+    for (let i = 0; i < count; i += 1) {
+      const unit = spawnCard({
+        unitId,
+        side,
+        label,
+        parent,
+        ignoreLimit,
+        markActed: acted,
+        cause: parent ? "summon-child" : "summon",
+      });
+      if (!unit) break;
       spawned.push(unit);
-      log(BATTLE_EVENT.SUMMON, { unit: uid, cardId: unitId, side, slot, parent: unit.parentKey, label: unit.label });
+    }
+    for (const unit of spawned) emit("unitEnter", [unit]);
+    return spawned.length;
+  }
+
+  /** 回合开始：按牌组顺序把单位补到「场上最多单位数」 */
+  function deployFromDeck(side) {
+    const deck = state.decks[side] || [];
+    if (!deck.length) return 0;
+    const spawned = [];
+    while (deck.length) {
+      const cardId = deck.shift();
+      if (!registry.getUnit(cardId)) {
+        log(BATTLE_EVENT.FLOW_ERROR, { reason: `牌组里有未知单位卡：${cardId}`, side });
+        continue;
+      }
+      const unit = spawnCard({ unitId: cardId, side, markActed: false, cause: "deploy" });
+      if (!unit) {
+        deck.unshift(cardId);
+        break;
+      }
+      spawned.push(unit);
     }
     for (const unit of spawned) emit("unitEnter", [unit]);
     return spawned.length;
@@ -790,16 +933,21 @@ export function createBattle(setup) {
     if (state.status !== "running") return true;
     const allies = livingOf("ally").filter((u) => u.countsAsUnit);
     const enemies = livingOf("enemy").filter((u) => u.countsAsUnit);
+    // side 模式：牌组里还有单位 = 还没输，下回合会补上场
+    const deckLeft = (side) => (state.decks[side] || []).length;
+    const allyOut = allies.length === 0 && (!sideMode || deckLeft("ally") === 0);
+    const enemyOut = enemies.length === 0 && (!sideMode || deckLeft("enemy") === 0);
     const finish = (reason, winner) => {
       state.status = "finished";
       state.endReason = reason;
       state.winner = winner;
+      state.phase = BATTLE_PHASE.FINISHED;
       log(BATTLE_EVENT.BATTLE_END, { reason, winner });
       return true;
     };
-    if (!allies.length && !enemies.length) return finish(BATTLE_END_REASON.DRAW, null);
-    if (!enemies.length) return finish(BATTLE_END_REASON.ENEMY_DEFEATED, "ally");
-    if (!allies.length) return finish(BATTLE_END_REASON.ALLY_DEFEATED, "enemy");
+    if (allyOut && enemyOut) return finish(BATTLE_END_REASON.DRAW, null);
+    if (enemyOut) return finish(BATTLE_END_REASON.ENEMY_DEFEATED, "ally");
+    if (allyOut) return finish(BATTLE_END_REASON.ALLY_DEFEATED, "enemy");
     return false;
   }
 
@@ -876,6 +1024,129 @@ export function createBattle(setup) {
     }
   }
 
+  /* ================= side 模式：回合 / 选人 / 交替行动 ================= */
+  /** 某方是否还有「本回合没行动过」的存活单位 */
+  function hasActable(side) {
+    return livingOf(side).some((u) => !state.acted.includes(u.uid));
+  }
+
+  /** 行动顺序最靠前的存活单位（回合开始/结束事件的对象） */
+  function sideLeader() {
+    return actionOrder()[0] || null;
+  }
+
+  /**
+   * 回合结束 → 下一回合：
+   *   回合结束效果 → 回合数 +1 → 双方入场新单位 → 回合开始效果
+   */
+  function endRound() {
+    const leader = sideLeader();
+    log(BATTLE_EVENT.ROUND_END, { turn: state.turn });
+    emit("turnEnd", leader ? [leader] : []);
+    if (state.status !== "running") return;
+    state.turn += 1;
+    if (state.turn > state.maxCycles) {
+      state.status = "finished";
+      state.endReason = BATTLE_END_REASON.MAX_CYCLES;
+      state.winner = null;
+      state.phase = BATTLE_PHASE.FINISHED;
+      log(BATTLE_EVENT.BATTLE_END, { reason: state.endReason, winner: null });
+      return;
+    }
+    state.acted = [];
+    state.activeId = null;
+    state.deploying = true;
+    deployFromDeck("ally");
+    deployFromDeck("enemy");
+    state.deploying = false;
+    if (state.status !== "running") return;
+    const leader2 = sideLeader();
+    log(BATTLE_EVENT.ROUND_START, { turn: state.turn });
+    emit("turnStart", leader2 ? [leader2] : []);
+  }
+
+  /**
+   * 推进到下一个「等待选人」状态：
+   * 默认与上一行动方交替；若对方没有可行动单位，则本方继续；双方都没有 → 回合结束。
+   */
+  function advanceSide(previous) {
+    if (state.status !== "running") return api;
+    if (checkEnd()) return api;
+    let side = previous ? otherSide(previous.side) : state.firstSide;
+    let guard = 0;
+    for (;;) {
+      guard += 1;
+      if (guard > 1000) throw new Error("行动推进出现死循环");
+      if (!hasActable(side)) {
+        const other = otherSide(side);
+        if (hasActable(other)) {
+          side = other;
+        } else {
+          endRound();
+          if (state.status !== "running") return api;
+          if (checkEnd()) return api;
+          side = state.firstSide;
+          if (!hasActable(side)) side = otherSide(side);
+          if (!hasActable(side)) {
+            // 双方都没有可行动单位（理论上 checkEnd 已处理），避免卡死
+            return api;
+          }
+        }
+      }
+      state.sideTurn = side;
+      state.activeId = null;
+      state.phase = BATTLE_PHASE.SELECT;
+      log(BATTLE_EVENT.SIDE_TURN, { side });
+      return api;
+    }
+  }
+
+  /**
+   * 选择本回合要行动的单位（side 模式）。
+   * @param {string} unitRef uid / key
+   * @returns {boolean} 是否选上
+   */
+  function selectUnit(unitRef) {
+    if (!sideMode || state.status !== "running" || state.phase !== BATTLE_PHASE.SELECT) return false;
+    const u = getUnit(unitRef);
+    if (!isAlive(u) || u.side !== state.sideTurn || state.acted.includes(u.uid)) return false;
+    state.activeId = u.uid;
+    state.phase = BATTLE_PHASE.ACT;
+    state.actionSeq += 1;
+    log(BATTLE_EVENT.TURN_START, { activeId: u.uid });
+    emit("unitTurnStart", [u]);
+    if (state.status !== "running") return false;
+    if (!isAlive(u)) {
+      // 行动开始效果把人打死了：这个单位的行动直接结束
+      endSideAction();
+      return false;
+    }
+    log(BATTLE_EVENT.ACTION_START, { activeId: u.uid });
+    return true;
+  }
+
+  /** side 模式：当前单位行动结束（没死也要收尾） */
+  function endSideAction() {
+    if (state.status !== "running") return api;
+    const uid = state.activeId;
+    const A = uid ? getUnit(uid) : null;
+    state.activeId = null;
+    state.phase = BATTLE_PHASE.SELECT;
+    if (A && isAlive(A)) {
+      emit("unitTurnEnd", [A]);
+      for (const buff of A.buffs) if (buff.duration !== null) buff.duration -= 1;
+      const expired = A.buffs.filter(buffExpired);
+      if (expired.length) {
+        A.buffs = A.buffs.filter((b) => !expired.includes(b));
+        log(BATTLE_EVENT.BUFF_EXPIRED, { unit: A.uid, buffs: expired.map((b) => b.uid) });
+      }
+    }
+    if (A && !state.acted.includes(A.uid)) state.acted.push(A.uid);
+    log(BATTLE_EVENT.TURN_END, { activeId: A ? A.uid : null, actionSeq: state.actionSeq });
+    if (state.status !== "running") return api;
+    return advanceSide(A);
+  }
+
   /* ================= 技能 ================= */
   function allSkillsOf(u) {
     const extra = u.granted.map((g) => registry.getSkill(g.skillId)).filter(Boolean);
@@ -901,7 +1172,6 @@ export function createBattle(setup) {
       caster: A.uid,
       skillId: skill.id,
       skillName: skill.name,
-      attribute: skill.attribute,
       target: primary ? primary.uid : null,
     });
 
@@ -910,7 +1180,8 @@ export function createBattle(setup) {
     prevSkillTargets = primary ? [primary] : [];
     state.current = { ...prev, skillUnit: A, curTargets: prevSkillTargets };
     try {
-      emit("skillCast", [A]);
+      // 带上被施放的技能 id：「单位释放该技能」据此只响应本技能自己
+      emit("skillCast", [A], { skillId: skill.id });
       if (state.status === "finished") return skill;
 
       if (skill.format === "flow" && skill.flow) {
@@ -954,12 +1225,11 @@ export function createBattle(setup) {
               : [selectTarget(state.units, otherSide(A.side), { ignoreDistance: true })].filter(Boolean);
           for (const B of targets) {
             if (!isAlive(B)) continue;
-            const attr = eff.attribute || skill.attribute;
+            const attr = eff.attribute || "physical";
             const rec = dealDamage({
               attackerRef: A,
               targetRef: B,
               value,
-              multiplier: multiplierFor(skill, attr),
               attribute: attr,
               skillId: skill.id,
               cause: "skill",
@@ -1037,6 +1307,8 @@ export function createBattle(setup) {
       occupiesSlot: u.occupiesSlot,
       invincible: isInvincible(u),
       parentKey: u.parentKey,
+      /** side 模式：这个单位本回合是否已经行动过 */
+      acted: state.acted.includes(u.uid),
       effects: u.effects.map((e) => ({ id: e.id, stacks: e.stacks })),
       buffs: u.buffs.map((b) => ({ uid: b.uid, label: b.label, duration: b.duration })),
       skills: allSkillsOf(u).map((sk) => ({ id: sk.id, name: sk.name, type: sk.type })),
@@ -1046,19 +1318,28 @@ export function createBattle(setup) {
   function publicBattle() {
     return {
       id: state.id,
+      mode: state.mode,
       status: state.status,
+      phase: state.phase,
       endReason: state.endReason,
       winner: state.winner,
       turn: state.turn,
       cycle: state.cycle,
       actionSeq: state.actionSeq,
       activeId: state.activeId,
+      sideTurn: state.sideTurn,
+      firstSide: state.firstSide,
+      maxUnits: state.maxUnits,
+      acted: state.acted.slice(),
+      invincibleSides: state.invincibleSides.slice(),
+      decks: { ally: (state.decks.ally || []).length, enemy: (state.decks.enemy || []).length },
       units: state.units.filter((u) => u.state !== UNIT_STATES[2]).map(publicUnit),
     };
   }
 
   /* ================= 启动 ================= */
   function start() {
+    if (sideMode) return startSide();
     state.turn = 1;
     state.actionSeq = 1;
     const order = actionOrder();
@@ -1066,6 +1347,7 @@ export function createBattle(setup) {
     log(BATTLE_EVENT.BATTLE_START, {
       battleId: state.id,
       seed: state.seed,
+      mode: state.mode,
       units: state.units.map((u) => ({ uid: u.uid, cardId: u.cardId, side: u.side, slot: u.slot })),
     });
     emit("turnStart", []);
@@ -1081,8 +1363,44 @@ export function createBattle(setup) {
     return api;
   }
 
+  /** side 模式启动：双方入场 → 回合开始效果 → 红方先选人 */
+  function startSide() {
+    state.turn = 1;
+    state.actionSeq = 0;
+    state.phase = BATTLE_PHASE.SELECT;
+    state.sideTurn = state.firstSide;
+    log(BATTLE_EVENT.BATTLE_START, {
+      battleId: state.id,
+      seed: state.seed,
+      mode: state.mode,
+      units: [],
+      decks: { ally: state.decks.ally.slice(), enemy: state.decks.enemy.slice() },
+      maxUnits: state.maxUnits,
+      invincibleSides: state.invincibleSides.slice(),
+    });
+    state.deploying = true;
+    deployFromDeck("ally");
+    deployFromDeck("enemy");
+    state.deploying = false;
+    if (state.status !== "running") return api;
+    log(BATTLE_EVENT.ROUND_START, { turn: 1 });
+    emit("turnStart", []);
+    if (state.status !== "running") return api;
+    if (checkEnd()) return api;
+    let side = state.firstSide;
+    if (!hasActable(side)) side = otherSide(side);
+    state.sideTurn = side;
+    if (!hasActable(side)) return api;
+    log(BATTLE_EVENT.SIDE_TURN, { side });
+    return api;
+  }
+
   function endTurn() {
     if (state.status !== "running") return api;
+    if (sideMode) {
+      lastEndedAction = getUnit(state.activeId);
+      return endSideAction();
+    }
     const A = active();
     if (!A) return api;
     lastEndedAction = A;
@@ -1108,6 +1426,12 @@ export function createBattle(setup) {
     order: actionOrder,
     useSkill,
     endTurn,
+    /** side 模式：选择本回合要行动的单位 */
+    selectUnit,
+    /** side 模式：当前方还有没有没行动的单位 */
+    hasActable,
+    /** 当前模式（speed / side） */
+    mode: state.mode,
     allSkillsOf,
     isAlive,
     isInvincible,

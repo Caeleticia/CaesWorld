@@ -37,11 +37,14 @@ export const QUALITY_LABEL = Object.freeze({
 });
 
 /**
- * 伤害 / 技能属性（四系）。
+ * 伤害属性（四系）。
  * color 是跳字的上下两色码（十六进制，不带 #），中间自然渐变。
  * 本源（origin）伤害不受任何加成、无视防御/抗性/免伤。
  */
 export const ATTRIBUTES = Object.freeze(["physical", "magic", "spirit", "origin"]);
+
+/** 有抗性的属性：本源是真实伤害，没有抗性 */
+export const RESISTANCE_ATTRIBUTES = Object.freeze(["physical", "magic", "spirit"]);
 
 export const ATTRIBUTE_INFO = Object.freeze({
   physical: Object.freeze({ label: "物理", upper: "D6D6D6", lower: "9E9E9E" }),
@@ -75,16 +78,14 @@ export const UNIT_DEFAULTS = Object.freeze({
   critRate: 0.05,
   critDamage: 0.5,
   speed: 100,
-  resistances: Object.freeze({ physical: 0.05, magic: 0.05, spirit: 0.05, origin: 0.05 }),
+  /** 三系抗性；本源是真实伤害，没有抗性字段 */
+  resistances: Object.freeze({ physical: 0.05, magic: 0.05, spirit: 0.05 }),
   /** 标签：战斗中每个单位独立的字段，一个单位只有一个标签（字符串，可为空） */
   label: "",
   occupiesSlot: true,
   countsAsUnit: true,
   invincible: false,
 });
-
-/** 技能默认倍率（未填 = 攻击力的 1 倍） */
-export const DEFAULT_SKILL_MULTIPLIER = 1;
 
 /** 默认品质顺序即“从低到高” */
 export function qualityRank(quality) {

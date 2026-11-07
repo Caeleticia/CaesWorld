@@ -5,13 +5,22 @@
  * 「效果加成」不写在卡上，而是由加成系统实时叠算（见 modifiers.js）。
  */
 import {
-  ATTRIBUTES,
+  RESISTANCE_ATTRIBUTES,
   QUALITIES,
   UNIT_DEFAULTS,
   parseId,
-  ATTRIBUTE_LABELS,
 } from "./constants.js";
-import { attrFill } from "./math.js";
+
+/** 只保留三系抗性：本源是真实伤害，不存抗性字段 */
+function resistanceFill(source) {
+  const src = source && typeof source === "object" ? source : {};
+  const out = {};
+  for (const a of RESISTANCE_ATTRIBUTES) {
+    const v = Number(src[a]);
+    out[a] = Number.isFinite(v) ? v : 0;
+  }
+  return out;
+}
 
 /** 单位卡的全部可选字段的默认值（深拷贝，避免共享引用） */
 export function createUnitDefaults() {
@@ -26,7 +35,7 @@ export function createUnitDefaults() {
     critRate: UNIT_DEFAULTS.critRate,
     critDamage: UNIT_DEFAULTS.critDamage,
     speed: UNIT_DEFAULTS.speed,
-    resistances: attrFill(UNIT_DEFAULTS.resistances),
+    resistances: resistanceFill(UNIT_DEFAULTS.resistances),
     /** 标签（一个单位一个，可为空） */
     label: UNIT_DEFAULTS.label,
     occupiesSlot: UNIT_DEFAULTS.occupiesSlot,
@@ -48,7 +57,7 @@ export function createUnitCard(input = {}) {
   const base = createUnitDefaults();
   const card = { ...base, ...input };
   card.label = input.label === undefined || input.label === null ? "" : String(input.label);
-  card.resistances = attrFill(input.resistances ?? base.resistances);
+  card.resistances = resistanceFill(input.resistances ?? base.resistances);
   card.skills = Array.isArray(input.skills) ? input.skills.slice() : [];
   card.bonuses = Array.isArray(input.bonuses) ? input.bonuses.map((b) => ({ ...b })) : [];
   card.effects = Array.isArray(input.effects) ? input.effects.slice() : [];
@@ -109,7 +118,7 @@ export function validateUnitCard(card) {
   if (!card.resistances || typeof card.resistances !== "object") {
     errors.push("resistances 必须是对象");
   } else {
-    for (const a of ATTRIBUTES) {
+    for (const a of RESISTANCE_ATTRIBUTES) {
       checkNumber(errors, `resistances.${a}`, card.resistances[a], { min: -1, max: 1 });
     }
   }
