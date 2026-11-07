@@ -24,6 +24,7 @@ import {
   projectToContent,
   PLACEHOLDER_IMAGE as PLACEHOLDER,
   resolveImage,
+  RESISTANCE_ATTRIBUTES,
 } from "../engine/index.js";
 
 /** 卡组：工程与内容包都按卡组存在 data/pack/<卡组>/ 里 */
@@ -44,7 +45,7 @@ let active = { tab: "character", skillId: null, effectId: null, triggerId: null 
 
 /** 换一个工程（导入用）；页面上的表单与画布一起重绘 */
 function setProject(p) {
-  project = p;
+  project = stripLegacyFields(p);
   active = { tab: "character", skillId: p.skills[0] ? p.skills[0].id : null, effectId: p.effects[0] ? p.effects[0].id : null, triggerId: null };
   renderAll();
   switchTab("character");
@@ -52,6 +53,16 @@ function setProject(p) {
 let dirty = false;
 let saveTimer = 0;
 const catalog = buildFlowCatalog();
+
+/** 旧工程兼容：技能卡曾带 attribute / multiplier；本源曾带抗性字段。读入时清掉。 */
+function stripLegacyFields(p) {
+  for (const s of (p && p.skills) || []) {
+    delete s.attribute;
+    delete s.multiplier;
+  }
+  if (p && p.character && p.character.resistances) delete p.character.resistances.origin;
+  return p;
+}
 
 function loadProject() {
   try {
@@ -61,7 +72,7 @@ function loadProject() {
       const p = JSON.parse(raw);
       if (p && p.kind === "caeworld-editor-project") {
         p.pack = PACK;
-        return p;
+        return stripLegacyFields(p);
       }
     }
   } catch {
@@ -80,7 +91,7 @@ async function hydrateFromPack() {
     for (const card of pack.skills) {
       if (project.skills.some((x) => x.id === card.id)) continue;
       const s = createSkill(card.id, card.name);
-      Object.assign(s, { type: card.type, attribute: card.attribute, multiplier: card.multiplier, description: card.description || "" });
+      Object.assign(s, { type: card.type, description: card.description || "" });
       s.flow = flowFromContent(card.flow);
       project.skills.push(s);
     }
@@ -290,7 +301,7 @@ function renderCharacter() {
     const el = $("#" + id);
     if (el && document.activeElement !== el) el.value = value === undefined || value === null ? "" : value;
   }
-  for (const attr of ["physical", "magic", "spirit", "origin"]) {
+  for (const attr of RESISTANCE_ATTRIBUTES) {
     const el = $(`#f-res-${attr}`);
     if (el && document.activeElement !== el) el.value = ch.resistances[attr];
   }
@@ -325,13 +336,6 @@ function renderSkillPanel() {
       ["active", "主动"],
       ["passive", "被动"],
     ], s.type))}
-    ${field("属性", select("data-skill=\"attribute\"", [
-      ["physical", "物理"],
-      ["magic", "魔法"],
-      ["spirit", "精神"],
-      ["origin", "本源"],
-    ], s.attribute))}
-    ${field("倍率", `<input type="number" step="0.1" data-skill="multiplier" value="${s.multiplier}" />`, "攻击/回复积木里接「数值」时，可选择是否乘倍率")}
     ${field("说明", `<textarea data-skill="description" rows="2">${escapeHtml(s.description || "")}</textarea>`)}
     <div class="form-actions"><button class="btn danger" data-action="delete-skill">删除技能</button></div>`;
 }
@@ -377,6 +381,7 @@ const TRIGGER_LABEL = {
   unitTurnStart: "单位行动开始时",
   unitTurnEnd: "单位行动结束时",
   skillCast: "单位释放技能",
+  skillCastSelf: "单位释放该技能",
   attack: "单位攻击时",
   attacked: "单位受击时",
   lethalDamage: "单位受致命伤害时",
@@ -567,10 +572,22 @@ function optionsHtml(node) {
   return html;
 }
 
+/**
+ * 端口中心点，返回「world 本地坐标」（SVG path 使用的坐标系）。
+ *
+ * 注意：getBoundingClientRect() 拿到的是**经过 scale 缩放后的屏幕像素**，
+ * 而 svg.links 是 #blocks-world 的子元素、会跟着一起缩放，path 的 d 必须是
+ * 未缩放的本地坐标。所以两矩形相减后要再除以 zoom，否则缩放后线条整体错位
+ * （zoom=1 时恰好相等，只在缩放后暴露）。
+ */
 function portCenter(el) {
   const world = worldEl().getBoundingClientRect();
   const r = el.getBoundingClientRect();
-  return { x: r.left + r.width / 2 - world.left, y: r.top + r.height / 2 - world.top };
+  const zoom = canvasState.view.zoom || 1;
+  return {
+    x: (r.left + r.width / 2 - world.left) / zoom,
+    y: (r.top + r.height / 2 - world.top) / zoom,
+  };
 }
 
 function makeLinkPath(link) {
@@ -838,6 +855,33 @@ function onPointerDown(e) {
   canvasEl().setPointerCapture(e.pointerId);
 }
 
+/**
+ * 按视口坐标找落点元素。
+ * 指针被捕获时 e.target 不可信，必须用 elementsFromPoint 取真实堆叠顺序。
+ * 端口只有 12px，手指很难精确命中，因此在坐标没直接命中端口时，
+ * 再在若干像素内做一次「最近端口」兜底（只考虑输入端口，避免连到相邻输出口）。
+ */
+function elementAtPoint(clientX, clientY, selector) {
+  const direct = document.elementsFromPoint(clientX, clientY).find((n) => n.closest && n.closest(selector));
+  if (direct) return direct.closest(selector);
+
+  // 兜底：在落点附近找最近的可见元素
+  let best = null;
+  let bestDist = Infinity;
+  const SLOP = 24;
+  for (const el of $$(selector)) {
+    if (el.dataset.dir !== "in") continue;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const dist = Math.hypot(clientX - (r.left + r.width / 2), clientY - (r.top + r.height / 2));
+    if (dist <= SLOP && dist < bestDist) {
+      best = el;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
 function drawDragLine(e) {
   const world = worldEl();
   let g = $("#drag-line");
@@ -928,13 +972,21 @@ function onPointerUp(e) {
   if (marker) marker.style.display = "none";
 
   if (canvasState.link) {
-    const portEl = e.target.closest(".port");
-    const blockEl = e.target.closest(".block");
-    if (portEl && blockEl && portEl.dataset.dir === "in") {
-      addLink(canvasState.link.from, canvasState.link.port, blockEl.dataset.id, portEl.dataset.port);
+    // 拖动连线时画布做了 setPointerCapture，pointerup 的 e.target 会被重定向成
+    // 画布本身，直接读 e.target 永远命中不到端口。这里按下真实坐标取落点，
+    // 与「长按切断连线」的做法保持一致。
+    const drop = elementAtPoint(e.clientX, e.clientY, ".port");
+    const dropBlock = drop && drop.closest(".block");
+    if (drop && dropBlock && drop.dataset.dir === "in") {
+      addLink(canvasState.link.from, canvasState.link.port, dropBlock.dataset.id, drop.dataset.port);
     }
     canvasState.link = null;
     $("#drag-line")?.remove();
+    try {
+      if (canvasEl().hasPointerCapture?.(e.pointerId)) canvasEl().releasePointerCapture(e.pointerId);
+    } catch {
+      /* 某些浏览器在指针已释放时会抛错，忽略 */
+    }
   }
   if (canvasState.drag) {
     if (canvasState.drag.moved) {
@@ -993,8 +1045,7 @@ function onBlockOptionChange(e) {
 
 /** 技能字段的写入（表单与编程接口共用） */
 function applySkillField(card, key, value) {
-  if (key === "multiplier") card.multiplier = Number(value) || 0;
-  else if (key === "id") {
+  if (key === "id") {
     const old = card.id;
     card.id = String(value || "").trim();
     project.character.skillIds = (project.character.skillIds || []).map((x) => (x === old ? card.id : x));
@@ -1100,6 +1151,7 @@ const edit = {
     renderJson();
   },
   setResistance(attr, value) {
+    if (!RESISTANCE_ATTRIBUTES.includes(attr)) return;
     project.character.resistances[attr] = Number(value) || 0;
     markDirty();
     renderJson();
@@ -1270,14 +1322,16 @@ function renderPalette() {
       (g) => `
       <div class="palette-group">
         <div class="palette-title" style="--g:${BLOCK_GROUPS[g].color}">${escapeHtml(BLOCK_GROUPS[g].label)}</div>
-        ${groups[g]
-          .map(
-            (b) =>
-              `<button class="palette-item" type="button" data-block="${escapeHtml(b.kind)}" draggable="true" style="--g:${b.color}" title="${escapeHtml(
-                b.note || b.subtitle || b.title
-              )}">${escapeHtml(b.title)}</button>`
-          )
-          .join("")}
+        <div class="palette-items">
+          ${groups[g]
+            .map(
+              (b) =>
+                `<button class="palette-item" type="button" data-block="${escapeHtml(b.kind)}" draggable="true" style="--g:${b.color}" title="${escapeHtml(
+                  b.note || b.subtitle || b.title
+                )}">${escapeHtml(b.title)}</button>`
+            )
+            .join("")}
+        </div>
       </div>`
     )
     .join("");
@@ -1346,7 +1400,9 @@ function unitCardToCharacter(card) {
     image: card.image || "",
     skillIds: (card.skills || []).slice(),
     effectIds: (card.effects || []).slice(),
-    resistances: { ...createCharacter().resistances, ...(card.resistances || {}) },
+    resistances: Object.fromEntries(
+      RESISTANCE_ATTRIBUTES.map((a) => [a, Number(card.resistances?.[a] ?? createCharacter().resistances[a]) || 0])
+    ),
   });
   return ch;
 }
@@ -1384,8 +1440,6 @@ function importContent(doc) {
   for (const s of skills) {
     const card = createSkill(s.id, s.name);
     card.type = s.type || "active";
-    card.attribute = s.attribute || "physical";
-    card.multiplier = s.multiplier === undefined ? 1 : s.multiplier;
     card.description = s.description || "";
     card.flow = flowFromContent(s.flow);
     const idx = (project.skills || []).findIndex((x) => x.id === card.id);
@@ -1558,7 +1612,7 @@ function setupForms() {
     ch().image = el.value.trim();
     renderCharacter();
   });
-  for (const attr of ["physical", "magic", "spirit", "origin"]) {
+  for (const attr of RESISTANCE_ATTRIBUTES) {
     bind(`f-res-${attr}`, (el) => (ch().resistances[attr] = Number(el.value) || 0));
   }
   bind("f-occupy", (el) => (ch().occupiesSlot = el.checked));
@@ -1729,11 +1783,14 @@ function setupSaveDock() {
     collapseBtn.title = collapsed ? "展开存档 JSON" : "折叠成悬浮球";
   };
 
-  let collapsed = false;
+  // 移动端默认折叠，给画布腾出空间；用户手动切换后记住选择
+  let collapsed = window.matchMedia("(max-width: 900px)").matches;
   try {
-    collapsed = localStorage.getItem(SAVE_COLLAPSE_KEY) === "1";
+    const saved = localStorage.getItem(SAVE_COLLAPSE_KEY);
+    if (saved === "1") collapsed = true;
+    else if (saved === "0") collapsed = false;
   } catch {
-    /* 隐私模式读不到就从展开态开始 */
+    /* 隐私模式读不到就按视口默认值 */
   }
   apply(collapsed);
 
