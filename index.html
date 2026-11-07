@@ -125,7 +125,7 @@
             <label class="form-field"><span>暴击伤害</span><input id="f-critdmg" type="number" step="0.1" /></label>
             <label class="form-field"><span>速度</span><input id="f-speed" type="number" /></label>
             <label class="form-field"><span>标签</span><input id="f-label" placeholder="可选，一个单位一个标签" /></label>
-            <label class="form-field"><span>卡面图片路径</span><input id="f-image" placeholder="assets/banner/xxx.png 或留空用占位卡面" /></label>
+            <label class="form-field"><span>卡面图片路径</span><input id="f-image" placeholder="slime.png 或 assets/banner/xxx.png" /><em>默认填卡牌短 id.png（如 slime.png），从 assets/picture/cards/ 读取；也可填完整路径 / URL</em></label>
           </div>
           <div class="form-row">
             <label class="form-check"><input id="f-occupy" type="checkbox" /> 占位</label>
@@ -146,7 +146,7 @@
 
         <div class="ed-col ed-col-preview">
           <h2>卡面预览</h2>
-          <p class="muted">把 data/pack/&lt;卡组&gt;/ 下的 单位.json / 技能.json / 效果.json 或单张卡的 JSON 拖到这里即可导入继续改。</p>
+          <p class="muted">把模组卡包 JSON（mods/&lt;包 ID&gt;.json）、单张卡或编辑器工程 JSON 拖到这里即可导入继续改。</p>
           <div class="card-preview" id="ed-card-preview"></div>
           <p class="muted" id="ed-unit-stats"></p>
           <h2>挂载技能</h2>
@@ -313,6 +313,49 @@
       </p>
       <div id="mod-list" class="mod-list"></div>
     </section>
+  </main>
+
+  <!-- ======================= 设置 ======================= -->
+  <main id="settings-page" class="subpage" hidden>
+    <header class="subpage-topbar">
+      <button class="btn small" id="settings-back" type="button">← 返回</button>
+      <div class="subpage-title">设置 <small id="settings-status"></small></div>
+    </header>
+    <section class="subpage-body">
+      <p class="mod-hint">
+        这里只清除当前站点在浏览器里保存的数据；服务器上的 <code>mods/</code>、<code>data/</code>、<code>assets/</code> 文件不会被删除。
+      </p>
+      <div class="settings-list">
+        <article class="settings-card">
+          <h2>浏览器数据</h2>
+          <p>清除后，这台设备的浏览器里会删除：</p>
+          <ul>
+            <li>编辑器工程、草稿与删除标记</li>
+            <li>本地导入的模组、启用 / 停用状态</li>
+            <li>训练场设置、当前阵容与已保存卡组</li>
+            <li>导出临时备份、页面缓存（Cache Storage / IndexedDB）</li>
+          </ul>
+          <p class="settings-usage" id="settings-usage">本地存储：读取中…</p>
+          <div class="settings-actions">
+            <button class="btn small danger" id="settings-clear" type="button">清除所有浏览器数据</button>
+          </div>
+          <p class="settings-note">清除后会自动重新载入，并重新读取服务器上的默认模组；服务器文件不受影响。</p>
+        </article>
+      </div>
+    </section>
+
+    <div class="ed-modal" id="settings-confirm-modal" hidden>
+      <div class="ed-modal-box" role="dialog" aria-modal="true" aria-labelledby="settings-confirm-title">
+        <h2 id="settings-confirm-title">清除所有浏览器数据</h2>
+        <p class="muted" id="settings-confirm-desc">
+          将删除本站在浏览器里保存的编辑器工程、本地模组、训练场设置和缓存；服务器上的文件不会被动到。此操作不可撤销。
+        </p>
+        <div class="ed-modal-actions">
+          <button class="btn small" id="settings-confirm-cancel" type="button">取消</button>
+          <button class="btn small danger" id="settings-confirm-ok" type="button">确认清除</button>
+        </div>
+      </div>
+    </div>
   </main>
 
   <!-- ======================= 测试 / 训练场：配置 ======================= -->

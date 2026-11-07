@@ -69,11 +69,12 @@ css/loading.css       载入页与进度条
 css/menu.css          侧栏、标签弹出选项、右侧随机图片、手机布局
 css/editor.css        编辑器（表单、积木画布、JSON 面板、移动端布局）
 css/training.css      训练场（配置四栏 / 竖屏滑钮 / 战斗卡牌 / 行动栏 / 弹层）
-css/subpage.css       卡牌库 / 模组管理（子页面、卡片网格、模组行）
+css/subpage.css       卡牌库 / 模组管理 / 设置（子页面、卡片网格、模组行、设置卡片）
 js/app.js             启动流程与界面编排（阶段调度、渲染侧栏、打开编辑器、提示气泡）
 js/editor-view.js     编辑器交互层（表单 / 拖积木 / 连线 / 长按删除连线 / 定位整理 / 实时 JSON / 自动保存 / 卡组导入导出）
 js/library-view.js    设计 / 卡牌库（按卡包 + 关键字查看所有单位 / 技能 / 效果）
 js/mod-view.js        模组 / 模组管理（导入 / 导出 / 启用 / 停用）
+js/settings-view.js   设置页（清除浏览器本地数据，不碰服务器文件）
 js/mods.js            模组清单与内容汇总（mods/index.txt、mods/、本地导入）
 js/loading.js         进度核心（阶段权重，纯逻辑）+ 图片预加载
 js/tips.js            字符库读取 / 解析 / 不重复抽取（纯逻辑）
@@ -81,18 +82,15 @@ js/menus.js           菜单结构（纯数据）+ 手风琴逻辑
 js/pictures.js        头图读取 / 解析 / 加权随机抽取
 js/icons.js           手绘风线性图标
 engine/               战斗引擎（分操作见下文「战斗引擎」）
-engine/pack.js        卡组载入 / 导出（data/pack/<卡组>/）
-data/pack/default/    默认卡组
-  单位.json           角色 / 单位卡
-  技能.json           技能卡（含积木流程）
-  效果.json           效果卡（触发 + 流程）
-  卡组.json           卡组说明（名字 / 版本 / 作者 / 文件表）
+engine/pack.js        卡包文档工具（单文件模组格式；cardsOf / kindOfCard / mergeCards）
 data/tips.txt         你知道吗字符库（每行一条）
 mods/                 模组包目录
   index.txt           需要加载的模组包文件名，每行一个
-  study.js            示例模组包（JSON 文本）
+  default.json        内置默认包（pack id = default，单文件卡包）
+  study.json          示例模组包（JSON 文本）
 assets/banner/        开屏头图（banner 文件夹）
   index.txt           头图清单：每行一个文件名，开屏从里面随机抽
+assets/picture/cards/ 默认卡面目录（编辑器里只写文件名时从这里读）
 ```
 
 ## 测试
@@ -108,7 +106,7 @@ assets/banner/        开屏头图（banner 文件夹）
 | `?freeze=menu` | 跳过载入页直接看主菜单 |
 | `?tips=0` | 「你知道吗」不自动轮换 |
 | `?banner=文件名` | 指定开屏头图（`assets/banner/index.txt` 里的一行，如 `?banner=peach.png`） |
-| `#training` | 直接打开训练场（`#editor` 打开编辑器、`#library` 打开卡牌库、`#mods` 打开模组管理） |
+| `#training` | 直接打开训练场（`#editor` 打开编辑器、`#library` 打开卡牌库、`#mods` 打开模组管理、`#settings` 打开设置） |
 
 ## 开屏头图（banner）
 
@@ -117,6 +115,13 @@ assets/banner/        开屏头图（banner 文件夹）
 - 每次进入主菜单时从 `index.txt` 里随机抽一张，显示在**右侧**（载入页不显示头图）；同一次打开不连抽同一张。
 - 读取失败（比如用 `file://` 直接打开）会回落到代码里的同一批文件名，界面不会空着。
 - 想固定看某一张：地址加 `?banner=peach.png`。
+
+## 卡面图片
+
+- 默认目录是 `assets/picture/cards/`，路径框默认填「卡牌的短 id.png」（取卡牌 id 的标识段）：例如 `default_unit_slime` → `assets/picture/cards/slime.png`，`study_unit_littleempire` → `littleempire.png`；改卡牌 id 的标识段，默认路径会跟着变。
+- 也允许直接写路径：`assets/banner/castorice.png`、`./assets/...`、`/assets/...`、`http(s)://...`、`data:` / `blob:` URL 都按原值使用（反斜杠会转成 `/`，空格 / 中文会做 URL 编码）。
+- `image` 为空时使用默认「短 id.png」；点「用占位图」会把 `image` 设为 `null`，强制使用内置占位卡面；「选择图片」会把本地图片读成 data URL 内嵌进工程。
+- 解析规则在 `engine/editor.js` 的 `CARD_IMAGE_DIR` / `defaultCardImageName()` / `cardImagePath()` / `resolveCardImage()` / `resolveImage()`，编辑器、卡牌库、训练场、战斗界面共用同一套。
 
 ## 修改字符库
 
@@ -131,14 +136,15 @@ assets/banner/        开屏头图（banner 文件夹）
   - 卡包文件 `{ schema, kind: "caeworld-pack", id, name, units, skills, effects }`（编辑器「导出卡包」的产物）；
   - 旧工程 JSON（`kind: "caeworld-editor-project"`）；
   - 内容包 `{ modname, version, description, units, skills, effects }`。
-- 示例：`mods/study.js`（实际内容是 JSON）。
+- 示例：`mods/study.json`（实际内容是 JSON）。
+- **默认包也是模组**：`mods/default.json`，`id` 为 `default`；所有卡包统一从 `mods/index.txt` 进入，应用只加载单文件卡包。
 - 增加一个服务器模组：把模组文件放进 `mods/`，再在 `mods/index.txt` 里加一行文件名。
-- **启用 / 停用**：模组管理页里的开关只保存在浏览器本地（`caeworld:mods:disabled:v1`），不会修改服务器上的 `index.txt`；停用后卡牌库、编辑器、训练场都不再加载该模组。
+- **启用 / 停用**：模组管理页里的开关只保存在浏览器本地（`caeworld:mods:disabled:v1`），不会修改服务器上的 `index.txt`；停用后卡牌库、编辑器、训练场都不再加载该模组。默认包也可以像普通模组一样停用。
 - **导入 / 导出**：导入的模组存在浏览器本地，导出会下载模组 JSON。服务器文件仍然只能手动放进 `mods/`。
 
 ### 卡牌库
 
-主菜单 → 设计 → 卡牌库（或地址后加 `#library`）。汇总**默认包 + 已启用模组 + 编辑器工程**里的所有单位 / 技能 / 效果：
+主菜单 → 设计 → 卡牌库（或地址后加 `#library`）。汇总**默认包（`mods/default.json`）+ 已启用模组 + 编辑器工程**里的所有单位 / 技能 / 效果：
 
 - 按单位 / 技能 / 效果切换；
 - 用「全部卡包 / 默认包 / 模组包」筛选；
@@ -148,6 +154,14 @@ assets/banner/        开屏头图（banner 文件夹）
 ### 模组管理
 
 主菜单 → 模组 → 模组管理（或地址后加 `#mods`）。显示服务器模组与本地导入模组，可启用 / 停用、导出、删除本地导入项。
+
+### 设置 / 清除浏览器数据
+
+主菜单 → 设置（或地址后加 `#settings`）。
+
+- 「清除所有浏览器数据」会删除当前站点在浏览器里保存的：编辑器工程 / 草稿 / 删除标记、本地导入模组与启用状态、训练场设置 / 阵容 / 卡组、导出临时备份，以及 Cache Storage / IndexedDB。
+- 清除后自动重新载入，并重新从服务器读取 `mods/`、`data/`、`assets/`。
+- 只清除浏览器端数据，**不会删除服务器上的任何文件**；服务器上的默认模组、图片和代码不受影响。
 
 ---
 
@@ -234,6 +248,8 @@ import { ContentRegistry, createBattle, serializeBattle, restoreBattle } from ".
 
 **被动技能**（`type: "passive"`）不用施放：它流程里的「触发」积木会随对应事件自动运行，和效果卡的触发是同一套广播。没有触发积木的被动技能不会做任何事。「始终」属于数据更新事件——单位入场（战斗开始 / 从牌组出场 / 召唤）时会先补一次数据更新，所以「在场时」类被动在入场那一刻就会结算一次。
 
+一个技能流程可以放多个「触发」积木，每个触发的后续积木只接在它自己后面。主动技能释放时执行所有 `skillCastSelf`（单位释放该技能）触发，各跑各的分支；被动技能按事件广播，每个匹配的触发也各跑各的分支。
+
 ## 效果加成（实时计算）
 
 卡上只有基础数值；所有加成经 `addBonus(acc, bonus)` 进同一个累加器：
@@ -312,11 +328,13 @@ createBattle({ registry, units: [{ cardId, side, slot }], seed })
 
 每个事件都带 `seq` / `type` / `turn`，伤害事件带完整计算过程（可直接拿来跳字）。`maxCycles`（默认 8）防止无限对局。
 
+单位退场时先执行 `unitExit` 触发（包括嵌套退场），全部处理完才做战斗结算；所以最后一个单位退场时召唤 / 复活出来的单位会先入场，不会被提前判负。
+
 ## 数据存储
 
 - 卡包文件：工程 + 内容合并成一份 JSON（`kind: "caeworld-pack"`），由编辑器「导出卡包」生成、导入时整包合并进来；一份文件里同时有 `id / name / version / author / description` 和 `units / skills / effects`，`skills` / `effects` 额外保留编辑器用的 `ui` 与积木 `pos`，战斗引擎会忽略这些字段。
-- 内容包 / 卡组：`data/pack/<卡组>/单位.json`、`技能.json`、`效果.json`，由 `loadPack(卡组名)` 读入；`validateContent()` 一次报全所有问题（重复 id、缺字段、技能引用不存在）。
-- 增加一个卡组：在 `data/pack/` 下新建目录（目录名就是卡组名），放 `单位.json` / `技能.json` / `效果.json`（可选 `卡组.json`），格式同默认卡组；编辑器导出的三份文件可以直接放进去。
+- 卡包 = 单文件：把一份 `kind: "caeworld-pack"` 的 JSON 放进 `mods/`，再写入 `mods/index.txt`；默认包 `mods/default.json` 也走同一条流程。
+- 增加 / 修改卡包：在编辑器里编辑后「导出卡包」，把 `<包 ID>.json` 放进 `mods/`，再在 `mods/index.txt` 里加一行文件名即可。
 - 战斗存档：`serializeBattle(battle, actions)` 只存「单位 id + 站位 + 当前生命 + 状态 + buff + 累计统计 + 操作序列 + 种子」，体积小；`restoreBattle(save, registry)` 用同种子重放操作，并对账（`verified` / `mismatches`），保证读档与当时完全一致。
 - 槽位：`createSaveStore(driver)`，默认内存驱动，浏览器里换 `createLocalDriver()`（localStorage）。
 - 外部脚本（场景效果、剧情脚本）调 `applyBuff / dealDamage / heal / dispel` 默认不写事件日志，不干扰重放；需要记录时传 `{ log: true }`。
@@ -337,13 +355,14 @@ createBattle({ registry, units: [{ cardId, side, slot }], seed })
 - 角色下拉旁有「按卡包筛选」：默认包 / 各模组包 / 草稿包 / 全部卡包
 - 角色表单里有「所属卡包」，可以随时把已有角色切到别的卡包（卡 id 的包前缀、流程里的单位引用会一起改）
 - 填写名字、id、品质、等级、基础生命/攻击/防御、暴击率/暴击伤害、速度、标签、三系抗性（本源无抗性）、占位/计数/无敌
-- 卡面图片：填路径（默认用内置占位图）、选本地图片（内嵌成 data URL）、一键回到占位图
+- 卡面图片路径默认填「卡牌的短 id.png」（如 `default_unit_slime` → `slime.png`），从 `assets/picture/cards/` 读取，改卡牌 id 的标识段会自动跟着变；也可以填 `assets/...` 相对路径、`/` 开头的绝对路径、`http(s)` / `data:` / `blob:` URL。点「用占位图」强制使用内置占位图；「选择图片」会把本地图片内嵌成 data URL
 - 右侧实时预览卡面，并勾选要「挂载」的技能（技能由角色为主体执行）；挂载列表会显示每张卡的卡包
 - 效果不能初始挂载在角色上：只在战斗中用「附加效果」积木附加（见下方「属性修正」）
 
 ## 设计技能 / 效果
 - 技能：选择/新建技能，填名字、id（`扩展包_类型_标识`）、主动/被动；攻击方式与数值在流程里搭（「攻击」积木上选属性、接数值）
-- 效果：选择/新建效果，**必选倾向**「正面 / 负面 / 特殊」，可勾「不可解除」，加「触发流程」（每块触发积木对应一条流程，事件在积木上选）
+- **技能多个触发**：技能表单「+ 新触发」或积木盒的「触发」都可以放多个触发；每个触发选自己的条件，后续积木接在对应触发后面。新触发默认「单位释放该技能」（`skillCastSelf`）
+- 效果：选择/新建效果，**必选倾向**「正面 / 负面 / 特殊」，可勾「不可解除」，加「触发流程」（每块触发积木对应一条流程，事件在积木上选）；新触发默认「单位行动结束时」（`unitTurnEnd`）
 - **删除技能 / 效果**：列表右侧「删除技能 / 删除效果」。技能还会从所有角色的「挂载技能」里移除；两者都会清空流程里对该 id 的常量引用，并记在 `removedSkillIds` / `removedEffectIds` 里，重开编辑器不会从内容包补回
 - 效果的「属性修正」：点「+ 添加属性修正」加一行，选属性（攻击力 % / 攻击力值 / 防御力 % / 防御力值 / 生命值 % / 生命值值 / 暴击率 / 暴击伤害 / 速度 / 伤害提升 % / 三系伤害提升 % / 三系穿透 % / 受到伤害提升 % / 易伤 % / 抗性降低 % / 三系抗性）再填数值；可以加多条，也可以一条都不加。效果附着期间这些加成按层数叠在持有者面板上
 - 技能 / 效果下拉旁有卡包筛选：只在当前卡包里选择要编辑的卡；表单里的「所属卡包」可以切换已有卡（id 前缀与所有引用一起改）
@@ -395,7 +414,7 @@ createBattle({ registry, units: [{ cardId, side, slot }], seed })
 - **导出下载**：只下载一个文件、锚点先挂进文档再点击；浏览器拦截或环境不支持下载时，会自动把 JSON 复制到剪贴板并在状态栏提示
 
 ## 与引擎的对应
-- 技能：`format: "flow"`，流程由施放者为主体执行；「技能指定的数值」用「攻击」积木的数值输入
+- 技能：`format: "flow"`，流程由施放者为主体执行；同一流程可以放多个触发积木。主动技能释放时执行所有 `skillCastSelf` 触发（各跑各的分支），被动技能由事件广播执行匹配的触发；「技能指定的数值」用「攻击」积木的数值输入
 - 效果：`triggers`（积木 id + 事件 + 单位取谁）+ `flows`（按积木 id 对应的流程）；效果卡还带 `polarity`（positive / negative / special）、`stackable`、`maxStacks`、`attrBonus`（属性修正，格式见「效果加成」）、`autoConsume`（自动消耗）。引擎在事件发生时找到这些触发并执行；`autoConsume` 在持有者 `unitTurnStart` 的触发流程跑完后自动移除 1 层；效果只能战斗中附加，单位卡没有初始效果字段
 - 「附加效果」默认只有 1 层；效果卡勾选「层数计数」后才按层数叠加，上限看 `maxStacks`（0 = 无上限）
 - 「移除效果」默认移除 1 层，勾选「强制移除」才能移除不可解除的效果
@@ -417,11 +436,11 @@ createBattle({ registry, units: [{ cardId, side, slot }], seed })
 | 新建 / 改名 / 改 ID / 切换卡包 | 卡包标签页（新建、卡包名、应用包 ID）；角色 / 技能 / 效果表单里的「所属卡包」 |
 | 导出某个卡包 | 顶栏「导出卡包」选包；或卡包标签页「导出此卡包」 |
 | 查看全部卡牌 | 设计 → 卡牌库（单位 / 技能 / 效果 + 卡包筛选 + 搜索） |
-| 换卡面 | 填路径、选本地图片、点「用占位图」 |
+| 换卡面 | 路径框默认填「卡牌短 id.png」（如 `slime.png`，从 `assets/picture/cards/` 读），也可填完整路径、选本地图片、点「用占位图」 |
 | 把技能挂到角色上 | 设计角色右侧「挂载技能」勾选（效果不能初始挂载） |
 | 新建技能 / 效果 | 对应列表右侧「新建技能 / 新建效果」 |
 | 给效果加面板加成 | 效果表单里「属性修正」→「+ 添加属性修正」选属性填数值 |
-| 加触发 | 效果表单里「+ 新触发」（会同时放一块「触发」积木并登记事件） |
+| 加触发 | 技能表单「+ 新触发」放技能触发；效果表单「+ 新触发」放独立的触发流程 |
 | 放积木 / 连线 / 删除连线 | 点或拖积木盒；长按输出端口拖到输入端口；按住一条连线不动约半秒删除（移动则取消删除并平移画布） |
 | 定位 / 整理画布 | 流程工具条的「定位」把视角移到最近积木；「整理」自动排布并适应视口 |
 | 改积木选项 | 积木上的下拉/勾选/输入框（触发条件、运算符、单位 id 等），改完实时进 JSON |
