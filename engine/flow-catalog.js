@@ -160,7 +160,7 @@ export function buildFlowCatalog(ctx = {}) {
     group: "trigger",
     title: "触发",
     subtitle: "满足条件时触发",
-    note: "效果/技能的第一块积木。事件发生、且条件满足时，从这里执行后续流程。",
+    note: "流程入口。技能流程可以放多个触发，每个触发执行它后面的内容；效果的每个触发是一条独立流程。",
     ports: [
       { id: "unit", label: "单位（可选）", direction: "in", type: "target" },
       { id: "condition", label: "条件（可选）", direction: "in", type: "condition" },

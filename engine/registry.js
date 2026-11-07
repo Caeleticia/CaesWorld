@@ -3,7 +3,7 @@
  *
  * 战斗时只认注册表：回合开始后把单位卡、技能卡深拷贝快照进战斗，
  * 之后注册表被改名/改数值也不会影响已开始的战斗。
- * 正式数据按卡组放在 data/pack/<卡组>/（单位.json / 技能.json / 效果.json），由 pack.js 的 loadPack 载入。
+ * 正式数据来自单文件卡包 / 模组（mods/<文件名>.json，kind: "caeworld-pack"），由 js/mods.js 汇总后载入。
  */
 import { createUnitCard, validateUnitCard } from "./units.js";
 import { createSkillCard, validateSkillCard } from "./skills.js";

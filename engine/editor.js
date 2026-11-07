@@ -233,10 +233,55 @@ export const PLACEHOLDER_IMAGE =
     </svg>`
   );
 
-/** 卡面图片地址：空值用占位图 */
+/**
+ * 卡面图片默认目录。
+ * 图片路径只写文件名时从 assets/picture/cards/ 读取；
+ * 写相对路径（assets/banner/x.png）、绝对路径、http(s) / data URL 时按原值读取。
+ */
+export const CARD_IMAGE_DIR = "assets/picture/cards";
+
+/**
+ * 卡面图片地址：
+ *  · 空值 → 内置占位图
+ *  · 只有文件名（slime.png）→ assets/picture/cards/slime.png
+ *  · 带目录 / URL / data URL → 原样使用（只做反斜杠与空格等字符的编码）
+ */
 export function resolveImage(path) {
-  const p = typeof path === "string" ? path.trim() : "";
-  return p || PLACEHOLDER_IMAGE;
+  const raw = typeof path === "string" ? path.trim() : "";
+  if (!raw) return PLACEHOLDER_IMAGE;
+  // 完整来源：data: / blob: / http(s): / // / 以 / 开头的绝对路径
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i.test(raw)) return raw;
+  const normalized = raw.replace(/\\/g, "/");
+  if (!normalized.includes("/")) return `${CARD_IMAGE_DIR}/${encodeURIComponent(normalized)}`;
+  return encodeURI(normalized);
+}
+
+/**
+ * 卡牌默认卡面文件名：取卡牌 id 的标识段 + .png。
+ * 例：default_unit_slime → slime.png；study_unit_littleempire → littleempire.png
+ */
+export function defaultCardImageName(card) {
+  if (!card || !card.id) return "";
+  const parsed = parseId(card.id);
+  return `${parsed.ok ? parsed.key : card.id}.png`;
+}
+
+/**
+ * 卡牌卡面路径：
+ *  · image 为 null → 强制使用内置占位图（返回 ""）
+ *  · image 非空     → 显式路径
+ *  · image 为空     → 默认「卡牌 id 的标识.png」
+ */
+export function cardImagePath(card) {
+  if (!card || typeof card !== "object") return "";
+  if (card.image === null) return "";
+  const raw = typeof card.image === "string" ? card.image.trim() : "";
+  return raw || defaultCardImageName(card);
+}
+
+/** 解析卡面地址：带「默认 id.png」和「默认目录 assets/picture/cards/」 */
+export function resolveCardImage(card) {
+  return resolveImage(cardImagePath(card));
 }
 
 /* ------------------------------------------------------------------ */
@@ -369,7 +414,9 @@ export function characterToUnit(ch) {
   });
   if (ch.pack) base.pack = String(ch.pack);
   if (ch.packName) base.packName = String(ch.packName);
-  if (ch.image) base.image = ch.image;
+  // null = 显式使用占位图；空值 = 默认「卡牌短 id.png」，不写进卡包
+  if (ch.image === null) base.image = null;
+  else if (ch.image) base.image = ch.image;
   return base;
 }
 
@@ -487,7 +534,8 @@ export function normalizeFlow(flow) {
 }
 
 /**
- * 工程 → 三份内容包（可直接写进 data/pack/<卡组>/ 下的单位/技能/效果.json）。
+ * 工程 → 三份内容文档（units / skills / effects）。
+ * 用于校验、注册表输入或需要按类别拆开处理的场景。
  * @returns {{units: object, skills: object, effects: object}}
  */
 export function projectToContent(project) {
