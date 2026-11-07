@@ -237,10 +237,14 @@
 /* 搜索 / 筛选 */
 .tlib-filter {
   flex: none;
+  display: flex;
+  gap: 4px;
   padding: 4px 6px;
   border-bottom: 1px dashed var(--line);
 }
 .tlib-filter input {
+  flex: 1 1 auto;
+  min-width: 0;
   width: 100%;
   height: 22px;
   padding: 0 8px;
@@ -251,7 +255,20 @@
   border-radius: 7px;
   outline: none;
 }
-.tlib-filter input:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 2px rgba(127, 216, 221, 0.28); }
+.tlib-filter select {
+  flex: 0 1 42%;
+  min-width: 0;
+  height: 22px;
+  padding: 0 4px;
+  font-size: 10.5px;
+  color: var(--ink-2);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  outline: none;
+}
+.tlib-filter input:focus,
+.tlib-filter select:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 2px rgba(127, 216, 221, 0.28); }
 
 /* 列表通用 */
 .tlib-list,
