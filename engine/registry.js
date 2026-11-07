@@ -7,13 +7,13 @@
  */
 import { createUnitCard, validateUnitCard } from "./units.js";
 import { createSkillCard, validateSkillCard } from "./skills.js";
-import { parseId } from "./constants.js";
+import { EFFECT_POLARITIES, effectPolarityOf, parseId } from "./constants.js";
 
 export class ContentRegistry {
   constructor() {
     this.units = new Map();
     this.skills = new Map();
-    /** 效果卡：{ id, name, flags, triggers, flows, attrBonus } */
+    /** 效果卡：{ id, name, flags, polarity, stackable, maxStacks, triggers, flows, attrBonus } */
     this.effects = new Map();
     this.errors = [];
   }
@@ -59,6 +59,16 @@ export class ContentRegistry {
     if (def.name !== undefined && typeof def.name !== "string") errors.push("name 必须是字符串");
     if (def.triggers !== undefined && !Array.isArray(def.triggers)) errors.push("triggers 必须是数组");
     if (def.attrBonus !== undefined && !Array.isArray(def.attrBonus)) errors.push("attrBonus 必须是数组");
+    if (def.polarity !== undefined && def.polarity !== null && def.polarity !== "" && !EFFECT_POLARITIES.includes(def.polarity)) {
+      errors.push(`polarity 必须是 ${EFFECT_POLARITIES.join("/")}：${def.polarity}`);
+    }
+    if (def.stackable !== undefined && typeof def.stackable !== "boolean") {
+      errors.push("stackable 必须是布尔值");
+    }
+    if (def.maxStacks !== undefined) {
+      const n = Number(def.maxStacks);
+      if (!Number.isFinite(n) || n < 0) errors.push(`maxStacks 必须是 ≥ 0 的数字：${def.maxStacks}`);
+    }
     if (errors.length) {
       this.errors.push(`效果 ${def.id || "(无 id)"}: ${errors.join("；")}`);
       return { ok: false, errors };
@@ -68,10 +78,16 @@ export class ContentRegistry {
       this.errors.push(msg);
       return { ok: false, errors: [msg] };
     }
+    const maxStacks = Math.floor(Number(def.maxStacks));
     this.effects.set(def.id, {
       id: def.id,
       name: def.name || def.id,
-      flags: Array.isArray(def.flags) ? def.flags.slice() : [],
+      flags: Array.isArray(def.flags) ? def.flags.filter((f) => f !== "negative") : [],
+      /** 倾向是必选项：正面 / 负面 / 特殊（旧存档 flags.negative 自动迁移） */
+      polarity: effectPolarityOf(def),
+      /** 层数计数：关闭时永远 1 层；开启时按 maxStacks 叠加（0 = 无上限） */
+      stackable: Boolean(def.stackable),
+      maxStacks: Number.isFinite(maxStacks) ? Math.max(0, maxStacks) : 1,
       triggers: Array.isArray(def.triggers) ? def.triggers.map((t) => ({ ...t })) : [],
       flows: typeof def.flows === "object" && def.flows ? structuredClone(def.flows) : {},
       attrBonus: Array.isArray(def.attrBonus) ? def.attrBonus.map((a) => ({ ...a })) : [],

@@ -64,6 +64,29 @@ export const SKILL_TYPE_LABEL = Object.freeze({ active: "主动", passive: "被�
 /** 战斗中单位的状态 */
 export const UNIT_STATES = Object.freeze(["alive", "dead", "removed"]);
 
+/**
+ * 效果的倾向：必选其一（不是「负面」勾选框）。
+ * 正面 / 负面 / 特殊；「特殊」既不算正面也不算负面，不会被按倾向移除。
+ */
+export const EFFECT_POLARITIES = Object.freeze(["positive", "negative", "special"]);
+
+export const EFFECT_POLARITY_LABEL = Object.freeze({
+  positive: "正面",
+  negative: "负面",
+  special: "特殊",
+});
+
+/**
+ * 取效果倾向。兼容旧存档：旧格式没有 polarity，只可能在 flags 里带 negative。
+ * @param {object} def 效果卡
+ * @returns {"positive"|"negative"|"special"}
+ */
+export function effectPolarityOf(def) {
+  if (def && EFFECT_POLARITIES.includes(def.polarity)) return def.polarity;
+  if (def && Array.isArray(def.flags) && def.flags.includes("negative")) return "negative";
+  return "positive";
+}
+
 /** 阵营 */
 export const SIDES = Object.freeze(["ally", "enemy"]);
 

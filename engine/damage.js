@@ -14,6 +14,10 @@
  * 特例
  *  - 本源(origin)伤害：无视任何加成、防御、抗性、免伤/易伤、无敌与护盾，
  *    伤害 = 数值，且不暴击。
+ *  - 无视减免(ignoreReduction)：只跳过目标侧的防御 / 抗性 / 易伤，
+ *    攻击方的伤害提升与暴击照常。
+ *  - 附加伤害(additional)：不视为攻击，无视任何加成与减免，伤害 = 数值且不暴击；
+ *    仍会走正常的扣血 / 退场流程。
  *  - 暴击伤害 / 各种加成可以为负，此时 (1 + x) 截断到 [0, 1]，
  *    防止负数伤害或把「减伤」变成「增伤」。
  */
@@ -96,6 +100,8 @@ export function damageTakenFactor(attacker, target, attribute = "physical") {
  * @param {boolean} [params.noCrit]  强制不暴击
  * @param {() => number} [params.rng] 随机源（默认 Math.random）
  * @param {boolean} [params.targetInvincible] 目标是否无敌（无敌则伤害为 0）
+ * @param {boolean} [params.ignoreReduction] 无视目标侧减免（防御 / 抗性 / 易伤）；攻击方加成与暴击照常
+ * @param {boolean} [params.additional] 附加伤害：不视为攻击，无视任何加成与减免，且不暴击
  * @returns {object} 完整过程记录
  */
 export function calculateDamage({
@@ -107,25 +113,30 @@ export function calculateDamage({
   noCrit = false,
   rng = Math.random,
   targetInvincible = false,
+  ignoreReduction = false,
+  additional = false,
 }) {
   const isTrue = attribute === TRUE_DAMAGE_ATTRIBUTE;
+  const noBonuses = isTrue || additional;
 
-  // 本源：数值不吃加成；其它情况可省略 skillValue（默认取攻击力）
+  // 本源 / 附加伤害：数值不吃加成；其它情况可省略 skillValue（默认取攻击力）
   const fallback = Number(attacker.atk) || 0;
   const value = Number.isFinite(Number(skillValue)) && skillValue !== null && skillValue !== undefined
     ? Number(skillValue)
     : fallback;
 
   let isCrit = false;
-  if (!isTrue && !noCrit) {
+  if (!noBonuses && !noCrit) {
     isCrit = typeof crit === "boolean" ? crit : rollChance(rng, attacker.critRate);
   }
 
-  const { min: rawMin, max: rawMax } = damageRange(attacker, value, attribute);
+  const { min: rawMin, max: rawMax } = additional
+    ? { min: value, max: value }
+    : damageRange(attacker, value, attribute);
   const raw = isCrit ? rawMax : rawMin;
 
   let factors;
-  if (isTrue) {
+  if (noBonuses || ignoreReduction) {
     factors = { defenseReduction: 0, resistanceReduction: 0, vulnerabilityRate: 0, factor: 1 };
   } else {
     factors = damageTakenFactor(attacker, target, attribute);
@@ -138,6 +149,10 @@ export function calculateDamage({
   return {
     attribute,
     isTrueDamage: isTrue,
+    /** 附加伤害：不视为攻击、不吃加成和减免、不暴击 */
+    isAdditionalDamage: Boolean(additional),
+    /** 本次是否跳过了目标侧减免 */
+    ignoreReduction: Boolean(ignoreReduction),
     crit: isCrit,
     /** 攻击积木给的数值 */
     skillValue: value,
@@ -145,8 +160,8 @@ export function calculateDamage({
     rawDamage: raw,
     rawDamageRange: { min: rawMin, max: rawMax },
     /** 各项系数 */
-    dmgBoost: isTrue ? 0 : boost(attacker.dmgBoostPct),
-    attrDmgBoost: isTrue ? 0 : boost(attacker.attrDmgBoostPct?.[attribute]),
+    dmgBoost: noBonuses ? 0 : boost(attacker.dmgBoostPct),
+    attrDmgBoost: noBonuses ? 0 : boost(attacker.attrDmgBoostPct?.[attribute]),
     critFactor: isCrit ? Math.max(0, 1 + (Number(attacker.critDamage) || 0)) : 1,
     defenseReduction: factors.defenseReduction,
     resistanceReduction: factors.resistanceReduction,

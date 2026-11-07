@@ -16,7 +16,7 @@ import { createBattle } from "./battle.js";
 import { validateUnitCard, createUnitCard } from "./units.js";
 import { validateSkillCard, createSkillCard } from "./skills.js";
 import { normalizeSlot } from "./targeting.js";
-import { parseId } from "./constants.js";
+import { EFFECT_POLARITIES, parseId } from "./constants.js";
 
 export const SCHEMA_VERSION = 1;
 /** 内置槽位名 */
@@ -86,6 +86,16 @@ export function validateContent(doc) {
     if (parseId(id).ok !== true) errors.push(`效果 ${id}: id 格式不对`);
     else if (effectIds.has(id)) errors.push(`效果 id 重复：${id}`);
     else effectIds.add(id);
+    if (raw && raw.polarity !== undefined && raw.polarity !== null && raw.polarity !== "" && !EFFECT_POLARITIES.includes(raw.polarity)) {
+      errors.push(`效果 ${id}: 倾向必须是 ${EFFECT_POLARITIES.join("/")}：${raw.polarity}`);
+    }
+    if (raw && raw.stackable !== undefined && typeof raw.stackable !== "boolean") {
+      errors.push(`效果 ${id}: stackable 必须是布尔值`);
+    }
+    if (raw && raw.maxStacks !== undefined) {
+      const n = Number(raw.maxStacks);
+      if (!Number.isFinite(n) || n < 0) errors.push(`效果 ${id}: maxStacks 必须是 ≥ 0 的数字`);
+    }
   }
 
   for (const unit of units) {

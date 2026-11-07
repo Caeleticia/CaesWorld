@@ -19,6 +19,7 @@ import {
   RESISTANCE_ATTRIBUTES,
   TRUE_DAMAGE_ATTRIBUTE,
   UNIT_STATES,
+  effectPolarityOf,
 } from "./constants.js";
 import { createRng } from "./math.js";
 import { addBonus, emptyAccum } from "./modifiers.js";
@@ -342,6 +343,8 @@ export function createBattle(setup) {
     const def = registry.getEffect(eid);
     return Boolean(def && Array.isArray(def.flags) && def.flags.includes(flag));
   };
+  /** 效果倾向：正面 / 负面 / 特殊（「特殊」两类移除都不算） */
+  const effectPolarity = (eid) => effectPolarityOf(registry.getEffect(eid));
 
   function recomputeAttrBonuses(u) {
     u.attrBonus = {};
@@ -362,16 +365,25 @@ export function createBattle(setup) {
   function attachEffect(target, eid, extra = {}) {
     const u = getUnit(target);
     if (!isAlive(u)) return null;
-    if (!registry.getEffect(eid)) throw new Error(`未知效果：${eid}`);
+    const def = registry.getEffect(eid);
+    if (!def) throw new Error(`未知效果：${eid}`);
     let layer = u.effects.find((e) => e.id === eid);
-    if (!layer) {
+    const isNew = !layer;
+    if (isNew) {
       layer = { id: eid, stacks: 0, sourceId: extra.source ? extra.source.key : null };
       u.effects.push(layer);
     }
-    layer.stacks += 1;
+    // 层数计数默认关闭：关闭时永远只有 1 层；开启时按「层数上限」叠加（0 = 无上限）
+    const stackable = Boolean(def.stackable);
+    const rawCap = Number(def.maxStacks);
+    const cap = Number.isFinite(rawCap) ? Math.max(0, Math.floor(rawCap)) : 1;
+    if (!stackable) layer.stacks = 1;
+    else if (layer.stacks < 1) layer.stacks = 1;
+    else if (cap === 0 || layer.stacks < cap) layer.stacks += 1;
     recomputeAttrBonuses(u);
     log(BATTLE_EVENT.EFFECT_ADDED, { unit: u.uid, effect: eid, stacks: layer.stacks });
-    if (layer.stacks === 1) emit("unitEnter", [u]);
+    // 只有「第一次获得该效果」才算一次获得；重复附加只刷新层数
+    if (isNew) emit("unitEnter", [u]);
     emit("dataUpdate", [u]);
     return layer;
   }
@@ -397,10 +409,17 @@ export function createBattle(setup) {
       if (layer && canRemove(layer)) total += removeLayers(u, layer, layers);
     } else if (mode === "onePositive" || mode === "oneNegative") {
       const negative = mode === "oneNegative";
-      const layer = u.effects.find((e) => canRemove(e) && effectFlag(e.id, "negative") === negative);
+      const layer = u.effects.find(
+        (e) => canRemove(e) && (effectPolarity(e.id) === (negative ? "negative" : "positive"))
+      );
       if (layer) total += removeLayers(u, layer, layers);
     } else {
-      const list = u.effects.filter((e) => canRemove(e) && (mode === "all" || effectFlag(e.id, "negative") === (mode === "allNegative")));
+      const allNegative = mode === "allNegative";
+      const list = u.effects.filter(
+        (e) =>
+          canRemove(e) &&
+          (mode === "all" || effectPolarity(e.id) === (allNegative ? "negative" : "positive"))
+      );
       for (const layer of list) total += removeLayers(u, layer, layers);
     }
     // 挂在子单位上的「继承效果」随来源一起移除
@@ -563,14 +582,30 @@ export function createBattle(setup) {
       unitData: (u, field, opts) => unitDataOf(u, field, opts),
       damage: (target, value, attribute, extra) => {
         const t = getUnit(target);
-        if (!isAlive(t)) return;
-        dealDamage({
+        if (!isAlive(t)) return null;
+        return dealDamage({
           attackerRef: extra && extra.source ? extra.source : owner,
           targetRef: t,
           value,
           attribute,
           cause: "flow",
+          ignoreReduction: Boolean(extra && extra.ignoreReduction),
+          additional: Boolean(extra && extra.additional),
         });
+      },
+      /** 流程攻击结算完成后登记「单位攻击时」：附加伤害不调用它 */
+      noteAttack: (source, targets, totalDamage) => {
+        const A = getUnit(source) || owner;
+        if (!A || !isAlive(A)) return;
+        A.stats.lastAttackDamage = Number(totalDamage) || 0;
+        A.stats.lastAttackTargets = (targets || []).map((t) => t.key);
+        A.stats.lastAttackHits = (targets || []).length;
+        log(BATTLE_EVENT.ATTACK, {
+          attacker: A.uid,
+          hits: A.stats.lastAttackHits,
+          targets: A.stats.lastAttackTargets.map((k) => (getUnit(k) ? getUnit(k).uid : k)),
+        });
+        emit("attack", [A]);
       },
       healUnit: (target, amount) => heal(getUnit(target), amount, "flow"),
       setHp: (target, value) => setHp(getUnit(target), value, "flow"),
@@ -640,6 +675,7 @@ export function createBattle(setup) {
     if (!u) return field === "name" || field === "label" || field === "id" ? "" : 0;
     switch (field) {
       case "atk": return statsOf(u).atk;
+      case "def": return statsOf(u).def;
       case "hp": return u.hp;
       case "hpMax": return statsOf(u).hp;
       case "lastAttackDamage": return u.stats.lastAttackDamage || 0;
@@ -669,13 +705,23 @@ export function createBattle(setup) {
     const attribute = p.attribute || "physical";
     if (!ATTRIBUTES.includes(attribute)) throw new Error(`无效伤害属性：${attribute}`);
     const isTrue = attribute === TRUE_DAMAGE_ATTRIBUTE;
+    const additional = Boolean(p.additional);
+    const ignoreReduction = Boolean(p.ignoreReduction) || isTrue || additional;
 
     const aStats = statsOf(A, isTrue ? "origin" : "normal");
     const bStats = statsOf(B, isTrue ? "origin" : "normal");
     if (!isTrue) bStats.resistances = resistancesOf(B);
 
     const auto = p.value === undefined || p.value === null || p.value === "atk";
-    const skillValue = isTrue ? (auto ? A.card.baseAtk : Number(p.value)) : auto ? aStats.atk : Number(p.value);
+    // 本源 / 附加伤害的数值不吃加成：未指定数值时用卡面基础攻击力
+    const skillValue =
+      isTrue || additional
+        ? auto
+          ? A.card.baseAtk
+          : Number(p.value)
+        : auto
+          ? aStats.atk
+          : Number(p.value);
 
     const result = calculateDamage({
       attacker: aStats,
@@ -686,6 +732,8 @@ export function createBattle(setup) {
       noCrit: p.noCrit || isTrue,
       rng,
       targetInvincible: isInvincible(B),
+      ignoreReduction,
+      additional,
     });
     const rawFinal = Math.round(result.finalDamage * 1e9) / 1e9;
 

@@ -9,7 +9,7 @@
  */
 import { createUnitCard, validateUnitCard } from "./units.js";
 import { createSkillCard, validateSkillCard } from "./skills.js";
-import { parseId } from "./constants.js";
+import { EFFECT_POLARITIES, effectPolarityOf, parseId } from "./constants.js";
 import { prepareFlow, FLOW_SCHEMA } from "./flow.js";
 
 export const PROJECT_SCHEMA = 1;
@@ -67,6 +67,12 @@ export function createEffect(id = "custom_effect_new", name = "新效果") {
     id,
     name,
     flags: [],
+    /** 必选倾向：正面 / 负面 / 特殊 */
+    polarity: "positive",
+    /** 层数计数：关闭时永远 1 层 */
+    stackable: false,
+    /** 层数上限：0 = 无上限，默认 1 */
+    maxStacks: 1,
     description: "",
     triggers: [],
     flows: {},
@@ -163,6 +169,16 @@ export function validateProject(project) {
     if (!p.ok) list.push(p.error);
     else if (p.kind !== "effect") list.push(`效果 id 类型段应为 effect：${effect.id}`);
     if (!effect.name || !String(effect.name).trim()) list.push("名字不能为空");
+    if (effect.polarity !== undefined && effect.polarity !== null && effect.polarity !== "" && !EFFECT_POLARITIES.includes(effect.polarity)) {
+      list.push(`倾向必须是 ${EFFECT_POLARITIES.join("/")}：${effect.polarity}`);
+    }
+    if (effect.stackable !== undefined && typeof effect.stackable !== "boolean") {
+      list.push("层数计数必须是布尔值");
+    }
+    if (effect.maxStacks !== undefined) {
+      const n = Number(effect.maxStacks);
+      if (!Number.isFinite(n) || n < 0) list.push(`层数上限必须是 ≥ 0 的数字：${effect.maxStacks}`);
+    }
     if (effectIds.has(effect.id)) list.push(`效果 id 重复：${effect.id}`);
     effectIds.add(effect.id);
     for (const t of effect.triggers || []) {
@@ -234,10 +250,14 @@ export function skillToContent(skill) {
 }
 
 export function effectToContent(effect) {
+  const maxStacks = Math.floor(Number(effect.maxStacks));
   return {
     id: effect.id,
     name: effect.name || "未命名效果",
-    flags: (effect.flags || []).slice(),
+    flags: Array.isArray(effect.flags) ? effect.flags.filter((f) => f !== "negative") : [],
+    polarity: effectPolarityOf(effect),
+    stackable: Boolean(effect.stackable),
+    maxStacks: Number.isFinite(maxStacks) ? Math.max(0, maxStacks) : 1,
     description: effect.description || "",
     triggers: (effect.triggers || []).map((t) => ({ ...t.block })),
     flows: Object.fromEntries(

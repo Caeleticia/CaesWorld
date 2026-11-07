@@ -103,6 +103,7 @@ export const MATH_FIXED_INPUTS = Object.freeze({
 
 const UNIT_DATA_FIELDS = Object.freeze([
   { value: "atk", label: "攻击力", type: "number" },
+  { value: "def", label: "防御力", type: "number" },
   { value: "hp", label: "生命值", type: "number" },
   { value: "hpMax", label: "生命值上限", type: "number" },
   { value: "lastAttackDamage", label: "上一次攻击的伤害", type: "number" },
@@ -209,7 +210,20 @@ export function buildFlowCatalog(ctx = {}) {
         ],
         default: "physical",
       },
+      {
+        key: "ignoreReduction",
+        label: "无视减免（跳过防御 / 抗性 / 易伤）",
+        control: "checkbox",
+        default: false,
+      },
+      {
+        key: "additional",
+        label: "附加伤害（不视为攻击，无视加成和减免）",
+        control: "checkbox",
+        default: false,
+      },
     ],
+    note: "「无视减免」只跳过目标侧的防御 / 抗性 / 易伤，攻击方加成与暴击照常；「附加伤害」不吃任何加成、不看任何减免、不暴击，也不触发「单位攻击时」。",
   });
   def({
     kind: "heal",
@@ -487,6 +501,14 @@ export function buildFlowCatalog(ctx = {}) {
     ],
   });
   def({
+    kind: "string",
+    group: "data",
+    title: "字符串",
+    subtitle: "键入一个固定字符串",
+    ports: [{ id: "str", direction: "out", type: "string" }],
+    options: [{ key: "value", label: "字符串", control: "text", default: "" }],
+  });
+  def({
     kind: "math",
     group: "data",
     title: "运算",
@@ -558,6 +580,18 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "value", direction: "out", type: "any" },
     ],
     options: [{ key: "field", label: "字段", control: "select", options: UNIT_DATA_FIELDS, default: "hp" }],
+  });
+  def({
+    kind: "selfData",
+    group: "data",
+    title: "自己的数值",
+    subtitle: "直接读取流程拥有者自己的数据字段",
+    note: "不需要连「目标」，永远取流程的拥有者（技能施放者 / 效果持有者）。字段与「获取单位数据」相同。",
+    ports: [
+      { id: "effectId", label: "效果 id（层数字段用）", direction: "in", type: "string" },
+      { id: "value", label: "值（类型随字段）", direction: "out", type: "any" },
+    ],
+    options: [{ key: "field", label: "字段", control: "select", options: UNIT_DATA_FIELDS, default: "atk" }],
   });
   def({
     kind: "filterSet",

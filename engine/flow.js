@@ -130,9 +130,12 @@ export function prepareFlow(flow, opts = {}) {
     }
     let inPort = to.block.ports.find((p) => p.id === l.portTo && p.direction === "in");
     if (!inPort && to.block.kind === "math") {
-      // 运算积木的「无限输入」端口
+      // 运算积木的「无限输入」端口：只有 max/min 接受 in1、in2…（不依赖连线顺序）
       const list = inputPortIds(to.block, to.options, connectedIn.get(to.id) || 0);
-      if (list.includes(l.portTo)) inPort = { id: l.portTo, direction: "in", type: "number" };
+      const unlimited = to.options.operator === "max" || to.options.operator === "min";
+      if (list.includes(l.portTo) || (unlimited && /^in\d+$/.test(l.portTo))) {
+        inPort = { id: l.portTo, direction: "in", type: "number" };
+      }
     }
     if (!inPort) {
       // 「回复 / 攻击」等积木的执行流输入端只接受执行流
@@ -265,7 +268,9 @@ function compareValues(a, b, operator) {
  *   rng()             随机源
  *   sideOf(u) / listSide(side) / pickForPlayer(cands)
  *   unitData(u, field, { effectId })
- *   damage(target, value, attribute, { source }) / healUnit / setHp
+ *   damage(target, value, attribute, { source, additional, ignoreReduction })
+ *   noteAttack(source, targets, totalDamage)  // 普通攻击结算后登记「单位攻击时」
+ *   healUnit / setHp
  *   attachEffect(target, effectId) / removeEffectByMode(target, opts)
  *   summon({ unitId, count, label, ignoreLimit, parent, owner })
  *   skipTurn / grantImmune / forceExit / giveSkill
@@ -351,6 +356,8 @@ export function runFlow(prepared, env, opts = {}) {
         }
         return num(o.value);
       }
+      case "string":
+        return str(o.value);
       case "math": {
         const a = num(valueOf(node, "a", local));
         const b = num(valueOf(node, "b", local));
@@ -408,7 +415,12 @@ export function runFlow(prepared, env, opts = {}) {
         const u = raw === undefined || raw === null ? env.self : raw;
         if (!u || !u.key) return o.field === "name" || o.field === "label" || o.field === "id" ? "" : 0;
         const res = env.unitData(u, o.field, { effectId: valueOf(node, "effectId", local) });
-    return res;
+        return res;
+      }
+      case "selfData": {
+        // 不连目标：永远读流程拥有者自己（技能施放者 / 效果持有者）
+        if (!env.self) return o.field === "name" || o.field === "label" || o.field === "id" ? "" : 0;
+        return env.unitData(env.self, o.field, { effectId: valueOf(node, "effectId", local) });
       }
       case "filterSet": {
         const list = toList(valueOf(node, "targets", local));
@@ -479,7 +491,23 @@ export function runFlow(prepared, env, opts = {}) {
         const targets = unitList(valueOf(node, "targets", local));
         const value = valueOf(node, "value", local) === undefined ? 0 : num(valueOf(node, "value", local));
         const attribute = str(v("attribute")) || o.attribute || "physical";
-        for (const t of targets) env.damage(t, value, attribute, { source: env.self });
+        const additional = Boolean(o.additional);
+        const ignoreReduction = Boolean(o.ignoreReduction);
+        const hits = [];
+        let total = 0;
+        for (const t of targets) {
+          const rec = env.damage(t, value, attribute, {
+            source: env.self,
+            additional,
+            ignoreReduction,
+          });
+          if (rec) {
+            hits.push(t);
+            total += Number(rec.finalDamage) || 0;
+          }
+        }
+        // 「附加伤害」不视为攻击：不计入攻击统计，也不触发「单位攻击时」
+        if (!additional && hits.length) env.noteAttack?.(env.self, hits, total);
         go(nextId("next"));
         return;
       }
