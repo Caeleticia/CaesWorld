@@ -15,6 +15,7 @@
   <link rel="stylesheet" href="css/loading.css" />
   <link rel="stylesheet" href="css/menu.css" />
   <link rel="stylesheet" href="css/editor.css" />
+  <link rel="stylesheet" href="css/training.css" />
 </head>
 <body class="is-loading">
 
@@ -216,6 +217,117 @@
             aria-label="展开存档 JSON" title="展开存档 JSON">js</button>
   </main>
 
-  <script type="module" src="js/app.js"></script>
+  <!-- ======================= 测试 / 训练场：配置 ======================= -->
+  <main id="training-page" class="tw-page" hidden>
+    <div class="tw-stage" id="training-stage">
+      <header class="tw-topbar">
+        <a class="btn small" id="training-back" href="#menu">← 返回</a>
+        <div class="tw-title">测试 · 训练场 <span class="tw-sub" id="training-pack"></span></div>
+        <div class="tw-top-right"><span class="tw-hint" id="training-hint"></span></div>
+      </header>
+
+      <!-- 竖屏：顶端滑钮切换构筑红 / 蓝方卡组 -->
+      <div class="tw-seg" id="training-seg" data-side="red" role="tablist" aria-label="切换构筑阵营">
+        <span class="tw-seg-thumb" aria-hidden="true"></span>
+        <button class="tw-seg-btn is-active" type="button" data-side="red" role="tab">红方卡组</button>
+        <button class="tw-seg-btn" type="button" data-side="blue" role="tab">蓝方卡组</button>
+      </div>
+
+      <!-- 横屏：牌库1 / 红方卡组 / 蓝方卡组 / 牌库2；竖屏：牌库 + 当前方卡组 -->
+      <div class="tcfg-cols" id="tcfg-cols"></div>
+
+      <!-- 下方设置区（左）+ 开始对战（右） -->
+      <footer class="tcfg-settings">
+        <div class="tset-grid">
+          <label class="tset"><span>场上最多单位</span>
+            <input id="set-max-units" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" />
+          </label>
+          <label class="tset"><input id="set-red-inv" type="checkbox" /><span>红方无敌</span></label>
+          <label class="tset"><input id="set-blue-inv" type="checkbox" /><span>蓝方无敌</span></label>
+          <label class="tset"><input id="set-red-ai" type="checkbox" /><span>人机红方</span></label>
+          <label class="tset"><input id="set-blue-ai" type="checkbox" checked /><span>人机蓝方</span></label>
+        </div>
+        <div class="tstart">
+          <p class="tstart-hint" id="tstart-hint"></p>
+          <button class="tstart-btn" id="btn-start-battle" type="button">开始对战</button>
+        </div>
+      </footer>
+
+      <div class="tw-toast" id="training-toast" hidden></div>
+    </div>
+  </main>
+
+  <!-- ======================= 测试 / 训练场：战斗 ======================= -->
+  <main id="battle-page" class="tw-page" hidden>
+    <div class="tw-stage" id="battle-stage">
+      <header class="tw-topbar tbt-topbar">
+        <button class="btn small" id="battle-back" type="button">← 返回配置</button>
+        <div class="tw-title">训练对战 <span class="tw-sub">第 <b id="tb-round">1</b> 回合</span></div>
+        <div class="tbt-status" id="tb-status" data-side="red">准备中</div>
+      </header>
+
+      <div class="tbt-board">
+        <!-- 红方卡区（横屏在左，竖屏在上） -->
+        <section class="tbt-side" data-side="ally">
+          <header class="tbt-side-head">
+            <span class="tw-dot" data-side="red"></span><b>红方</b>
+            <span class="tbt-deck-count" id="tb-red-deck">牌组余 0</span>
+            <span class="tbt-badge" id="tb-red-badge"></span>
+          </header>
+          <div class="tbt-zone"><div class="tbt-grid" id="tb-red-zone"></div></div>
+        </section>
+
+        <!-- 中间：回合 / 当前行动 / 战斗日志 -->
+        <div class="tbt-center">
+          <div class="tbt-turn" id="tb-turn" data-side="red">
+            <b id="tb-turn-side">红方行动</b>
+            <small id="tb-turn-hint">选择 1 个未行动单位</small>
+          </div>
+          <div class="tbt-log" id="tb-log" aria-live="polite"></div>
+        </div>
+
+        <!-- 蓝方卡区（横屏在右，竖屏在下） -->
+        <section class="tbt-side" data-side="enemy">
+          <header class="tbt-side-head">
+            <span class="tw-dot" data-side="blue"></span><b>蓝方</b>
+            <span class="tbt-deck-count" id="tb-blue-deck">牌组余 0</span>
+            <span class="tbt-badge" id="tb-blue-badge"></span>
+          </header>
+          <div class="tbt-zone"><div class="tbt-grid" id="tb-blue-zone"></div></div>
+        </section>
+      </div>
+
+      <!-- 底部：战斗行动选择 -->
+      <footer class="tbt-actions" id="tb-actions"></footer>
+
+      <!-- 特效画布：与卡牌同一套舞台坐标 -->
+      <canvas class="tbt-fx" id="tb-fx" aria-hidden="true"></canvas>
+
+      <!-- 单位实时数据 -->
+      <div class="tbt-modal" id="tb-detail" hidden></div>
+      <!-- 战斗结果 -->
+      <div class="tbt-modal tbt-result" id="tb-result" hidden></div>
+    </div>
+  </main>
+
+  <script>
+/* TEMP DEBUG */
+(function () {
+  const show = (msg) => {
+    let el = document.getElementById('tmp-err');
+    if (!el) {
+      el = document.createElement('pre');
+      el.id = 'tmp-err';
+      el.style.cssText = 'position:fixed;z-index:9999;left:0;top:0;margin:0;padding:4px;background:#fff;color:#c00;font:11px monospace;white-space:pre-wrap;max-width:100%;';
+      document.body.appendChild(el);
+    }
+    el.textContent += msg + '\n';
+  };
+  window.addEventListener('error', (e) => show('ERR ' + e.message + ' @ ' + (e.filename || '') + ':' + e.lineno));
+  window.addEventListener('unhandledrejection', (e) => show('REJ ' + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason)));
+  window.__tmpShow = show;
+})();
+</script>
+<script type="module" src="js/app.js"></script>
 </body>
 </html>
