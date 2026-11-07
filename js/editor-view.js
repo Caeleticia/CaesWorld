@@ -2,6 +2,7 @@
  * editor-view.js —— 编辑器交互层
  *
  *  · 角色 / 技能 / 效果 的填写表单
+ *  · 角色 / 技能 / 效果 的新建与删除（删除会清空流程引用，并记住不再从内容包补回）
  *  · 积木画布：拖拽积木、拖拽端口连线、长按空白滑动切断、画布平移缩放
  *  · 实时生成「积木 JSON」与「执行流程 JSON」，并保存到 localStorage
  *
@@ -123,7 +124,7 @@ function loadProject() {
 
 /**
  * 把「默认包 + 已启用的模组」里的卡补进工程（按 id 去重，已有编辑不会被覆盖）。
- * 新模组启用后重新打开编辑器就能看到；删除的卡如果仍在内容包里，会在下次打开时补回。
+ * 新模组启用后重新打开编辑器就能看到；删除过的卡记在 removed*Ids 里，不会被补回。
  */
 async function hydrateFromPacks() {
   try {
@@ -148,11 +149,12 @@ async function hydrateFromPacks() {
 
     for (const card of res.units) {
       if (project.characters.some((ch) => ch.id === card.id)) continue;
+      if (isRemoved("unit", card.id)) continue;
       project.characters.push(unitCardToCharacter(card));
     }
     for (const card of res.skills) {
       if (project.skills.some((s) => s.id === card.id)) continue;
-      if ((project.removedSkillIds || []).includes(card.id)) continue;
+      if (isRemoved("skill", card.id)) continue;
       const s = createSkill(card.id, card.name);
       Object.assign(s, {
         type: card.type || "active",
@@ -165,6 +167,7 @@ async function hydrateFromPacks() {
     }
     for (const card of res.effects) {
       if (project.effects.some((e) => e.id === card.id)) continue;
+      if (isRemoved("effect", card.id)) continue;
       const e = createEffect(card.id, card.name);
       e.flags = Array.isArray(card.flags) ? card.flags.filter((f) => f !== "negative") : [];
       e.polarity = effectPolarityOf(card);
@@ -225,8 +228,10 @@ function flushSave() {
         (currentFlow() && !flowOk ? " · 流程有问题" : ""),
       "ok"
     );
+    return true;
   } catch (err) {
     setStatus("保存失败：" + err.message, "bad");
+    return false;
   }
 }
 
@@ -440,6 +445,76 @@ function allCards() {
 /** 流程里可能引用卡 id 的常量字段 */
 const CARD_REF_KEYS = ["unitId", "skillId", "effectId"];
 
+/**
+ * 删除过的卡 id 记在这里（按卡种类分开）。
+ * 内容包每次载入时会跳过这些 id，否则重新打开编辑器 / 重新启用模组时，
+ * 被删掉的默认包、模组卡又会被补回工程。
+ */
+const REMOVED_KEYS = {
+  unit: "removedUnitIds",
+  skill: "removedSkillIds",
+  effect: "removedEffectIds",
+};
+
+function removedIdsOf(kind) {
+  const key = REMOVED_KEYS[kind];
+  if (!key) return [];
+  if (!Array.isArray(project[key])) project[key] = [];
+  return project[key];
+}
+
+function isRemoved(kind, id) {
+  return removedIdsOf(kind).includes(id);
+}
+
+function markRemoved(kind, id) {
+  if (!id) return;
+  const list = removedIdsOf(kind);
+  if (!list.includes(id)) list.push(id);
+}
+
+function unmarkRemoved(kind, id) {
+  const key = REMOVED_KEYS[kind];
+  if (!key || !id) return;
+  project[key] = (project[key] || []).filter((x) => x !== id);
+}
+
+/** 批量改写删除标记（改卡 id / 改包 ID 时用） */
+function mapRemovedIds(fn) {
+  for (const key of Object.values(REMOVED_KEYS)) {
+    project[key] = [...new Set((project[key] || []).map(fn))];
+  }
+}
+
+/** 清空流程里对某张卡的常量引用；返回清掉的处数 */
+function clearFlowRefs(flow, id) {
+  if (!flow || typeof flow !== "object" || !id) return 0;
+  let n = 0;
+  for (const node of flow.nodes || []) {
+    const bags = [node.options, node.ui && node.ui.const];
+    for (const bag of bags) {
+      if (!bag || typeof bag !== "object") continue;
+      for (const key of CARD_REF_KEYS) {
+        if (bag[key] === id) {
+          bag[key] = "";
+          n += 1;
+        }
+      }
+    }
+  }
+  return n;
+}
+
+/** 清空工程里所有流程对某张卡的引用；返回清掉的处数 */
+function clearAllCardRefs(id) {
+  let n = 0;
+  for (const skill of project.skills || []) n += clearFlowRefs(skill.flow, id);
+  for (const effect of project.effects || []) {
+    for (const flow of Object.values(effect.flows || {})) n += clearFlowRefs(flow, id);
+  }
+  return n;
+}
+
 function rewriteFlowRefs(flow, oldId, newId) {
   if (!flow || typeof flow !== "object") return;
   for (const node of flow.nodes || []) {
@@ -459,7 +534,7 @@ function rewriteAllRefs(oldId, newId) {
   for (const ch of project.characters || []) {
     ch.skillIds = (ch.skillIds || []).map((x) => (x === oldId ? newId : x));
   }
-  project.removedSkillIds = (project.removedSkillIds || []).map((x) => (x === oldId ? newId : x));
+  mapRemovedIds((x) => (x === oldId ? newId : x));
   for (const skill of project.skills || []) rewriteFlowRefs(skill.flow, oldId, newId);
   for (const effect of project.effects || []) {
     for (const trigger of effect.triggers || []) {
@@ -536,9 +611,9 @@ function renamePackId(oldId, rawNewId) {
     card.pack = newId;
     card.packName = meta.name;
   }
-  project.removedSkillIds = (project.removedSkillIds || []).map((id) => {
+  mapRemovedIds((id) => {
     const parsed = parseId(id);
-    return parsed.ok && parsed.kind === "skill" && parsed.pack === oldId ? buildId(newId, "skill", parsed.key) : id;
+    return parsed.ok && parsed.pack === oldId ? buildId(newId, parsed.kind, parsed.key) : id;
   });
   meta.id = newId;
   for (const key of ["characterPack", "skillPack", "effectPack"]) {
@@ -658,6 +733,15 @@ function renderCardsList() {
   const skills = project.skills || [];
   const effects = project.effects || [];
   const ch = currentCharacter();
+
+  // 没有选中卡时禁用删除，避免按钮点了没反应
+  const setDeleteState = (sel, enabled) => {
+    const btn = $(sel);
+    if (btn) btn.disabled = !enabled;
+  };
+  setDeleteState("#btn-delete-character", Boolean(ch));
+  setDeleteState("#btn-delete-skill", Boolean(currentSkill()));
+  setDeleteState("#btn-delete-effect", Boolean(currentEffect()));
 
   // 角色选择 + 卡包筛选
   active.characterPack = fillPackSelect($("#ed-character-pack"), active.characterPack);
@@ -788,8 +872,7 @@ function renderSkillPanel() {
       ["active", "主动"],
       ["passive", "被动"],
     ], s.type))}
-    ${field("说明", `<textarea data-skill="description" rows="2">${escapeHtml(s.description || "")}</textarea>`)}
-    <div class="form-actions"><button class="btn danger" data-action="delete-skill">删除技能</button></div>`;
+    ${field("说明", `<textarea data-skill="description" rows="2">${escapeHtml(s.description || "")}</textarea>`)}`;
 }
 
 function renderEffectPanel() {
@@ -2031,6 +2114,121 @@ function importProject(e) {
   e.target.value = "";
 }
 
+/**
+ * 删除一张卡（角色 / 技能 / 效果）。
+ *  · 从工程移除，并记入 removed*Ids：重开编辑器时不会从内容包补回
+ *  · 清空所有流程里对该 id 的常量引用，避免留下必然报错的悬空引用
+ *  · 技能还会从角色的「挂载技能」里移除
+ * @returns {{ok: boolean, kind?: string, id?: string, name?: string, cleared?: number, error?: string}}
+ */
+function deleteCard(kind, target) {
+  const list =
+    kind === "unit" ? project.characters : kind === "skill" ? project.skills : kind === "effect" ? project.effects : null;
+  const card =
+    target || (kind === "unit" ? currentCharacter() : kind === "skill" ? currentSkill() : kind === "effect" ? currentEffect() : null);
+  if (!list || !card || !list.includes(card)) return { ok: false, error: "没有可删除的卡" };
+
+  const id = card.id;
+  const name = card.name || id;
+  list.splice(list.indexOf(card), 1);
+  markRemoved(kind, id);
+  const cleared = clearAllCardRefs(id);
+
+  if (kind === "skill") {
+    for (const ch of project.characters || []) {
+      ch.skillIds = (ch.skillIds || []).filter((x) => x !== id);
+    }
+  }
+
+  // 删除后选同筛选条件下的下一张卡；没有就落到第一张 / 空
+  if (kind === "unit") {
+    active.character =
+      (project.characters || []).find((c) => packMatch(c, active.characterPack)) || (project.characters || [])[0] || null;
+  } else if (kind === "skill") {
+    active.skill = (project.skills || []).find((s) => packMatch(s, active.skillPack)) || (project.skills || [])[0] || null;
+    canvasState.selectedId = null;
+  } else {
+    active.effect = (project.effects || []).find((e) => packMatch(e, active.effectPack)) || (project.effects || [])[0] || null;
+    active.triggerId = null;
+    canvasState.selectedId = null;
+  }
+
+  markDirty();
+  renderAll();
+  return { ok: true, kind, id, name, cleared };
+}
+
+const DELETE_LABEL = { unit: "角色", skill: "技能", effect: "效果" };
+/** 待确认的删除请求：{ kind, card } */
+let pendingDelete = null;
+
+function deleteCardOf(kind) {
+  return kind === "unit" ? currentCharacter() : kind === "skill" ? currentSkill() : currentEffect();
+}
+
+function deleteHint(kind) {
+  if (kind === "skill") return "会从角色挂载里移除，并清空流程里引用它的积木。";
+  if (kind === "unit") return "流程里引用这个角色的积木会被清空。";
+  return "流程里引用这个效果的积木会被清空。";
+}
+
+/** 打开删除确认弹窗（真正删除在 confirmPendingDelete 里执行） */
+function confirmDelete(kind) {
+  const label = DELETE_LABEL[kind] || "卡";
+  const card = deleteCardOf(kind);
+  if (!card) {
+    setStatus(`没有可删除的${label}`, "bad");
+    return false;
+  }
+  const modal = $("#ed-delete-modal");
+  const title = $("#ed-delete-title");
+  const desc = $("#ed-delete-desc");
+  if (!modal || !title || !desc) {
+    // 极端情况下缺少弹窗节点：退回原生确认框
+    if (!confirm(`删除${label}「${card.name || card.id}」？\n\n${deleteHint(kind)}`)) return false;
+    pendingDelete = { kind, card };
+    return Boolean(confirmPendingDelete());
+  }
+  pendingDelete = { kind, card };
+  title.textContent = `删除${label}`;
+  desc.textContent = `删除${label}「${card.name || card.id}」？${deleteHint(kind)}删除只影响本工程，不会修改内容包文件。`;
+  modal.hidden = false;
+  $("#btn-delete-confirm")?.focus?.();
+  return true;
+}
+
+function closeDeleteModal() {
+  pendingDelete = null;
+  const modal = $("#ed-delete-modal");
+  if (modal) modal.hidden = true;
+}
+
+/** 确认删除：按待确认请求里的卡 id 走 edit.delete*，避免弹窗期间选中变化删错卡 */
+function confirmPendingDelete() {
+  const request = pendingDelete;
+  if (!request || !request.card) {
+    closeDeleteModal();
+    return null;
+  }
+  const { kind, card } = request;
+  const label = DELETE_LABEL[kind] || "卡";
+  const name = card.name || card.id;
+  closeDeleteModal();
+
+  const res =
+    kind === "unit" ? edit.deleteCharacter(card.id) : kind === "skill" ? edit.deleteSkill(card.id) : edit.deleteEffect(card.id);
+  if (!res || !res.ok) {
+    setStatus(`删除${label}失败：${(res && res.error) || "未知原因"}`, "bad");
+    return null;
+  }
+  // 立刻落盘，避免 400ms 后的自动保存状态把删除提示顶掉
+  clearTimeout(saveTimer);
+  const saved = flushSave();
+  const tip = `已删除${label}「${name}」${res.cleared ? ` · 清空了 ${res.cleared} 处流程引用` : ""}`;
+  setStatus(saved ? tip : `${tip}，但保存失败，请点顶栏「保存」重试`, saved ? "ok" : "bad");
+  return res;
+}
+
 /* ================================================================== */
 /* 启动                                                                */
 /* ================================================================== */
@@ -2099,6 +2297,7 @@ const edit = {
     ch.name = name || "新角色";
     ch.pack = pack.id;
     ch.packName = pack.name;
+    unmarkRemoved("unit", cid);
     project.characters.push(ch);
     active.character = ch;
     markDirty();
@@ -2111,7 +2310,7 @@ const edit = {
     const card = createSkill(sid, name || "新技能");
     card.pack = pack.id;
     card.packName = pack.name;
-    project.removedSkillIds = (project.removedSkillIds || []).filter((id) => id !== card.id);
+    unmarkRemoved("skill", card.id);
     project.skills.push(card);
     active.skill = card;
     markDirty();
@@ -2124,12 +2323,31 @@ const edit = {
     const card = createEffect(eid, name || "新效果");
     card.pack = pack.id;
     card.packName = pack.name;
+    unmarkRemoved("effect", card.id);
     project.effects.push(card);
     active.effect = card;
     active.triggerId = null;
     markDirty();
     switchTab("effects");
     return card;
+  },
+  /** 删除当前角色（或按 id 指定）；返回 {ok, id, name, cleared} */
+  deleteCharacter(id) {
+    if (id === undefined) return deleteCard("unit");
+    const target = (project.characters || []).find((c) => c.id === id);
+    return target ? deleteCard("unit", target) : { ok: false, error: `找不到角色：${id}` };
+  },
+  /** 删除当前技能（或按 id 指定） */
+  deleteSkill(id) {
+    if (id === undefined) return deleteCard("skill");
+    const target = (project.skills || []).find((s) => s.id === id);
+    return target ? deleteCard("skill", target) : { ok: false, error: `找不到技能：${id}` };
+  },
+  /** 删除当前效果（或按 id 指定） */
+  deleteEffect(id) {
+    if (id === undefined) return deleteCard("effect");
+    const target = (project.effects || []).find((e) => e.id === id);
+    return target ? deleteCard("effect", target) : { ok: false, error: `找不到效果：${id}` };
   },
   /** 修改技能字段（走和表单一样的入口） */
   setSkillField(key, value) {
@@ -2493,13 +2711,14 @@ function importPackDoc(doc, file) {
     const ch = unitCardToCharacter(u);
     ch.pack = id;
     ch.packName = name;
+    unmarkRemoved("unit", ch.id);
     upsertCard(project.characters || (project.characters = []), ch);
     n += 1;
   }
   for (const s of Array.isArray(doc.skills) ? doc.skills : []) {
     if (!s || !s.id) continue;
     const card = createSkill(s.id, s.name);
-    project.removedSkillIds = (project.removedSkillIds || []).filter((x) => x !== card.id);
+    unmarkRemoved("skill", card.id);
     card.type = s.type || "active";
     card.description = s.description || "";
     card.pack = id;
@@ -2512,6 +2731,7 @@ function importPackDoc(doc, file) {
   for (const e of Array.isArray(doc.effects) ? doc.effects : []) {
     if (!e || !e.id) continue;
     const def = createEffect(e.id, e.name);
+    unmarkRemoved("effect", def.id);
     def.flags = Array.isArray(e.flags) ? e.flags.filter((x) => x !== "negative") : [];
     def.polarity = effectPolarityOf(e);
     def.stackable = Boolean(e.stackable);
@@ -2581,13 +2801,14 @@ function importContent(doc, file) {
     const ch = unitCardToCharacter(u);
     ch.pack = packId;
     ch.packName = packName;
+    unmarkRemoved("unit", ch.id);
     upsertCard(project.characters || (project.characters = []), ch);
     importedCharacter = ch;
     n += 1;
   }
   for (const s of skills) {
     const card = createSkill(s.id, s.name);
-    project.removedSkillIds = (project.removedSkillIds || []).filter((id) => id !== card.id);
+    unmarkRemoved("skill", card.id);
     card.type = s.type || "active";
     card.description = s.description || "";
     card.pack = packId;
@@ -2599,6 +2820,7 @@ function importContent(doc, file) {
   }
   for (const e of effects) {
     const def = createEffect(e.id, e.name);
+    unmarkRemoved("effect", def.id);
     def.flags = Array.isArray(e.flags) ? e.flags.filter((f) => f !== "negative") : [];
     def.polarity = effectPolarityOf(e);
     def.stackable = Boolean(e.stackable);
@@ -2821,6 +3043,7 @@ function setupForms() {
   });
 
   $("#btn-new-character")?.addEventListener("click", () => edit.newCharacter());
+  $("#btn-delete-character")?.addEventListener("click", () => confirmDelete("unit"));
   $("#ed-character-list")?.addEventListener("change", (e) => {
     active.character = project.characters[Number(e.target.value)] || null;
     renderAll();
@@ -2835,6 +3058,16 @@ function setupForms() {
 
   $("#btn-new-skill")?.addEventListener("click", () => edit.newSkill());
   $("#btn-new-effect")?.addEventListener("click", () => edit.newEffect());
+  $("#btn-delete-skill")?.addEventListener("click", () => confirmDelete("skill"));
+  $("#btn-delete-effect")?.addEventListener("click", () => confirmDelete("effect"));
+  $("#btn-delete-cancel")?.addEventListener("click", closeDeleteModal);
+  $("#btn-delete-confirm")?.addEventListener("click", confirmPendingDelete);
+  $("#ed-delete-modal")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeDeleteModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#ed-delete-modal")?.hidden) closeDeleteModal();
+  });
   $("#ed-skill-pack")?.addEventListener("change", (e) => {
     active.skillPack = e.target.value || PACK_ALL;
     if (!active.skill || !packMatch(active.skill, active.skillPack)) {
@@ -2863,20 +3096,6 @@ function setupForms() {
   const onSkill = (e) => onSkillFormInput(e);
   $("#ed-skill-form")?.addEventListener("input", onSkill);
   $("#ed-skill-form")?.addEventListener("change", onSkill);
-  $("#ed-skill-form")?.addEventListener("click", (e) => {
-    if (!e.target.closest('[data-action="delete-skill"]')) return;
-    const s = currentSkill();
-    if (!s || !confirm(`删除技能「${s.name}」？`)) return;
-    project.skills = project.skills.filter((x) => x !== s);
-    project.removedSkillIds = [...new Set([...(project.removedSkillIds || []), s.id])];
-    for (const ch of project.characters || []) {
-      ch.skillIds = (ch.skillIds || []).filter((x) => x !== s.id);
-    }
-    active.skill = (project.skills || []).find((x) => packMatch(x, active.skillPack)) || null;
-    canvasState.selectedId = null;
-    markDirty();
-    renderAll();
-  });
 
   const onEffect = (e) => onEffectFormInput(e);
   $("#ed-effect-form")?.addEventListener("input", onEffect);
