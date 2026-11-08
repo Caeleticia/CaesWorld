@@ -1,8 +1,8 @@
 /**
  * mod-view.js —— 模组 / 模组管理
  *
- * 服务器模组：mods/index.txt 清单 + mods/ 文件。
- * 本地模组：从本页导入，存在 localStorage。
+ * 服务器模组：mods/index.txt 清单 + mods/ 文件（ZIP 或旧 JSON）。
+ * 本地模组：从本页导入，JSON 存在 localStorage，ZIP 存在 IndexedDB。
  * 启用 / 停用：只影响本机，不修改服务器上的 index.txt。
  */
 import {
@@ -11,7 +11,9 @@ import {
   setModEnabled,
   importModFile,
   removeLocalMod,
-  modToExport,
+  removeServerModCache,
+  restoreServerMods,
+  exportMod,
 } from "./mods.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -32,7 +34,12 @@ export async function initModManager() {
     $("#mod-back")?.addEventListener("click", () => {
       location.hash = "#menu";
     });
-    $("#mod-refresh")?.addEventListener("click", () => refresh());
+    $("#mod-refresh")?.addEventListener("click", async () => {
+      if (loading) return;
+      // 「刷新」把本页删掉的服务器模组放回清单，并强制重新下载全部服务器模组
+      restoreServerMods();
+      await refresh({ force: true });
+    });
     $("#mod-import")?.addEventListener("click", () => $("#mod-file")?.click());
     $("#mod-file")?.addEventListener("change", async (e) => {
       const file = e.target.files && e.target.files[0];
@@ -51,16 +58,41 @@ export async function initModManager() {
       const exportBtn = event.target.closest("[data-mod-export]");
       if (exportBtn) {
         const mod = mods.find((m) => m.id === exportBtn.dataset.modExport);
-        if (mod) downloadJson(mod.fileName || `${mod.id}.json`, modToExport(mod));
+        if (!mod) return;
+        setStatus(`正在导出「${mod.name}」…`);
+        try {
+          const out = await exportMod(mod);
+          if (!out) return;
+          downloadBlob(out.blob, out.name);
+          setStatus(`已导出「${mod.name}」→ ${out.name}`);
+        } catch (err) {
+          setStatus(`导出失败：${String((err && err.message) || err)}`);
+        }
         return;
       }
       const delBtn = event.target.closest("[data-mod-delete]");
       if (delBtn) {
+        if (loading) return;
         const mod = mods.find((m) => m.id === delBtn.dataset.modDelete);
-        if (!mod || mod.source !== "local") return;
-        if (!confirm(`从本机删除导入的模组「${mod.name}」？`)) return;
-        removeLocalMod(mod.id);
-        await refresh();
+        if (!mod) return;
+        if (mod.source === "local") {
+          if (!confirm(`从本机删除导入的模组「${mod.name}」？`)) return;
+          setStatus(`正在删除「${mod.name}」…`);
+          await removeLocalMod(mod.id);
+          await refresh();
+          setStatus(`已删除本地模组「${mod.name}」`);
+        } else {
+          if (
+            !confirm(
+              `删除服务器模组「${mod.name}」在浏览器里的缓存？\n\n不会删除服务器文件；点「刷新」或重新打开页面后会重新从服务器缓存。`
+            )
+          )
+            return;
+          setStatus(`正在删除「${mod.name}」的浏览器缓存…`);
+          await removeServerModCache(mod.id);
+          await refresh();
+          setStatus(`已删除「${mod.name}」的浏览器缓存，刷新后会重新缓存`);
+        }
       }
     });
     $("#mod-list")?.addEventListener("change", (event) => {
@@ -79,17 +111,27 @@ export async function initModManager() {
   await refresh();
 }
 
-async function refresh() {
+async function refresh({ force = false } = {}) {
   if (loading) return;
   loading = true;
   setStatus("正在读取模组…");
   try {
-    const res = await loadAllMods({ includeDisabled: true });
+    const res = await loadAllMods({ includeDisabled: true, force });
     mods = res.mods;
     errors = res.errors || [];
     render();
     const enabled = mods.filter((m) => m.enabled).length;
-    setStatus(`${mods.length} 个模组 · 启用 ${enabled}${errors.length ? ` · ${errors.length} 个读取问题` : ""}`);
+    const zipCount = mods.filter((m) => m.isZip).length;
+    const artCount = mods.reduce((n, m) => n + (m.imageCount || 0), 0);
+    const iconCount = mods.reduce(
+      (n, m) => n + (m.icons ? (m.icons.skill?.length || 0) + (m.icons.effect?.length || 0) : 0),
+      0
+    );
+    setStatus(
+      `${mods.length} 个模组（ZIP ${zipCount}）· 启用 ${enabled} · 卡面 ${artCount}` +
+        (iconCount ? ` · 图标 ${iconCount}` : "") +
+        (errors.length ? ` · ${errors.length} 个读取问题` : "")
+    );
     if (errors.length) console.warn("[模组管理] 读取问题：", errors);
   } catch (err) {
     mods = [];
@@ -107,14 +149,46 @@ function setStatus(text) {
 }
 
 function fmtCounts(mod) {
-  return `单位 ${mod.units.length} · 技能 ${mod.skills.length} · 效果 ${mod.effects.length}`;
+  const icons = mod.icons ? (mod.icons.skill?.length || 0) + (mod.icons.effect?.length || 0) : 0;
+  return `单位 ${mod.units.length} · 技能 ${mod.skills.length} · 效果 ${mod.effects.length}` +
+    (icons ? ` · 图标 ${icons}` : "");
+}
+
+function renderWarnings(mod) {
+  const list = (mod.warnings || []).filter(Boolean);
+  if (!list.length) return "";
+  const shown = list.slice(0, 3);
+  return `<div class="mod-warn">${shown.map((w) => escapeHtml(w)).join("<br>")}${
+    list.length > shown.length ? `<br>…另有 ${list.length - shown.length} 条` : ""
+  }</div>`;
+}
+
+function renderReadme(mod) {
+  if (!mod.readme) return "";
+  return `<details class="mod-readme">
+    <summary>README</summary>
+    <pre>${escapeHtml(mod.readme)}</pre>
+  </details>`;
+}
+
+function renderArt(mod) {
+  const images = (mod.images || []).filter((img) => img && img.url).slice(0, 6);
+  if (!images.length) return "";
+  return `<div class="mod-art">${images
+    .map(
+      (img) =>
+        `<img src="${escapeHtml(img.url)}" alt="${escapeHtml(img.key)}" title="${escapeHtml(
+          `${img.key}.${img.ext}`
+        )}" loading="lazy" />`
+    )
+    .join("")}${mod.images.length > images.length ? `<span class="mod-art-more">+${mod.images.length - images.length}</span>` : ""}</div>`;
 }
 
 function render() {
   const list = $("#mod-list");
   if (!list) return;
   if (!mods.length) {
-    list.innerHTML = `<p class="lib-empty">还没有模组。把文件放进 <code>mods/</code> 并写进 <code>${escapeHtml(
+    list.innerHTML = `<p class="lib-empty">还没有模组。把 ZIP 模组放进 <code>mods/</code> 并写进 <code>${escapeHtml(
       MODS_INDEX
     )}</code>，或者点右上角「导入模组」。</p>`;
     return;
@@ -123,17 +197,24 @@ function render() {
     .map((mod) => {
       const sourceLabel = mod.source === "local" ? "本地导入" : "服务器";
       const sourceClass = mod.source === "local" ? "is-local" : "is-server";
+      const formatLabel = mod.isZip ? "ZIP" : "JSON";
       return `
       <article class="mod-row ${mod.enabled ? "" : "is-off"}">
         <div class="mod-row-main">
           <div class="mod-row-head">
             <strong>${escapeHtml(mod.name)}</strong>
-            ${mod.version ? `<span class="mod-version">${escapeHtml(mod.version)}</span>` : ""}
+            ${mod.version ? `<span class="mod-version">v${escapeHtml(mod.version)}</span>` : ""}
             <span class="mod-source ${sourceClass}">${escapeHtml(sourceLabel)}</span>
+            <span class="mod-format ${mod.isZip ? "is-zip" : ""}">${formatLabel}</span>
             <span class="mod-file">${escapeHtml(mod.fileName)}</span>
           </div>
           ${mod.description ? `<p class="mod-desc">${escapeHtml(mod.description)}</p>` : ""}
-          <div class="mod-meta">${escapeHtml(fmtCounts(mod))}</div>
+          <div class="mod-meta">${escapeHtml(fmtCounts(mod))}${
+            mod.isZip ? ` · 卡面 ${mod.imageCount || 0}` : ""
+          }</div>
+          ${renderWarnings(mod)}
+          ${renderArt(mod)}
+          ${renderReadme(mod)}
         </div>
         <div class="mod-ops">
           <label class="mod-enable ${mod.enabled ? "is-on" : ""}">
@@ -141,11 +222,11 @@ function render() {
             ${mod.enabled ? "已启用" : "已停用"}
           </label>
           <button class="btn tiny" type="button" data-mod-export="${escapeHtml(mod.id)}">导出</button>
-          ${
-            mod.source === "local"
-              ? `<button class="btn tiny danger" type="button" data-mod-delete="${escapeHtml(mod.id)}">删除</button>`
-              : ""
-          }
+          <button class="btn tiny danger" type="button" data-mod-delete="${escapeHtml(
+            mod.id
+          )}" title="${
+            mod.source === "local" ? "从本机删除" : "删除浏览器缓存；刷新后会重新缓存"
+          }">${mod.source === "local" ? "删除" : "删除缓存"}</button>
         </div>
       </article>`;
     })
@@ -160,8 +241,7 @@ function render() {
   }
 }
 
-function downloadJson(name, data) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+function downloadBlob(blob, name) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = name;

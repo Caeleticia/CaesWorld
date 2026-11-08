@@ -3,7 +3,7 @@
  *
  *  · 角色 / 技能 / 效果 的填写表单
  *  · 角色 / 技能 / 效果 的新建与删除（删除会清空流程引用，并记住不再从内容包补回）
- *  · 积木画布：拖拽积木、拖拽端口连线、长按空白滑动切断、画布平移缩放
+ *  · 积木画布：拖拽积木、拖拽端口连线、滑钮切换拖拽画布或切割连线、技能流程模板、画布平移缩放
  *  · 实时生成「积木 JSON」与「执行流程 JSON」，并保存到 localStorage
  *
  * 纯前端，不依赖任何第三方库。引擎只负责数据结构与解释执行（engine/）。
@@ -15,6 +15,7 @@ import {
   DATA_TYPE_LABEL,
   inputPortIds,
   prepareFlow,
+  variablePortType,
   createProject,
   createCharacter,
   createSkill,
@@ -26,12 +27,15 @@ import {
   charactersOf,
   PLACEHOLDER_IMAGE as PLACEHOLDER,
   cardImagePath,
+  cardIconPath,
   defaultCardImageName,
   resolveCardImage,
   RESISTANCE_ATTRIBUTES,
   EFFECT_ATTR_BONUS_KEYS,
   effectPolarityOf,
+  effectColorOf,
   normalizeEffectAttrBonus,
+  parseEffectColor,
   parseId,
   buildId,
   packFileOf,
@@ -43,6 +47,8 @@ import {
   DRAFT_PACK_NAME,
 } from "../engine/index.js";
 import { loadContentPacks, DEFAULT_PACK_ID, DEFAULT_PACK_NAME, EDITOR_PACK_ID, EDITOR_PACK_NAME } from "./mods.js";
+import { isZipBytes, unpackModZip } from "./mod-zip.js";
+import { applyPackImagesToCards, applyPackImagesToUnits, makePackZip } from "./pack-export.js";
 
 /** 卡组：编辑器工程按卡组存 localStorage；内容来自单文件模组（mods/） */
 const PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
@@ -64,10 +70,8 @@ let active = {
   skill: null,
   effect: null,
   triggerId: null,
-  /** 编辑器里的卡包筛选：all 或 pack id */
-  characterPack: "all",
-  skillPack: "all",
-  effectPack: "all",
+  /** 角色 / 技能 / 效果共用的「编辑中卡包」筛选：all 或 pack id */
+  editPack: "all",
   /** 「卡包」标签页当前选中的卡包（导出 / 存档 JSON 用） */
   packId: null,
 };
@@ -81,9 +85,7 @@ function setProject(p) {
     skill: (project.skills || [])[0] || null,
     effect: (project.effects || [])[0] || null,
     triggerId: null,
-    characterPack: "all",
-    skillPack: "all",
-    effectPack: "all",
+    editPack: "all",
     packId: null,
   };
   renderAll();
@@ -161,6 +163,7 @@ async function hydrateFromPacks() {
       Object.assign(s, {
         type: card.type || "active",
         description: card.description || "",
+        image: card.image === null ? null : card.image || "",
         pack: card.pack || DEFAULT_PACK_ID,
         packName: card.packName || (card.pack === DEFAULT_PACK_ID ? DEFAULT_PACK_NAME : card.pack),
       });
@@ -175,6 +178,10 @@ async function hydrateFromPacks() {
       e.polarity = effectPolarityOf(card);
       e.stackable = Boolean(card.stackable);
       e.maxStacks = Number.isFinite(Number(card.maxStacks)) ? Math.max(0, Math.floor(Number(card.maxStacks))) : 1;
+      e.image = card.image === null ? null : card.image || "";
+      e.color = typeof card.color === "string" ? card.color : "";
+      e.bar = Boolean(card.bar);
+      e.barInvert = Boolean(card.bar && card.barInvert);
       e.pack = card.pack || DEFAULT_PACK_ID;
       e.packName = card.packName || (card.pack === DEFAULT_PACK_ID ? DEFAULT_PACK_NAME : card.pack);
       e.attrBonus = normalizeEffectAttrBonus(card.attrBonus);
@@ -286,9 +293,7 @@ export function getView() {
       skillId: skill ? skill.id : null,
       effectId: effect ? effect.id : null,
       triggerId: active.triggerId,
-      characterPack: active.characterPack,
-      skillPack: active.skillPack,
-      effectPack: active.effectPack,
+      editPack: active.editPack,
       packId: active.packId,
     },
     packs: packsOfProject().map((p) => ({ id: p.id, name: p.name })),
@@ -316,15 +321,8 @@ function currentFlow() {
 /* ================================================================== */
 function switchTab(tab) {
   active.tab = tab;
-  if (!currentCharacter() && (project.characters || []).length) {
-    active.character = project.characters.find((c) => packMatch(c, active.characterPack)) || project.characters[0];
-  }
-  if (!currentSkill() && (project.skills || []).length) {
-    active.skill = project.skills.find((s) => packMatch(s, active.skillPack)) || project.skills[0];
-  }
-  if (!currentEffect() && (project.effects || []).length) {
-    active.effect = project.effects.find((e) => packMatch(e, active.effectPack)) || project.effects[0];
-  }
+  // 三个标签共用同一个「编辑中卡包」；切到任何一边都按它选卡
+  ensureTabInPack(tab);
   $$(".ed-tab").forEach((b) => b.classList.toggle("is-active", b.dataset.tab === tab));
   // 技能与效果共用「数据 + 流程」面板，左侧表单在技能 / 效果之间切换
   const panel = tab === "character" ? "character" : tab === "packs" ? "packs" : "skills";
@@ -345,6 +343,9 @@ function flowTriggerLabel() {
 }
 
 function renderAll() {
+  // 先把三边当前卡都对齐到同一个编辑中卡包，再画表单 / 流程
+  normalizeEditPack();
+  ensureAllInPack();
   renderPalette();
   renderCharacter();
   renderSkillPanel();
@@ -394,10 +395,10 @@ function ensurePack(id, name) {
   return pack;
 }
 
-/** 新建内容时的目标卡包：筛选是「全部」时进草稿包 draft */
-function newCardPack(filterKey) {
-  const filter = active[filterKey];
-  const id = filter && filter !== PACK_ALL ? filter : DRAFT_PACK_ID;
+/** 新建内容时的目标卡包：编辑中卡包是「全部」时进草稿包 draft */
+function newCardPack() {
+  const filter = normalizeEditPack();
+  const id = filter !== PACK_ALL ? filter : DRAFT_PACK_ID;
   const pack = ensurePack(id, id === DRAFT_PACK_ID ? DRAFT_PACK_NAME : undefined);
   active.packId = pack.id;
   return pack;
@@ -441,6 +442,42 @@ function fillPackSelect(el, selected) {
 
 function packMatch(card, pack) {
   return !pack || pack === PACK_ALL || packOf(card) === pack;
+}
+
+/** 编辑中卡包归一化：包不存在时回落到「全部卡包」 */
+function normalizeEditPack() {
+  if (!active.editPack) active.editPack = PACK_ALL;
+  if (active.editPack !== PACK_ALL && !packEntry(active.editPack)) active.editPack = PACK_ALL;
+  return active.editPack;
+}
+
+function firstCardInPack(list, pack) {
+  return (list || []).find((card) => card && packMatch(card, pack)) || null;
+}
+
+/** 某个标签页的当前卡不在编辑中卡包里时，自动选该包的第一张（没有则为空） */
+function ensureTabInPack(tab) {
+  const pack = normalizeEditPack();
+  if (tab === "character") {
+    if (!active.character || !packMatch(active.character, pack)) {
+      active.character = firstCardInPack(project.characters, pack);
+    }
+  } else if (tab === "skills") {
+    if (!active.skill || !packMatch(active.skill, pack)) {
+      active.skill = firstCardInPack(project.skills, pack);
+    }
+  } else if (tab === "effects") {
+    if (!active.effect || !packMatch(active.effect, pack)) {
+      active.effect = firstCardInPack(project.effects, pack);
+      active.triggerId = null;
+    }
+  }
+}
+
+function ensureAllInPack() {
+  ensureTabInPack("character");
+  ensureTabInPack("skills");
+  ensureTabInPack("effects");
 }
 
 /* ---------------------------- 卡包操作 ---------------------------- */
@@ -574,6 +611,11 @@ function moveCardToPack(card, packId) {
   return true;
 }
 
+/** 切包后让「编辑中卡包」跟着这张卡走；选「全部卡包」时保持全部 */
+function followCardPack(card) {
+  if (active.editPack !== PACK_ALL && card && card.pack) active.editPack = card.pack;
+}
+
 /** 重命名卡包（只改显示名） */
 function renamePack(id, name) {
   const meta = packEntry(id);
@@ -622,9 +664,7 @@ function renamePackId(oldId, rawNewId) {
     return parsed.ok && parsed.pack === oldId ? buildId(newId, parsed.kind, parsed.key) : id;
   });
   meta.id = newId;
-  for (const key of ["characterPack", "skillPack", "effectPack"]) {
-    if (active[key] === oldId) active[key] = newId;
-  }
+  if (active.editPack === oldId) active.editPack = newId;
   if (active.packId === oldId) active.packId = newId;
   return { ok: true };
 }
@@ -642,6 +682,11 @@ function newPackId() {
 
 /** 当前标签页对应的卡包（存档 JSON / 复制用） */
 function currentPackId() {
+  // 在设计角色 / 技能 / 效果时，「编辑中卡包」选了具体包就跟着它
+  if (active.tab !== "packs") {
+    const editPack = normalizeEditPack();
+    if (editPack !== PACK_ALL) return editPack;
+  }
   const card = active.tab === "character" ? currentCharacter() : currentCard();
   if (card && card.pack) return card.pack;
   if (active.packId && packEntry(active.packId)) return active.packId;
@@ -673,8 +718,8 @@ function missingPackRefs(file) {
   return [...missing];
 }
 
-/** 导出选中的卡包（单文件；同时把内容备份到 localStorage） */
-function exportPack(packId) {
+/** 导出选中的卡包：打成模组 ZIP（卡面一起带上；同时把 JSON 备份到 localStorage） */
+async function exportPack(packId) {
   const id = String(packId || "").trim();
   if (!id || !packEntry(id)) {
     setStatus("请先选择一个卡包", "bad");
@@ -686,15 +731,34 @@ function exportPack(packId) {
   } catch {
     /* 文件太大就只下载 */
   }
-  const ok = downloadJson(`${id}.json`, file);
+
+  let zip;
+  try {
+    setStatus(`正在打包「${packNameById(id)}」…`, "ok");
+    zip = await makePackZip(file, {
+      packId: id,
+      resolveImage: (card) => resolveCardImage(card),
+    });
+  } catch (err) {
+    setStatus(`打包失败：${String((err && err.message) || err)}`, "bad");
+    return file;
+  }
+
+  const ok = downloadBlob(
+    `${id}.zip`,
+    new Blob([zip.bytes], { type: "application/zip" }),
+    JSON.stringify(file, null, 2)
+  );
   const missing = missingPackRefs(file);
   const extra = missing.length
     ? `；有 ${missing.length} 个引用不在本卡包（${missing.slice(0, 3).join("、")}${missing.length > 3 ? "…" : ""}）`
     : "";
+  const art = `卡面 ${zip.images.length} 张 · 图标 ${(zip.icons || []).length} 个`;
+  const warn = zip.warnings && zip.warnings.length ? `·${zip.warnings.length} 个图片 / 图标没打进去` : "";
   setStatus(
     ok
-      ? `已导出卡包「${packNameById(id)}」${extra}；若浏览器没弹出下载，可点底部「复制卡包」`
-      : `下载失败，已把「${packNameById(id)}」复制到剪贴板${extra}`,
+      ? `已导出「${packNameById(id)}」→ ${id}.zip（${art}${warn}）${extra}；若浏览器没弹出下载，可点底部「复制卡包」`
+      : `下载失败，已把「${packNameById(id)}」的 JSON 复制到剪贴板${extra}`,
     ok ? "ok" : "bad"
   );
   return file;
@@ -722,7 +786,7 @@ function closeExportModal() {
   if (modal) modal.hidden = true;
 }
 
-function cardOptionsHtml(all, filtered, packFilter) {
+function cardOptionsHtml(all, filtered) {
   if (!filtered.length) return `<option value="">（无）</option>`;
   return filtered
     .map((card) => {
@@ -738,6 +802,10 @@ function renderCardsList() {
   const chars = project.characters || [];
   const skills = project.skills || [];
   const effects = project.effects || [];
+
+  // 三边共用的编辑中卡包：刷新下拉选项（包可能刚改名 / 新建）
+  active.editPack = fillPackSelect($("#ed-edit-pack"), active.editPack);
+  normalizeEditPack();
   const ch = currentCharacter();
 
   // 没有选中卡时禁用删除，避免按钮点了没反应
@@ -749,11 +817,9 @@ function renderCardsList() {
   setDeleteState("#btn-delete-skill", Boolean(currentSkill()));
   setDeleteState("#btn-delete-effect", Boolean(currentEffect()));
 
-  // 角色选择 + 卡包筛选
-  active.characterPack = fillPackSelect($("#ed-character-pack"), active.characterPack);
   const charList = $("#ed-character-list");
   if (charList) {
-    const filtered = chars.filter((c) => packMatch(c, active.characterPack));
+    const filtered = chars.filter((c) => packMatch(c, active.editPack));
     charList.innerHTML = filtered.length
       ? filtered
           .map((c) => {
@@ -767,19 +833,16 @@ function renderCardsList() {
     if (filtered.includes(active.character)) charList.value = String(chars.indexOf(active.character));
   }
 
-  // 技能 / 效果选择 + 卡包筛选
-  active.skillPack = fillPackSelect($("#ed-skill-pack"), active.skillPack);
   const skillList = $("#ed-skill-list");
   if (skillList) {
-    const filtered = skills.filter((s) => packMatch(s, active.skillPack));
-    skillList.innerHTML = cardOptionsHtml(skills, filtered, active.skillPack);
+    const filtered = skills.filter((s) => packMatch(s, active.editPack));
+    skillList.innerHTML = cardOptionsHtml(skills, filtered);
     if (filtered.includes(active.skill)) skillList.value = String(skills.indexOf(active.skill));
   }
-  active.effectPack = fillPackSelect($("#ed-effect-pack"), active.effectPack);
   const effectList = $("#ed-effect-list");
   if (effectList) {
-    const filtered = effects.filter((e) => packMatch(e, active.effectPack));
-    effectList.innerHTML = cardOptionsHtml(effects, filtered, active.effectPack);
+    const filtered = effects.filter((e) => packMatch(e, active.editPack));
+    effectList.innerHTML = cardOptionsHtml(effects, filtered);
     if (filtered.includes(active.effect)) effectList.value = String(effects.indexOf(active.effect));
   }
 
@@ -834,6 +897,7 @@ function renderCharacter() {
     "f-critdmg": ch.critDamage,
     "f-speed": ch.speed,
     "f-label": ch.label,
+    "f-intro": ch.description,
   };
   for (const [id, value] of Object.entries(map)) {
     const el = $("#" + id);
@@ -846,9 +910,17 @@ function renderCharacter() {
     const el = $(`#f-res-${attr}`);
     if (el && document.activeElement !== el) el.value = ch.resistances[attr];
   }
-  for (const key of ["occupiesSlot", "countsAsUnit", "invincible"]) {
-    const el = $("#f-" + (key === "occupiesSlot" ? "occupy" : key === "countsAsUnit" ? "count" : "invincible"));
-    if (el) el.checked = Boolean(ch[key]);
+  const SWITCH_IDS = {
+    occupiesSlot: "f-occupy",
+    countsAsUnit: "f-count",
+    invincible: "f-invincible",
+    obtainable: "f-obtainable",
+  };
+  for (const [key, id] of Object.entries(SWITCH_IDS)) {
+    const el = $("#" + id);
+    // 旧工程没有 obtainable：没填过就按默认勾选
+    const value = key === "obtainable" && ch.obtainable === undefined ? true : Boolean(ch[key]);
+    if (el) el.checked = value;
   }
   const packSel = $("#f-pack");
   if (packSel && document.activeElement !== packSel) packSel.innerHTML = packOptionsHtml(ch.pack);
@@ -872,7 +944,13 @@ function renderSkillPanel() {
     box.innerHTML = `<p class="hint">还没有技能。点「新建技能」开始。</p>`;
     return;
   }
+  const mounted = (project.characters || []).some((ch) => (ch.skillIds || []).includes(s.id));
   box.innerHTML = `
+    ${
+      mounted
+        ? ""
+        : `<p class="hint">⚠ 这个技能没有挂载到任何角色，战斗中不会生效；请到「设计角色」右侧「挂载技能」勾选。</p>`
+    }
     ${field("技能名", `<input data-skill="name" value="${escapeHtml(s.name)}" />`)}
     ${field("技能 id", `<input data-skill="id" value="${escapeHtml(s.id)}" />`, "扩展包_类型_标识，类型必须是 skill")}
     ${field("所属卡包", packSelectHtml('data-skill-pack="1"', s.pack), "切包会同时改卡 id 的包前缀并同步引用")}
@@ -880,12 +958,24 @@ function renderSkillPanel() {
       ["active", "主动"],
       ["passive", "被动"],
     ], s.type))}
+    ${field(
+      "技能图标",
+      `<input data-skill="image" value="${escapeHtml(cardIconPath(s))}" placeholder="${escapeHtml(
+        defaultCardImageName(s)
+      )}" />`,
+      "留空时取所属模组 icons/skill/<短 id>.*；也可填完整路径 / URL"
+    )}
+    <div class="form-row icon-edit-row">
+      <label class="btn small">选择图标<input type="file" data-icon-file="skill" accept="image/*" hidden /></label>
+      <button class="btn small" type="button" data-action="icon-placeholder" data-icon-kind="skill">用占位图</button>
+      <img class="ed-form-icon" data-icon-preview="skill" src="${resolveCardImage(s)}" alt="" onerror="this.src='${PLACEHOLDER}'" />
+    </div>
     ${field("说明", `<textarea data-skill="description" rows="2">${escapeHtml(s.description || "")}</textarea>`)}
     <div class="trigger-head">
       <span>触发</span>
       <button class="btn small" type="button" data-action="add-skill-trigger">+ 新触发</button>
     </div>
-    <p class="hint">每个触发选自己的条件，后续积木接在对应触发后面；同一技能可以放多个触发。新触发默认「单位释放该技能」。</p>`;
+    <p class="hint">每个触发选自己的条件，后续积木接在对应触发后面；同一技能可以放多个触发。新触发默认「单位释放该技能」，退场 / 入场等事件触发对主动和被动技能都会生效。</p><p class="hint">退场分裂：触发条件选「单位退场时」，后接「召唤单位」或「召唤子单位」；单位 id 留空 = 召唤自己。</p>`;
 }
 
 function renderEffectPanel() {
@@ -904,6 +994,8 @@ function renderEffectPanel() {
   if (typeof e.stackable !== "boolean") e.stackable = false;
   const maxStacks = Number(e.maxStacks);
   e.maxStacks = Number.isFinite(maxStacks) ? Math.max(0, Math.floor(maxStacks)) : 1;
+  e.bar = Boolean(e.bar);
+  e.barInvert = Boolean(e.barInvert) && e.bar;
   e.attrBonus = Array.isArray(e.attrBonus) ? e.attrBonus : [];
   e.triggers = e.triggers || [];
   if (!e.triggers.some((t) => t.block.id === active.triggerId)) {
@@ -924,11 +1016,11 @@ function renderEffectPanel() {
     )}
     <div class="chips">
       <label><input type="checkbox" data-effect-flag="unremovable" ${(e.flags || []).includes("unremovable") ? "checked" : ""} /> 不可解除（需勾选「强制移除」）</label>
-      <label><input type="checkbox" data-effect-auto="1" ${e.autoConsume ? "checked" : ""} /> 自动消耗（持有者行动、流程触发后移除一层）</label>
+      <label><input type="checkbox" data-effect-auto="1" ${e.autoConsume ? "checked" : ""} /> 自动消耗（每次执行完该效果的流程后消耗 1 层）</label>
     </div>
     ${
-      e.autoConsume && !(e.triggers || []).some((t) => t.block.event === "unitTurnStart")
-        ? `<p class="hint">自动消耗只在「单位行动开始时」触发；当前还没有这个触发，所以不会自动掉层。</p>`
+      e.autoConsume
+        ? `<p class="hint">每次该效果的触发流程执行完后消耗 1 层（触发条件未通过时不消耗）；只剩 1 层或未开启「层数计数」时直接移除整个效果。自动消耗无视「不可解除」。</p>`
         : ""
     }
     <div class="form-row">
@@ -941,6 +1033,48 @@ function renderEffectPanel() {
             `<input type="number" min="0" step="1" data-effect-number="maxStacks" value="${e.maxStacks}" />`,
             "默认 1；0 表示无上限"
           )
+        : ""
+    }
+    ${field(
+      "效果图标",
+      `<input data-effect="image" value="${escapeHtml(cardIconPath(e))}" placeholder="${escapeHtml(
+        defaultCardImageName(e)
+      )}" />`,
+      "留空时取所属模组 icons/effect/<短 id>.*；也可填完整路径 / URL"
+    )}
+    <div class="form-row icon-edit-row">
+      <label class="btn small">选择图标<input type="file" data-icon-file="effect" accept="image/*" hidden /></label>
+      <button class="btn small" type="button" data-action="icon-placeholder" data-icon-kind="effect">用占位图</button>
+      <img class="ed-form-icon" data-icon-preview="effect" src="${resolveCardImage(e)}" alt="" onerror="this.src='${PLACEHOLDER}'" />
+    </div>
+    ${field(
+      "颜色",
+      `<span class="effect-color-row">
+        <input type="color" class="effect-color-picker" data-effect-color-picker="1" value="${effectColorOf(
+          e
+        )}" title="点击调整 HEX 颜色" />
+        <input class="effect-color-text" data-effect="color" value="${escapeHtml(
+          e.color || ""
+        )}" placeholder="自动 ${effectColorOf(e)} / #RRGGBB / rgb(...)" />
+        <button class="btn tiny" type="button" data-action="effect-color-reset">自动</button>
+      </span>`,
+      "留空时按效果倾向自动取色；点击色块调整 HEX，也可直接输入 rgb 色码"
+    )}
+    <div class="chips">
+      <label><input type="checkbox" data-effect-bar="1" ${e.bar ? "checked" : ""} /> 条式显示（血条上方的进度条）</label>
+      ${
+        e.bar
+          ? `<label><input type="checkbox" data-effect-bar-invert="1" ${
+              e.barInvert ? "checked" : ""
+            } /> 反转条（显示 (上限-当前)/上限）</label>`
+          : ""
+      }
+    </div>
+    ${
+      e.bar
+        ? `<p class="hint">条式显示的效果会从角色左上方图标移到血条上方，必须开启层数计数并设置大于 0 的上限。${
+            !e.stackable || !(Number(e.maxStacks) > 0) ? "当前还没有有效上限。" : ""
+          }</p>`
         : ""
     }
     ${field("说明", `<textarea data-effect="description" rows="2">${escapeHtml(e.description || "")}</textarea>`)}
@@ -1049,6 +1183,7 @@ const TRIGGER_LABEL = {
   skillCast: "单位释放技能",
   skillCastSelf: "单位释放该技能",
   attack: "单位攻击时",
+  allyAttack: "我方单位攻击时",
   attacked: "单位受击时",
   lethalDamage: "单位受致命伤害时",
   unitEnter: "单位入场时",
@@ -1104,66 +1239,126 @@ function select(attrs, options, value) {
 /* ================================================================== */
 const canvasState = {
   view: { x: 40, y: 40, zoom: 1 },
+  /** 画布交互模式：pan = 拖拽画布，cut = 切割连线（由工具条滑钮切换） */
+  mode: "pan",
   drag: null,
   pan: null,
   link: null,
   selectedId: null,
-  pendingCut: null,
-  cutTimer: 0,
+  /** 切割状态：{ pointerId, lastX, lastY }；非空即表示正在切割连线 */
+  erase: null,
   nodeEls: new Map(),
+  /** 连线 id → 世界坐标采样点，擦除命中判定用 */
+  linkSamples: new Map(),
 };
 
-/** 长按不动多久才进入「切断连线」模式；移动超过这个距离则视为平移画布 */
-const CUT_HOLD_MS = 460;
-const CUT_SLOP = 12;
+/** 切割笔刷半径（屏幕像素），随画布缩放换算到世界坐标 */
+const ERASE_RADIUS = 16;
+
+/** 「模板」按钮插入的流程：默认包 · 史莱姆 · 撞击 */
+const FLOW_TEMPLATE_SLIME_BEAT = {
+  name: "撞击",
+  nodes: [
+    { id: "targetSide1", type: "targetSide", options: { side: "enemy" }, pos: { x: 0, y: 190 } },
+    { id: "chooseUnit1", type: "chooseUnit", options: { multiple: false }, pos: { x: 230, y: 195 } },
+    { id: "trg1", type: "trigger", options: { event: "skillCastSelf", unitScope: "self" }, pos: { x: 165, y: 0 } },
+    {
+      id: "atk1",
+      type: "attack",
+      options: { attribute: "physical", ignoreReduction: false, additional: false },
+      pos: { x: 520, y: 75 },
+    },
+    { id: "selfData1", type: "selfData", options: { field: "atk" }, pos: { x: 270, y: 355 } },
+  ],
+  links: [
+    { from: "targetSide1", port: "set", to: "chooseUnit1", portTo: "targets" },
+    { from: "trg1", port: "next", to: "atk1", portTo: "in" },
+    { from: "chooseUnit1", port: "set", to: "atk1", portTo: "targets" },
+    { from: "selfData1", port: "value", to: "atk1", portTo: "value" },
+  ],
+};
 
 const canvasEl = () => $("#blocks-canvas");
 const worldEl = () => $("#blocks-world");
 
-function showCutMarker(e) {
-  const marker = $("#cut-marker");
+function showEraseCursor(clientX, clientY) {
+  const cursor = $("#erase-cursor");
   const canvas = canvasEl();
-  if (!marker || !canvas) return;
+  if (!cursor || !canvas) return;
   const box = canvas.getBoundingClientRect();
-  marker.style.left = `${e.clientX - box.left}px`;
-  marker.style.top = `${e.clientY - box.top}px`;
-  marker.style.display = "block";
+  cursor.style.left = `${clientX - box.left}px`;
+  cursor.style.top = `${clientY - box.top}px`;
+  cursor.style.display = "block";
 }
 
-function hideCutMarker() {
-  const marker = $("#cut-marker");
-  if (marker) marker.style.display = "none";
+function hideEraseCursor() {
+  const cursor = $("#erase-cursor");
+  if (cursor) cursor.style.display = "none";
 }
 
-function clearCutTimer() {
-  if (canvasState.cutTimer) {
-    clearTimeout(canvasState.cutTimer);
-    canvasState.cutTimer = 0;
+function setEraseHint(show) {
+  const hint = $("#erase-hint");
+  if (hint) hint.hidden = !show;
+}
+
+function endEraseMode() {
+  canvasState.erase = null;
+  canvasEl()?.classList.remove("is-erasing");
+  hideEraseCursor();
+  setEraseHint(false);
+}
+
+/** 切换画布交互模式：pan = 拖拽画布，cut = 切割连线 */
+function setCanvasMode(mode) {
+  canvasState.mode = mode === "cut" ? "cut" : "pan";
+  const cut = canvasState.mode === "cut";
+  canvasEl()?.classList.toggle("is-cut-mode", cut);
+  const input = $("#canvas-mode");
+  if (input) {
+    input.checked = cut;
+    input.closest(".canvas-mode")?.classList.toggle("is-cut", cut);
   }
-  hideCutMarker();
+  if (!cut) endEraseMode();
+}
+
+/** 进入切割状态：之后拖动只擦线、不平移画布 */
+function beginCutting(e) {
+  canvasState.pan = null;
+  canvasState.erase = { pointerId: e.pointerId, lastX: e.clientX, lastY: e.clientY };
+  canvasEl()?.classList.add("is-erasing");
+  showEraseCursor(e.clientX, e.clientY);
+  setEraseHint(true);
+  if (typeof navigator.vibrate === "function") {
+    try {
+      navigator.vibrate(10);
+    } catch {
+      /* 部分浏览器 / 省电模式不支持振动，忽略 */
+    }
+  }
 }
 
 /**
- * 按下空白 / 连线：先进入「待切断」。
- * 只有按住不动超过 CUT_HOLD_MS 才删除；期间一动就取消，交给平移画布。
+ * 按下画布（空白或连线）：按当前滑钮模式决定手势。
+ * · 拖拽模式：拖动平移画布；
+ * · 切割模式：拖动擦掉扫过的连线。
  * @param {PointerEvent} e
- * @param {string|null} linkId 按在连线上的那条线；按在空白处为 null
  */
-function beginCut(e, linkId = null) {
-  clearCutTimer();
-  canvasState.pendingCut = { x: e.clientX, y: e.clientY, moved: false, linkId };
-  if (linkId) showCutMarker(e);
-  canvasState.cutTimer = setTimeout(() => {
-    const cut = canvasState.pendingCut;
-    if (!cut || cut.moved || canvasState.link) return;
-    clearCutTimer();
-    canvasState.pendingCut = null;
-    if (cut.linkId) {
-      // 切断后手指可能还按着，别让后续移动变成平移画布
-      canvasState.pan = null;
-      removeLink(cut.linkId);
-    }
-  }, CUT_HOLD_MS);
+function beginCanvasGesture(e) {
+  // 阻止长按触发系统菜单 / 文本选择；画布上的点按语义由 pointerup 自己处理
+  if (e.cancelable) e.preventDefault();
+  canvasEl().setPointerCapture(e.pointerId);
+  if (canvasState.mode === "cut") {
+    beginCutting(e);
+    return;
+  }
+  canvasState.pan = {
+    pointerId: e.pointerId,
+    x: e.clientX,
+    y: e.clientY,
+    vx: canvasState.view.x,
+    vy: canvasState.view.y,
+    moved: false,
+  };
 }
 
 function toWorld(clientX, clientY) {
@@ -1200,7 +1395,13 @@ function renderFlow() {
   const world = worldEl();
   if (!world) return;
   const flow = currentFlow();
+  const templateBtn = $("#btn-template");
+  if (templateBtn) {
+    templateBtn.hidden = active.tab !== "skills";
+    templateBtn.disabled = !flow;
+  }
   canvasState.nodeEls.clear();
+  canvasState.linkSamples.clear();
   world.innerHTML = "";
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "links");
@@ -1239,13 +1440,20 @@ function renderFlow() {
 }
 
 /**
- * 积木的输入端口。运算积木的输入口是动态的（a/b 或 in1、in2…），
- * 单靠 catalog.ports 画不出来——这里按当前选项与已连接数补出来。
+ * 积木的输入端口。有些端口单靠 catalog.ports 画不出来：
+ *  · 运算积木的输入口是动态的（a/b 或 in1、in2…），按当前选项与已连接数补出来；
+ *  · 「声明变量」的「值」端口类型随 type 选项变（数字 / 字符串 / 布尔→条件）。
  */
 function dataInputPorts(node, flow) {
   const def = blockDef(node.type);
   if (!def) return [];
   const base = def.ports.filter((p) => p.direction === "in");
+  // 「声明变量」的「值」端口类型随 type 选项变（数字 / 字符串 / 布尔→条件）
+  if (node.type === "declareVariable") {
+    const type = variablePortType(node.options && node.options.type);
+    const label = { number: "值（数字）", string: "值（字符串）", condition: "值（布尔）" }[type] || "值";
+    return base.map((p) => (p.id === "value" ? { ...p, type, label } : p));
+  }
   if (node.type !== "math") return base;
   const connected = (flow.links || []).filter((l) => l.to === node.id).length;
   return inputPortIds(def, node.options || {}, connected).map((id, i) => ({
@@ -1254,6 +1462,19 @@ function dataInputPorts(node, flow) {
     direction: "in",
     type: "number",
   }));
+}
+
+/** 切换「声明变量」的类型后，清掉和新的值类型不再匹配的连线 */
+function pruneVariableValue(flow, node) {
+  const type = variablePortType(node.options && node.options.type);
+  flow.links = (flow.links || []).filter((l) => {
+    if (l.to !== node.id || l.portTo !== "value") return true;
+    const fromNode = flow.nodes.find((n) => n.id === l.from);
+    const def = fromNode && blockDef(fromNode.type);
+    const out = def && def.ports.find((p) => p.id === l.port && p.direction === "out");
+    const t = out && out.type;
+    return !t || t === type || t === "any";
+  });
 }
 
 /** 切换运算类型后，清掉不再存在的输入口连线（例如 add 的 b → round 只有一个 a） */
@@ -1346,10 +1567,23 @@ function optionsHtml(node) {
       )}" placeholder="键入字符串"/></label>`;
     }
   }
-  const constKeys = { summon: ["unitId"], summonChild: ["unitId"], giveSkill: ["skillId"], attachEffect: ["effectId"], removeEffect: ["effectId"] }[node.type] || [];
+  const constKeys = {
+    summon: ["unitId"],
+    summonChild: ["unitId"],
+    giveSkill: ["skillId"],
+    attachEffect: ["effectId", "value"],
+    removeEffect: ["effectId"],
+  }[node.type] || [];
+  const numberConsts = new Set(["value"]);
   for (const key of constKeys) {
-    const label = { unitId: "单位 id", skillId: "技能 id", effectId: "效果 id" }[key];
-    html += `<label class="opt"><span>${label}</span><input data-constant="${key}" value="${escapeHtml(opts[key] ?? "")}" placeholder="扩展包_类型_标识"/></label>`;
+    const label = { unitId: "单位 id", skillId: "技能 id", effectId: "效果 id", value: "层数" }[key];
+    const placeholder =
+      key === "unitId" ? "留空 = 召唤自己" : key === "value" ? "留空 = 1 层" : "扩展包_类型_标识";
+    const type = numberConsts.has(key) ? "number" : "text";
+    const extra = key === "value" ? ' min="0" step="1"' : "";
+    html += `<label class="opt"><span>${label}</span><input type="${type}"${extra} data-constant="${key}" value="${escapeHtml(
+      opts[key] ?? ""
+    )}" placeholder="${escapeHtml(placeholder)}"/></label>`;
   }
   return html;
 }
@@ -1372,6 +1606,33 @@ function portCenter(el) {
   };
 }
 
+/**
+ * 三次贝塞尔采样（世界坐标），擦除命中判定用。
+ * 每约 10 屏幕像素取一个点，保证笔刷扫过曲线时不会从采样点之间漏过去。
+ */
+function sampleCubic(p0, p1, p2, p3) {
+  const rough =
+    Math.hypot(p1.x - p0.x, p1.y - p0.y) +
+    Math.hypot(p2.x - p1.x, p2.y - p1.y) +
+    Math.hypot(p3.x - p2.x, p3.y - p2.y);
+  const step = Math.max(4, 10 / (canvasState.view.zoom || 1));
+  const steps = Math.min(480, Math.max(12, Math.ceil(rough / step)));
+  const points = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const t = i / steps;
+    const u = 1 - t;
+    const w0 = u * u * u;
+    const w1 = 3 * u * u * t;
+    const w2 = 3 * u * t * t;
+    const w3 = t * t * t;
+    points.push({
+      x: w0 * p0.x + w1 * p1.x + w2 * p2.x + w3 * p3.x,
+      y: w0 * p0.y + w1 * p1.y + w2 * p2.y + w3 * p3.y,
+    });
+  }
+  return points;
+}
+
 function makeLinkPath(link) {
   const fromEl = canvasState.nodeEls.get(link.from);
   const toEl = canvasState.nodeEls.get(link.to);
@@ -1383,12 +1644,19 @@ function makeLinkPath(link) {
   const b = portCenter(toPort);
   const isFlow = !fromPort.dataset.type && !toPort.dataset.type;
   let d;
+  let samples;
   if (isFlow) {
     const midY = Math.min(a.y, b.y) - 30;
-    d = `M ${a.x} ${a.y} C ${a.x} ${midY}, ${b.x} ${midY}, ${b.x} ${b.y}`;
+    const c1 = { x: a.x, y: midY };
+    const c2 = { x: b.x, y: midY };
+    d = `M ${a.x} ${a.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`;
+    samples = sampleCubic(a, c1, c2, b);
   } else {
     const dx = Math.max(50, Math.abs(b.x - a.x) / 2);
-    d = `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`;
+    const c1 = { x: a.x + dx, y: a.y };
+    const c2 = { x: b.x - dx, y: b.y };
+    d = `M ${a.x} ${a.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`;
+    samples = sampleCubic(a, c1, c2, b);
   }
   const id = linkId(link);
   const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
@@ -1402,13 +1670,14 @@ function makeLinkPath(link) {
   if (toPort.dataset.type) path.dataset.type = toPort.dataset.type;
   path.dataset.link = id;
 
-  // 视觉线很细，手指按不住；上面盖一条透明的宽路径专门接收长按
+  // 视觉线很细，手指按不住；上面盖一条透明的宽路径专门接收「按住连线」的按下事件
   const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
   hit.setAttribute("d", d);
   hit.setAttribute("class", "link-hit");
   hit.dataset.link = id;
 
   group.append(path, hit);
+  canvasState.linkSamples.set(id, samples);
   return group;
 }
 
@@ -1425,6 +1694,7 @@ function redrawLinks() {
   const svg = worldEl() && worldEl().querySelector("svg.links");
   if (!flow || !svg) return;
   svg.innerHTML = "";
+  canvasState.linkSamples.clear();
   for (const link of flow.links || []) {
     const path = makeLinkPath(link);
     if (path) svg.appendChild(path);
@@ -1517,22 +1787,12 @@ function deleteSelected() {
   refreshFlowView();
 }
 
-function removeLink(id) {
-  const flow = currentFlow();
-  if (!flow) return;
-  flow.links = (flow.links || []).filter((l) => linkId(l) !== id);
-  markDirty();
-  // math 的无限输入会因断开而收口，跟着重绘积木
-  if (flow.nodes.some((n) => n.type === "math" && ["max", "min"].includes(n.options && n.options.operator))) {
-    refreshFlowView();
-  } else {
-    redrawLinks();
-    renderJson();
-  }
-}
-
 function findInputPort(flow, node, portId) {
   const def = blockDef(node.type);
+  // 「声明变量」的值端口类型随 type 选项变，不能用 catalog 里的静态类型
+  if (node.type === "declareVariable" && portId === "value") {
+    return { id: "value", direction: "in", type: variablePortType(node.options && node.options.type) };
+  }
   const base = def.ports.find((p) => p.id === portId && p.direction === "in");
   if (base) return base;
   if (node.type === "math") {
@@ -1613,6 +1873,12 @@ function setupCanvas() {
   bind("#btn-fit", fitView);
   bind("#btn-locate", locateNearestBlock);
   bind("#btn-tidy", tidyFlow);
+  bind("#btn-template", insertSlimeBeatTemplate);
+  const modeInput = $("#canvas-mode");
+  if (modeInput) {
+    modeInput.addEventListener("change", () => setCanvasMode(modeInput.checked ? "cut" : "pan"));
+  }
+  setCanvasMode(canvasState.mode);
   bind("#btn-zoom-in", () => zoomBy(1.15));
   bind("#btn-zoom-out", () => zoomBy(1 / 1.15));
   bind("#btn-clear-flow", () => {
@@ -1791,8 +2057,87 @@ function tidyFlow() {
   fitView();
 }
 
+/** 给新插入的模板节点找一个不与现有节点冲突的 id */
+function uniqueFlowNodeId(base, used) {
+  if (!used.has(base)) return base;
+  const match = /^(.*?)(\d+)$/.exec(base);
+  const prefix = match ? match[1] : base;
+  let n = match ? Number(match[2]) + 1 : 2;
+  let id = `${prefix}${n}`;
+  while (used.has(id)) {
+    n += 1;
+    id = `${prefix}${n}`;
+  }
+  return id;
+}
+
+/** 把默认史莱姆「撞击」的积木与连线追加到当前技能流程 */
+function insertSlimeBeatTemplate() {
+  if (active.tab !== "skills") {
+    setStatus("模板只用于技能流程", "bad");
+    return;
+  }
+  const flow = currentFlow();
+  if (!flow) {
+    setStatus("先选择一个技能，再插入模板", "bad");
+    return;
+  }
+  flow.nodes = Array.isArray(flow.nodes) ? flow.nodes : [];
+  flow.links = Array.isArray(flow.links) ? flow.links : [];
+  const template = FLOW_TEMPLATE_SLIME_BEAT;
+  const nodes = flow.nodes;
+  const used = new Set(nodes.map((n) => n.id));
+
+  // 空流程从左上角开始；非空流程放在现有积木下方，避免叠在一起
+  const minX = Math.min(...template.nodes.map((n) => n.pos.x));
+  const minY = Math.min(...template.nodes.map((n) => n.pos.y));
+  let originX = 80;
+  let originY = 80;
+  if (nodes.length) {
+    const left = Math.min(...nodes.map((n) => Number(n.pos?.x) || 0));
+    const bottom = Math.max(
+      ...nodes.map((n) => {
+        const el = canvasState.nodeEls.get(n.id);
+        return (Number(n.pos?.y) || 0) + (el?.offsetHeight || 150);
+      })
+    );
+    originX = Math.max(40, left);
+    originY = bottom + 60;
+  }
+
+  const idMap = new Map();
+  for (const node of template.nodes) {
+    const id = uniqueFlowNodeId(node.id, used);
+    used.add(id);
+    idMap.set(node.id, id);
+    flow.nodes.push({
+      id,
+      type: node.type,
+      options: clone(node.options || {}),
+      pos: { x: originX + node.pos.x - minX, y: originY + node.pos.y - minY },
+    });
+  }
+  let linkCount = 0;
+  for (const item of template.links) {
+    const from = idMap.get(item.from);
+    const to = idMap.get(item.to);
+    if (!from || !to) continue;
+    const link = { from, port: item.port, to, portTo: item.portTo };
+    link.id = linkId(link);
+    flow.links.push(link);
+    linkCount += 1;
+  }
+
+  markDirty();
+  refreshFlowView();
+  fitView();
+  setStatus(`已插入模板「${template.name}」：${template.nodes.length} 块积木 / ${linkCount} 条连线`, "ok");
+}
+
 function onPointerDown(e) {
   if (e.button === 2) return;
+  // 切割 / 平移期间忽略后续手指，保证一次只处理一个手势
+  if (canvasState.erase || canvasState.pan) return;
   canvasState.lastXY = { x: e.clientX, y: e.clientY };
   const portEl = e.target.closest(".port");
   const blockEl = e.target.closest(".block");
@@ -1805,10 +2150,9 @@ function onPointerDown(e) {
     canvasEl().setPointerCapture(e.pointerId);
     return;
   }
+  // 按在连线上和按在空白处遵循同一套手势：由滑钮决定平移还是切割
   if (pathEl) {
-    beginCut(e, pathEl.dataset.link || null);
-    canvasState.pan = { x: e.clientX, y: e.clientY, vx: canvasState.view.x, vy: canvasState.view.y, moved: false };
-    canvasEl().setPointerCapture(e.pointerId);
+    beginCanvasGesture(e);
     return;
   }
   // 积木里的下拉 / 勾选 / 输入框必须走原生交互：
@@ -1824,10 +2168,7 @@ function onPointerDown(e) {
     canvasEl().setPointerCapture(e.pointerId);
     return;
   }
-  // 空白：按住不动 = 切断；移动 = 平移画布
-  beginCut(e);
-  canvasState.pan = { x: e.clientX, y: e.clientY, vx: canvasState.view.x, vy: canvasState.view.y, moved: false };
-  canvasEl().setPointerCapture(e.pointerId);
+  beginCanvasGesture(e);
 }
 
 /**
@@ -1875,16 +2216,67 @@ function drawDragLine(e) {
   g.setAttribute("d", `M ${a.x} ${a.y} C ${a.x + dx} ${a.y}, ${b.x - dx} ${b.y}, ${b.x} ${b.y}`);
 }
 
+/* ---------------------------- 擦除 ---------------------------- */
+function distanceToSegment(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+/** 一条连线的采样折线是否落在笔刷扫过的线段附近 */
+function polylineNearSegment(points, a, b, radius) {
+  for (const p of points) {
+    if (distanceToSegment(p.x, p.y, a.x, a.y, b.x, b.y) <= radius) return true;
+  }
+  return false;
+}
+
+/** 批量删除擦除命中的连线；同一次扫动只重绘一次 */
+function removeLinks(ids) {
+  const flow = currentFlow();
+  if (!flow || !ids.length) return;
+  const remove = new Set(ids);
+  const before = (flow.links || []).length;
+  flow.links = (flow.links || []).filter((link) => !remove.has(linkId(link)));
+  if (flow.links.length === before) return;
+  markDirty();
+  // 运算积木的输入口会随连线数量收放，必须整块重绘
+  if (flow.nodes.some((n) => n.type === "math" && ["max", "min"].includes(n.options && n.options.operator))) {
+    refreshFlowView();
+  } else {
+    redrawLinks();
+    renderJson();
+  }
+}
+
+/** 笔刷从上一位置扫到当前位置，擦掉扫过的所有连线 */
+function eraseAtPointer(e) {
+  const erase = canvasState.erase;
+  if (!erase) return;
+  showEraseCursor(e.clientX, e.clientY);
+  const flow = currentFlow();
+  if (!flow) return;
+  const a = toWorld(erase.lastX, erase.lastY);
+  const b = toWorld(e.clientX, e.clientY);
+  const radius = ERASE_RADIUS / (canvasState.view.zoom || 1);
+  const hit = [];
+  for (const link of flow.links || []) {
+    const id = linkId(link);
+    const samples = canvasState.linkSamples.get(id);
+    if (samples && polylineNearSegment(samples, a, b, radius)) hit.push(id);
+  }
+  erase.lastX = e.clientX;
+  erase.lastY = e.clientY;
+  if (hit.length) removeLinks(hit);
+}
+
 function onPointerMove(e) {
-  const cut = canvasState.pendingCut;
-  if (cut && !canvasState.link) {
-    const d = Math.hypot(e.clientX - cut.x, e.clientY - cut.y);
-    if (d > CUT_SLOP) {
-      // 长按期间移动了：不再变成删除，按拖动处理
-      cut.moved = true;
-      clearCutTimer();
-      canvasState.pendingCut = null;
-    }
+  // 切割模式：只擦线，不平移画布
+  if (canvasState.erase) {
+    if (e.pointerId === canvasState.erase.pointerId) eraseAtPointer(e);
+    return;
   }
   if (canvasState.link) {
     drawDragLine(e);
@@ -1911,8 +2303,7 @@ function onPointerMove(e) {
     return;
   }
   if (canvasState.pan) {
-    // 还在「可能长按切断」的静止窗口内：先不平移，避免轻微抖动就移走画布
-    if (canvasState.pendingCut) return;
+    if (e.pointerId !== canvasState.pan.pointerId) return;
     const dx = e.clientX - canvasState.pan.x;
     const dy = e.clientY - canvasState.pan.y;
     if (Math.hypot(dx, dy) > 4) canvasState.pan.moved = true;
@@ -1924,12 +2315,23 @@ function onPointerMove(e) {
 }
 
 function onPointerUp(e) {
-  clearCutTimer();
+  // 只处理发起当前画布手势的那根手指，别被第二根手指提前结束
+  const gestureId = canvasState.erase
+    ? canvasState.erase.pointerId
+    : canvasState.pan
+      ? canvasState.pan.pointerId
+      : null;
+  if (gestureId !== null && e.pointerId !== gestureId) return;
+
+  if (canvasState.erase) {
+    endEraseMode();
+    canvasState.pan = null;
+    return;
+  }
 
   if (canvasState.link) {
     // 拖动连线时画布做了 setPointerCapture，pointerup 的 e.target 会被重定向成
-    // 画布本身，直接读 e.target 永远命中不到端口。这里按下真实坐标取落点，
-    // 与「长按切断连线」的做法保持一致。
+    // 画布本身，直接读 e.target 永远命中不到端口。这里按下真实坐标取落点。
     const drop = elementAtPoint(e.clientX, e.clientY, ".port");
     const dropBlock = drop && drop.closest(".block");
     if (drop && dropBlock && drop.dataset.dir === "in") {
@@ -1952,7 +2354,6 @@ function onPointerUp(e) {
   }
   if (canvasState.pan && !canvasState.pan.moved) selectNode(null);
   canvasState.pan = null;
-  canvasState.pendingCut = null;
 }
 
 /*
@@ -1993,6 +2394,7 @@ function onBlockOptionChange(e) {
   if (changed) {
     markDirty();
     if (node.type === "math" && e.target.dataset.option === "operator") pruneMathInputs(flow, node);
+    if (node.type === "declareVariable" && e.target.dataset.option === "type") pruneVariableValue(flow, node);
     renderJson();
     if (e.target.tagName === "SELECT") renderFlow();
   }
@@ -2007,14 +2409,32 @@ function applySkillField(card, key, value) {
       ch.skillIds = (ch.skillIds || []).map((x) => (x === old ? card.id : x));
     }
     active.skill = card;
+  } else if (key === "image") {
+    card.image = String(value ?? "").trim();
   } else card[key] = String(value ?? "");
 }
 
 function onSkillFormInput(e) {
   const s = currentSkill();
   if (!s) return;
+  if (e.target.dataset.iconFile === "skill") {
+    if (e.type !== "change") return;
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      s.image = String(reader.result || "");
+      renderSkillPanel();
+      renderCardsList();
+      markDirty();
+      renderJson();
+    };
+    reader.readAsDataURL(file);
+    return;
+  }
   if (e.target.dataset.skillPack !== undefined) {
     if (moveCardToPack(s, e.target.value)) {
+      followCardPack(s);
       markDirty();
       renderAll();
     } else {
@@ -2025,6 +2445,10 @@ function onSkillFormInput(e) {
   const key = e.target.dataset.skill;
   if (!key) return;
   applySkillField(s, key, e.target.value);
+  if (key === "image") {
+    const img = $('[data-icon-preview="skill"]');
+    if (img) img.src = resolveCardImage(s);
+  }
   markDirty();
   renderCardsList();
   renderJson();
@@ -2033,6 +2457,52 @@ function onSkillFormInput(e) {
 function onEffectFormInput(e) {
   const card = currentEffect();
   if (!card) return;
+  if (e.target.dataset.iconFile === "effect") {
+    if (e.type !== "change") return;
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      card.image = String(reader.result || "");
+      renderEffectPanel();
+      renderCardsList();
+      markDirty();
+      renderJson();
+    };
+    reader.readAsDataURL(file);
+    return;
+  }
+  if (e.target.dataset.effectBar !== undefined) {
+    card.bar = Boolean(e.target.checked);
+    if (card.bar) {
+      card.stackable = true;
+      const n = Number(card.maxStacks);
+      if (!Number.isFinite(n) || n <= 0) card.maxStacks = 1;
+    } else {
+      card.barInvert = false;
+    }
+    markDirty();
+    renderEffectPanel();
+    renderJson();
+    return;
+  }
+  if (e.target.dataset.effectBarInvert !== undefined) {
+    card.barInvert = Boolean(e.target.checked);
+    markDirty();
+    renderJson();
+    return;
+  }
+  if (e.target.dataset.effectColorPicker !== undefined) {
+    card.color = parseEffectColor(e.target.value) || "";
+    const text = $('[data-effect="color"]');
+    if (text) {
+      text.value = card.color;
+      text.classList.remove("is-invalid");
+    }
+    markDirty();
+    renderJson();
+    return;
+  }
   const flag = e.target.dataset.effectFlag;
   if (flag) {
     card.flags = Array.isArray(card.flags) ? card.flags : [];
@@ -2049,6 +2519,7 @@ function onEffectFormInput(e) {
   }
   if (e.target.dataset.effectPack !== undefined) {
     if (moveCardToPack(card, e.target.value)) {
+      followCardPack(card);
       markDirty();
       renderAll();
     } else {
@@ -2061,6 +2532,9 @@ function onEffectFormInput(e) {
     if (!card.stackable) {
       const n = Number(card.maxStacks);
       card.maxStacks = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 1;
+      // 条式显示必须有上限；关掉层数计数时自动关掉条式显示
+      card.bar = false;
+      card.barInvert = false;
     }
     markDirty();
     // 「层数上限」只在勾选「层数计数」时显示
@@ -2071,7 +2545,14 @@ function onEffectFormInput(e) {
   if (e.target.dataset.effectNumber) {
     const key = e.target.dataset.effectNumber;
     const n = Number(e.target.value);
-    if (key === "maxStacks") card.maxStacks = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 1;
+    if (key === "maxStacks") {
+      let next = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 1;
+      if (card.bar && next <= 0) {
+        next = 1;
+        e.target.value = "1";
+      }
+      card.maxStacks = next;
+    }
     markDirty();
     renderJson();
     return;
@@ -2098,11 +2579,46 @@ function onEffectFormInput(e) {
   }
   const key = e.target.dataset.effect;
   if (!key) return;
+  if (key === "color") {
+    const raw = String(e.target.value || "").trim();
+    if (!raw) {
+      card.color = "";
+      e.target.classList.remove("is-invalid");
+      const picker = $("[data-effect-color-picker]");
+      if (picker) picker.value = effectColorOf(card);
+      markDirty();
+      renderJson();
+      return;
+    }
+    const parsed = parseEffectColor(raw);
+    if (!parsed) {
+      e.target.classList.add("is-invalid");
+      if (e.type === "change") {
+        e.target.value = card.color || "";
+        e.target.classList.remove("is-invalid");
+      }
+      return;
+    }
+    card.color = parsed;
+    e.target.classList.remove("is-invalid");
+    if (e.type === "change" && e.target.value !== parsed) e.target.value = parsed;
+    const picker = $("[data-effect-color-picker]");
+    if (picker) picker.value = parsed;
+    markDirty();
+    renderJson();
+    return;
+  }
   if (key === "id") {
     card.id = e.target.value.trim();
     active.effect = card;
   } else if (key === "polarity") card.polarity = e.target.value || "positive";
-  else card[key] = e.target.value;
+  else if (key === "image") {
+    card.image = String(e.target.value || "").trim();
+  } else card[key] = e.target.value;
+  if (key === "image") {
+    const img = $('[data-icon-preview="effect"]');
+    if (img) img.src = resolveCardImage(card);
+  }
   markDirty();
   renderCardsList();
   renderJson();
@@ -2177,12 +2693,70 @@ function copyText(text) {
   return false;
 }
 
+/**
+ * 导入一个文件：ZIP 模组包 → 解出 JSON + 包内卡面（内嵌成 data URL）；
+ * 其它按 JSON 读。工程 / 内容包 / 卡包都走原来的识别器。
+ */
+async function importFileIntoEditor(file) {
+  if (!file) return;
+  try {
+    const bytes = await file.arrayBuffer();
+    if (isZipBytes(bytes)) {
+      await importZipPack(file, bytes);
+      return;
+    }
+  } catch {
+    /* 读不出来就退回按文本处理 */
+  }
+  readJsonFile(file, importContent);
+}
+
+/** 导入 ZIP 模组包到编辑器：卡面写进单位卡的 image 字段（data URL） */
+async function importZipPack(file, bytes) {
+  let pack;
+  try {
+    pack = unpackModZip(bytes, {
+      fileName: file.name || "mod.zip",
+      createUrls: false,
+      includeEntries: true,
+    });
+  } catch (err) {
+    setStatus(`ZIP 读取失败：${String((err && err.message) || err)}`, "bad");
+    return;
+  }
+  const doc = pack.raw;
+  const art = applyPackImagesToUnits(
+    pack,
+    pack.entries,
+    Array.isArray(doc.units) ? doc.units : []
+  );
+  // 工程格式的单位叫 characters，同样把卡面塞进去
+  if (doc.kind === PROJECT_KIND && Array.isArray(doc.characters)) {
+    applyPackImagesToUnits(pack, pack.entries, doc.characters);
+  }
+  const skillArt = applyPackImagesToCards(pack, pack.entries, doc.skills, "skill");
+  const effectArt = applyPackImagesToCards(pack, pack.entries, doc.effects, "effect");
+  importContent(doc, file);
+  const units = Array.isArray(doc.units)
+    ? doc.units.length
+    : Array.isArray(doc.characters)
+      ? doc.characters.length
+      : 0;
+  setStatus(
+    `已导入 ZIP 模组「${doc.name || pack.modName}」：${units} 个单位，内嵌卡面 ${art.matched} 张` +
+      `，技能图标 ${skillArt.matched} 个，效果图标 ${effectArt.matched} 个${
+        pack.warnings && pack.warnings.length ? `；${pack.warnings.length} 条提示` : ""
+      }`,
+    "ok"
+  );
+}
+
 function importProject(e) {
   const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  // 工程文件和内容包都走同一个识别器：工程 → 整套替换；内容包 → 合并
-  readJsonFile(file, importContent);
   e.target.value = "";
+  if (!file) return;
+  // 工程文件、内容包、ZIP 模组包都走同一个识别器
+  importFileIntoEditor(file);
 }
 
 /**
@@ -2211,15 +2785,14 @@ function deleteCard(kind, target) {
     }
   }
 
-  // 删除后选同筛选条件下的下一张卡；没有就落到第一张 / 空
+  // 删除后在同一编辑中卡包里选下一张；没有就为空，不跳到别的卡包
   if (kind === "unit") {
-    active.character =
-      (project.characters || []).find((c) => packMatch(c, active.characterPack)) || (project.characters || [])[0] || null;
+    active.character = firstCardInPack(project.characters, active.editPack);
   } else if (kind === "skill") {
-    active.skill = (project.skills || []).find((s) => packMatch(s, active.skillPack)) || (project.skills || [])[0] || null;
+    active.skill = firstCardInPack(project.skills, active.editPack);
     canvasState.selectedId = null;
   } else {
-    active.effect = (project.effects || []).find((e) => packMatch(e, active.effectPack)) || (project.effects || [])[0] || null;
+    active.effect = firstCardInPack(project.effects, active.editPack);
     active.triggerId = null;
     canvasState.selectedId = null;
   }
@@ -2344,8 +2917,8 @@ const edit = {
     if (key === "image") ch.image = value === null ? null : String(value || "");
     else if (["level", "baseHp", "baseAtk", "baseDef", "critRate", "critDamage", "speed"].includes(key)) {
       ch[key] = Number(value) || 0;
-    } else if (["occupiesSlot", "countsAsUnit", "invincible"].includes(key)) ch[key] = Boolean(value);
-    else if (["name", "id", "quality", "label", "pack", "packName"].includes(key)) ch[key] = String(value ?? "");
+    } else if (["occupiesSlot", "countsAsUnit", "invincible", "obtainable"].includes(key)) ch[key] = Boolean(value);
+    else if (["name", "id", "quality", "label", "description", "pack", "packName"].includes(key)) ch[key] = String(value ?? "");
     else throw new Error(`未知角色字段：${key}`);
     markDirty();
     renderCharacter();
@@ -2361,7 +2934,7 @@ const edit = {
     renderJson();
   },
   newCharacter(id, name) {
-    const pack = newCardPack("characterPack");
+    const pack = newCardPack();
     const cid = id || uniqueId((project.characters || []).map((c) => c.id), buildId(pack.id, "unit", "char"));
     const ch = createCharacter();
     ch.id = cid;
@@ -2376,7 +2949,7 @@ const edit = {
     return ch;
   },
   newSkill(id, name) {
-    const pack = newCardPack("skillPack");
+    const pack = newCardPack();
     const sid = id || uniqueId(project.skills.map((x) => x.id), buildId(pack.id, "skill", "new"));
     const card = createSkill(sid, name || "新技能");
     card.pack = pack.id;
@@ -2389,7 +2962,7 @@ const edit = {
     return card;
   },
   newEffect(id, name) {
-    const pack = newCardPack("effectPack");
+    const pack = newCardPack();
     const eid = id || uniqueId(project.effects.map((x) => x.id), buildId(pack.id, "effect", "new"));
     const card = createEffect(eid, name || "新效果");
     card.pack = pack.id;
@@ -2564,6 +3137,7 @@ const edit = {
     if (!card) return false;
     const ok = moveCardToPack(card, packId);
     if (ok) {
+      followCardPack(card);
       markDirty();
       renderAll();
     }
@@ -2633,7 +3207,7 @@ function renderPalette() {
     if (block.group === "trigger" && active.tab === "skills" && block.kind !== "trigger") continue;
     (groups[block.group] = groups[block.group] || []).push(block);
   }
-  const order = ["trigger", "action", "structure", "logic", "data"];
+  const order = ["trigger", "action", "structure", "logic", "data", "variable"];
   const html = order
     .filter((g) => groups[g])
     .map(
@@ -2672,7 +3246,7 @@ function renderPalette() {
 function acceptDropOnCharacter(e) {
   e.preventDefault();
   const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (file) readJsonFile(file, importContent);
+  if (file) importFileIntoEditor(file);
   else if (e.dataTransfer) {
     // 也可以直接拖一段 JSON 文本进来
     const text = e.dataTransfer.getData("text/plain");
@@ -2694,11 +3268,9 @@ function acceptDropOnCharacter(e) {
  *  · 生成 / 点击失败时退回剪贴板，并给出可见提示。
  * @returns {boolean} 是否已触发下载
  */
-function downloadJson(name, data) {
-  const text = JSON.stringify(data, null, 2);
+function downloadBlob(name, blob, fallbackText = "") {
   let url = null;
   try {
-    const blob = new Blob([text], { type: "application/json" });
     url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -2713,9 +3285,14 @@ function downloadJson(name, data) {
     return true;
   } catch (err) {
     if (url) setTimeout(() => URL.revokeObjectURL(url), 4000);
-    copyText(text);
+    if (fallbackText) copyText(fallbackText);
     return false;
   }
+}
+
+function downloadJson(name, data) {
+  const text = JSON.stringify(data, null, 2);
+  return downloadBlob(name, new Blob([text], { type: "application/json" }), text);
 }
 
 /** 把注册表里的单位卡转回角色表单需要的形状 */
@@ -2735,9 +3312,12 @@ function unitCardToCharacter(card) {
     critDamage: card.critDamage,
     speed: card.speed,
     label: card.label || "",
+    description: card.description || "",
     occupiesSlot: card.occupiesSlot,
     countsAsUnit: card.countsAsUnit,
     invincible: card.invincible,
+    // 旧卡包没有这个字段：undefined 时保持 createCharacter() 的默认（true）
+    obtainable: card.obtainable === undefined ? ch.obtainable : Boolean(card.obtainable),
     image: card.image === null ? null : card.image || "",
     skillIds: (card.skills || []).slice(),
     resistances: Object.fromEntries(
@@ -2792,6 +3372,7 @@ function importPackDoc(doc, file) {
     unmarkRemoved("skill", card.id);
     card.type = s.type || "active";
     card.description = s.description || "";
+    card.image = s.image === null ? null : s.image || "";
     card.pack = id;
     card.packName = name;
     card.flow = flowFromContent(s.flow);
@@ -2808,6 +3389,10 @@ function importPackDoc(doc, file) {
     def.stackable = Boolean(e.stackable);
     def.maxStacks = Number.isFinite(Number(e.maxStacks)) ? Math.max(0, Math.floor(Number(e.maxStacks))) : 1;
     def.description = e.description || "";
+    def.image = e.image === null ? null : e.image || "";
+    def.color = typeof e.color === "string" ? e.color : "";
+    def.bar = Boolean(e.bar);
+    def.barInvert = Boolean(e.bar && e.barInvert);
     def.pack = id;
     def.packName = name;
     def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
@@ -2882,6 +3467,7 @@ function importContent(doc, file) {
     unmarkRemoved("skill", card.id);
     card.type = s.type || "active";
     card.description = s.description || "";
+    card.image = s.image === null ? null : s.image || "";
     card.pack = packId;
     card.packName = packName;
     card.flow = flowFromContent(s.flow);
@@ -2897,6 +3483,10 @@ function importContent(doc, file) {
     def.stackable = Boolean(e.stackable);
     def.maxStacks = Number.isFinite(Number(e.maxStacks)) ? Math.max(0, Math.floor(Number(e.maxStacks))) : 1;
     def.description = e.description || "";
+    def.image = e.image === null ? null : e.image || "";
+    def.color = typeof e.color === "string" ? e.color : "";
+    def.bar = Boolean(e.bar);
+    def.barInvert = Boolean(e.bar && e.barInvert);
     def.pack = packId;
     def.packName = packName;
     def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
@@ -3059,6 +3649,7 @@ function setupForms() {
   bind("f-critdmg", (el) => (ch().critDamage = Number(el.value) || 0));
   bind("f-speed", (el) => (ch().speed = Number(el.value) || 0));
   bind("f-label", (el) => (ch().label = el.value));
+  bind("f-intro", (el) => (ch().description = el.value));
   bind("f-image", (el) => {
     const value = el.value.trim();
     // 填的就是默认短 id.png 时存空，让默认路径跟着卡牌 id 走
@@ -3071,6 +3662,7 @@ function setupForms() {
   bind("f-occupy", (el) => (ch().occupiesSlot = el.checked));
   bind("f-count", (el) => (ch().countsAsUnit = el.checked));
   bind("f-invincible", (el) => (ch().invincible = el.checked));
+  bind("f-obtainable", (el) => (ch().obtainable = el.checked));
   $("#f-pack")?.addEventListener("change", (e) => {
     const card = currentCharacter();
     if (!card) return;
@@ -3078,6 +3670,7 @@ function setupForms() {
       renderCharacter();
       return;
     }
+    followCardPack(card);
     markDirty();
     renderAll();
   });
@@ -3126,11 +3719,11 @@ function setupForms() {
     active.character = project.characters[Number(e.target.value)] || null;
     renderAll();
   });
-  $("#ed-character-pack")?.addEventListener("change", (e) => {
-    active.characterPack = e.target.value || PACK_ALL;
-    if (!active.character || !packMatch(active.character, active.characterPack)) {
-      active.character = (project.characters || []).find((c) => packMatch(c, active.characterPack)) || null;
-    }
+  $("#ed-edit-pack")?.addEventListener("change", (e) => {
+    active.editPack = e.target.value || PACK_ALL;
+    if (active.editPack !== PACK_ALL) active.packId = active.editPack;
+    // 三个标签的当前卡都切到同一个包；没有卡的标签显示为空
+    ensureAllInPack();
     renderAll();
   });
 
@@ -3146,21 +3739,6 @@ function setupForms() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#ed-delete-modal")?.hidden) closeDeleteModal();
   });
-  $("#ed-skill-pack")?.addEventListener("change", (e) => {
-    active.skillPack = e.target.value || PACK_ALL;
-    if (!active.skill || !packMatch(active.skill, active.skillPack)) {
-      active.skill = (project.skills || []).find((s) => packMatch(s, active.skillPack)) || null;
-    }
-    renderAll();
-  });
-  $("#ed-effect-pack")?.addEventListener("change", (e) => {
-    active.effectPack = e.target.value || PACK_ALL;
-    if (!active.effect || !packMatch(active.effect, active.effectPack)) {
-      active.effect = (project.effects || []).find((x) => packMatch(x, active.effectPack)) || null;
-      active.triggerId = null;
-    }
-    renderAll();
-  });
   $("#ed-skill-list")?.addEventListener("change", (e) => {
     active.skill = project.skills[Number(e.target.value)] || null;
     renderAll();
@@ -3175,6 +3753,16 @@ function setupForms() {
   $("#ed-skill-form")?.addEventListener("input", onSkill);
   $("#ed-skill-form")?.addEventListener("change", onSkill);
   $("#ed-skill-form")?.addEventListener("click", (e) => {
+    if (e.target.closest('[data-action="icon-placeholder"]')) {
+      const card = currentSkill();
+      if (!card) return;
+      card.image = null;
+      markDirty();
+      renderSkillPanel();
+      renderCardsList();
+      renderJson();
+      return;
+    }
     if (!e.target.closest('[data-action="add-skill-trigger"]')) return;
     edit.addBlock("trigger");
   });
@@ -3183,6 +3771,31 @@ function setupForms() {
   $("#ed-effect-form")?.addEventListener("input", onEffect);
   $("#ed-effect-form")?.addEventListener("change", onEffect);
   $("#ed-effect-form")?.addEventListener("click", (e) => {
+    if (e.target.closest('[data-action="effect-color-reset"]')) {
+      const card = currentEffect();
+      if (!card) return;
+      card.color = "";
+      const text = $('[data-effect="color"]');
+      if (text) {
+        text.value = "";
+        text.classList.remove("is-invalid");
+      }
+      const picker = $("[data-effect-color-picker]");
+      if (picker) picker.value = effectColorOf(card);
+      markDirty();
+      renderJson();
+      return;
+    }
+    if (e.target.closest('[data-action="icon-placeholder"]')) {
+      const card = currentEffect();
+      if (!card) return;
+      card.image = null;
+      markDirty();
+      renderEffectPanel();
+      renderCardsList();
+      renderJson();
+      return;
+    }
     const chip = e.target.closest("[data-trigger]");
     if (chip) {
       active.triggerId = chip.dataset.trigger;

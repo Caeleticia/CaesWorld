@@ -2,7 +2,7 @@
  * training-view.js —— 测试 / 训练场：配置界面
  *
  * 做三件事：
- *  1. 从当前卡组（data/pack/<卡组>/）+ 编辑器本地工程里读出「牌库」；
+ *  1. 从已启用的模组（含 mods/default.zip 默认包）+ 编辑器本地工程里读出「牌库」；
  *  2. 构筑红 / 蓝两套卡组（牌库 → 卡组、保存 / 切换 / 删除卡组）；
  *  3. 把设置（场上最多单位 / 无敌 / 人机）与当前阵容实时存到 localStorage，然后开战。
  *
@@ -14,7 +14,7 @@
 import {
   DEFAULT_PACK,
   ContentRegistry,
-  resolveImage,
+  resolveCardImage,
   PLACEHOLDER_IMAGE,
   QUALITY_LABEL,
 } from "../engine/index.js";
@@ -256,6 +256,7 @@ export function initTraining() {
 
     await refreshLibrary();
     renderAll();
+    preheatBattle();
   })();
   return initPromise;
 }
@@ -414,7 +415,7 @@ function renderLibrary(side) {
       return `
       <button type="button" class="tlib-row" data-add="${side}" data-card="${escapeHtml(card.id)}"
               title="${escapeHtml(card.name || card.id)} · ${escapeHtml(card.id)}">
-        <img class="tlib-thumb" src="${resolveImage(card.image)}" alt="" loading="lazy" draggable="false"
+        <img class="tlib-thumb" src="${resolveCardImage(card)}" alt="" loading="lazy" draggable="false"
              onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
         <span class="tlib-text">
           <span class="tlib-name">${escapeHtml(card.name || card.id)}
@@ -435,7 +436,7 @@ function deckRowHtml(side, id, index, total) {
   const meta = card ? `HP ${fmt(card.baseHp)} · ATK ${fmt(card.baseAtk)}` : "这张卡不在当前牌库里";
   return `
   <div class="tdeck-row" data-side="${side}" data-deck-row data-idx="${index}">
-    <img class="tdeck-thumb" src="${resolveImage(card?.image)}" alt="" draggable="false"
+    <img class="tdeck-thumb" src="${resolveCardImage(card)}" alt="" draggable="false"
          onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
     <span class="tlib-text">
       <span class="tdeck-name">${escapeHtml(name)}</span>
@@ -780,6 +781,45 @@ function toast(text) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 战斗模块的懒加载                                                    */
+/* ------------------------------------------------------------------ */
+/**
+ * 战斗界面只在真的开战时才下载（training-battle.js + battle-fx.js）。
+ * 这里专门绕开两个踩过的坑：
+ *  1. dev-server 是本地起的小服务，被系统回收 / 重启的那一两秒里请求会失败；
+ *  2. 浏览器会把「这次 import 失败」记进模块表，之后同一个 URL 不再重新请求，
+ *     于是点多少次「开始对战」都是同一个报错，只能整页刷新。
+ * 所以失败后用带参数的 URL 退避重试（query 不影响服务端返回内容）。
+ */
+const BATTLE_URL = "./training-battle.js";
+const BATTLE_RETRY_DELAYS = [200, 600];
+let battleModule = null;
+
+function importBattle(attempt = 0) {
+  if (battleModule) return Promise.resolve(battleModule);
+  const url = attempt ? `${BATTLE_URL}?r=${attempt}` : BATTLE_URL;
+  return import(url).then(
+    (mod) => {
+      battleModule = mod;
+      return mod;
+    },
+    (err) => {
+      const delay = BATTLE_RETRY_DELAYS[attempt];
+      if (delay == null) throw err;
+      return new Promise((resolve) => setTimeout(resolve, delay)).then(() => importBattle(attempt + 1));
+    },
+  );
+}
+
+/** 进训练场后顺手预热，避免第一次点「开始对战」才去下载模块 */
+function preheatBattle() {
+  if (battleModule) return;
+  importBattle().catch(() => {
+    /* 预热失败不打扰用户：开战时还会再试 */
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 开战                                                                */
 /* ------------------------------------------------------------------ */
 async function startMatch() {
@@ -799,8 +839,17 @@ async function startMatch() {
   };
   saveConfig();
   if (refs.startBtn) refs.startBtn.disabled = true;
+  let battle;
   try {
-    const battle = await import("./training-battle.js");
+    battle = await importBattle();
+  } catch (err) {
+    console.error("[训练场] 战斗模块加载失败", err);
+    page.hidden = false;
+    toast("战斗模块加载失败，刷新页面后重试");
+    if (refs.startBtn) refs.startBtn.disabled = false;
+    return;
+  }
+  try {
     battle.openBattle({
       registry: library.registry,
       config: snapshot,

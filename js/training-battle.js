@@ -5,7 +5,7 @@
  *   每回合双方入场新单位 → 回合开始效果 → 红方先手、双方交替各行动 1 次
  *   → 回合结束效果 → 下一回合
  * 这里只负责「表现」：
- *   · 卡牌（3:4 正面、血条、卡面外侧状态图标、点开数据面板）
+ *   · 卡牌（3:4 正面、血条、卡面外侧状态图标、点开数据面板；效果 / 技能可点开介绍）
  *   · 行动栏（选单位 / 选技能 / 选目标 / 结束行动）
  *   · 人机自动行动
  *   · canvas 特效（飞弹 / 爆炸 / 光环 / 命中跳字）——坐标用舞台设计坐标，
@@ -22,7 +22,10 @@ import {
   EFFECT_POLARITY_LABEL,
   QUALITY_LABEL,
   effectPolarityOf,
+  effectColorOf,
+  parseEffectColor,
   resolveCardImage,
+  resolveCardIcon,
   cardImagePath,
   PLACEHOLDER_IMAGE,
 } from "../engine/index.js";
@@ -44,6 +47,16 @@ const pct = (v) => {
 const firstChar = (s) => {
   const chars = [...String(s || "?")];
   return chars[0] || "?";
+};
+/** 自定义效果色上的文字颜色 */
+const contrastOn = (hex) => {
+  const raw = String(hex || "").replace("#", "");
+  if (!/^[0-9a-f]{6}$/i.test(raw)) return "#fff";
+  const r = parseInt(raw.slice(0, 2), 16);
+  const g = parseInt(raw.slice(2, 4), 16);
+  const b = parseInt(raw.slice(4, 6), 16);
+  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return lum > 0.62 ? "#17393c" : "#fff";
 };
 const sideName = (side) => (side === "ally" ? "红方" : "蓝方");
 const sideKey = (side) => (side === "ally" ? "red" : "blue");
@@ -88,6 +101,7 @@ export function openBattle({ registry, config, onExit }) {
     cardEls: new Map(),
     log: [],
     statusSig: new Map(),
+    effectBarSig: new Map(),
     resultShown: false,
     aiStall: 0,
     aiStalled: false,
@@ -116,6 +130,9 @@ export function openBattle({ registry, config, onExit }) {
     result: $("#tb-result"),
     canvas: $("#tb-fx"),
   };
+
+  /** 数据面板当前对应的单位；从技能 / 效果介绍返回时用 */
+  let detailUnitUid = null;
 
   /** 定位/尺寸：卡牌在舞台里的坐标（设计 px，不含缩放） */
   const rectOf = (uid) => {
@@ -213,6 +230,7 @@ export function openBattle({ registry, config, onExit }) {
     window.removeEventListener("keydown", onKey);
     refs.detail.hidden = true;
     refs.result.hidden = true;
+    detailUnitUid = null;
     if (current === session) current = null;
   };
   const closeToConfig = () => {
@@ -242,6 +260,7 @@ export function openBattle({ registry, config, onExit }) {
     if (e.key === "Escape") {
       if (!refs.detail.hidden) {
         refs.detail.hidden = true;
+        detailUnitUid = null;
         return;
       }
       if (!refs.result.hidden) return;
@@ -274,14 +293,12 @@ export function openBattle({ registry, config, onExit }) {
   /* ---------------- 卡牌 ---------------- */
   const canPickUnit = (pub) => {
     const pb = s.battle.publicBattle();
-    return (
-      !s.busy &&
-      pb.status === "running" &&
-      pb.phase === "select" &&
-      pb.sideTurn === pub.side &&
-      !pub.acted &&
-      isHumanSide(pub.side)
-    );
+    if (s.busy || pb.status !== "running") return false;
+    if (!isHumanSide(pub.side) || pub.side !== pb.sideTurn || pub.acted || pub.state !== "alive") return false;
+    if (pb.phase === "select") return true;
+    // act 阶段：还没选技能、也还没用技能时，点另一个未行动单位可以换行动单位
+    if (pb.phase === "act" && !s.pending && !pb.actionUsed) return pb.activeId !== pub.uid;
+    return false;
   };
 
   const createCard = (pub) => {
@@ -302,6 +319,7 @@ export function openBattle({ registry, config, onExit }) {
         <span class="tbt-card-name"></span>
         <span class="tbt-card-lv"></span>
         <span class="tbt-card-atk"></span>
+        <span class="tbt-card-effectbars" hidden></span>
         <span class="tbt-card-hpbar"><i></i></span>
         <span class="tbt-card-hptext"></span>
       </button>
@@ -358,18 +376,48 @@ export function openBattle({ registry, config, onExit }) {
       if (box) {
         box.innerHTML = statuses
           .slice(0, 5)
-          .map(
-            (st) =>
-              `<button class="tbt-status-ico ${st.cls}" type="button" data-uid="${escapeHtml(pub.uid)}" title="${escapeHtml(
-                st.title
-              )}">${escapeHtml(st.glyph)}</button>`
-          )
+          .map((st) => {
+            const style = st.color
+              ? ` style="background:${escapeHtml(st.color)};border-color:${escapeHtml(
+                  st.color
+                )};color:${escapeHtml(st.textColor)}"`
+              : "";
+            return `<button class="tbt-status-ico ${st.cls}" type="button" data-uid="${escapeHtml(
+              pub.uid
+            )}" title="${escapeHtml(st.title)}"${style}>${escapeHtml(st.glyph)}</button>`;
+          })
           .join("") +
           (statuses.length > 5
             ? `<button class="tbt-status-ico is-more" type="button" data-uid="${escapeHtml(pub.uid)}" title="还有 ${
                 statuses.length - 5
               } 个">+${statuses.length - 5}</button>`
             : "");
+      }
+    }
+
+    // 条式显示的效果：血条上方的进度条
+    const bars = effectBarsOf(unit);
+    const barSig = bars
+      .map((b) => `${b.key}:${b.current}/${b.max}:${b.ratio}:${b.color}:${b.inverted}`)
+      .join("|");
+    if (s.effectBarSig.get(pub.uid) !== barSig) {
+      s.effectBarSig.set(pub.uid, barSig);
+      const box = wrap.querySelector(".tbt-card-effectbars");
+      if (box) {
+        box.hidden = bars.length === 0;
+        box.innerHTML = bars
+          .map(
+            (b) => `<span class="tbt-card-effectbar" title="${escapeHtml(b.title)}" aria-label="${escapeHtml(
+              b.title
+            )}">
+              <span class="tbt-card-effectbar-glyph">${escapeHtml(b.glyph)}</span>
+              <span class="tbt-card-effectbar-track">
+                <i style="width:${(b.ratio * 100).toFixed(2)}%;background:${escapeHtml(b.color)}"></i>
+                <span class="tbt-card-effectbar-num">${b.shown}/${b.max}</span>
+              </span>
+            </span>`
+          )
+          .join("");
       }
     }
   };
@@ -380,11 +428,16 @@ export function openBattle({ registry, config, onExit }) {
     if (invincible) out.push({ key: "inv", glyph: "无", cls: "is-invincible", title: "无敌" });
     for (const layer of unit.effects || []) {
       const def = s.registry.getEffect(layer.id);
+      // 条式显示的效果不走左上角图标，改走血条上方的进度条
+      if (def && def.bar) continue;
       const polarity = effectPolarityOf(def);
+      const custom = parseEffectColor(def?.color);
       out.push({
         key: `e:${layer.id}`,
         glyph: firstChar(def?.name || layer.id),
         cls: polarity === "negative" ? "is-bad" : polarity === "special" ? "is-special" : "is-good",
+        color: custom || "",
+        textColor: custom ? contrastOn(custom) : "",
         title: `${def?.name || layer.id}${def?.stackable ? ` ${layer.stacks} 层` : ""} · ${EFFECT_POLARITY_LABEL[polarity]}`,
       });
     }
@@ -394,6 +447,36 @@ export function openBattle({ registry, config, onExit }) {
         glyph: firstChar(buff.label),
         cls: "is-buff",
         title: `${buff.label}${buff.duration !== null ? ` · ${buff.duration} 次行动` : ""}`,
+      });
+    }
+    return out;
+  }
+
+  /** 条式显示的效果：当前层数 / 上限，反转时进度 = (上限 - 当前) / 上限 */
+  function effectBarsOf(unit) {
+    const out = [];
+    for (const layer of unit.effects || []) {
+      const def = s.registry.getEffect(layer.id);
+      if (!def || !def.bar) continue;
+      const max = Math.max(1, Math.floor(Number(def.maxStacks) || 1));
+      const current = clamp(Math.floor(Number(layer.stacks) || 0), 0, max);
+      const inverted = Boolean(def.barInvert);
+      // 反转条的「显示进度」是 (上限-当前)/上限，文字也按这个分子显示
+      const shown = inverted ? max - current : current;
+      const ratio = shown / max;
+      out.push({
+        key: `e:${layer.id}`,
+        name: def.name || layer.id,
+        glyph: firstChar(def.name || layer.id),
+        current,
+        shown,
+        max,
+        ratio,
+        inverted,
+        color: effectColorOf(def),
+        title: `${def.name || layer.id} ${shown}/${max}${
+          inverted ? ` · 反转（当前 ${current}/${max}）` : ""
+        }`,
       });
     }
     return out;
@@ -410,17 +493,26 @@ export function openBattle({ registry, config, onExit }) {
     if (!W || !H) return;
     const gap = 20;
     const extra = 18; // 卡面外侧状态图标预留
-    let best = { cols: 1, w: 60 };
-    for (let cols = 1; cols <= n; cols += 1) {
-      const rows = Math.ceil(n / cols);
-      const cellW = (W - gap * (cols - 1)) / cols;
-      const cardW = cellW - extra;
-      const cardH = (H - gap * (rows - 1)) / rows;
-      const w = Math.min(cardW, cardH * 0.75, 168);
-      if (w > best.w) best = { cols, w };
-    }
-    grid.style.setProperty("--cols", String(best.cols));
-    grid.style.setProperty("--card-w", `${Math.max(46, Math.floor(best.w))}px`);
+    /** 按 count 个单位计算最优列数与卡宽（只算尺寸，不落 DOM） */
+    const sizeFor = (count) => {
+      let best = { cols: 1, w: 60 };
+      for (let cols = 1; cols <= count; cols += 1) {
+        const rows = Math.ceil(count / cols);
+        const cellW = (W - gap * (cols - 1)) / cols;
+        const cardW = cellW - extra;
+        const cardH = (H - gap * (rows - 1)) / rows;
+        const w = Math.min(cardW, cardH * 0.75, 168);
+        if (w > best.w) best = { cols, w };
+      }
+      return best;
+    };
+    const layout = sizeFor(n);
+    // 卡牌最大只到「场上 4 个单位」时的尺寸；1~4 个单位都保持这个大小，
+    // 超过 4 个才按实际数量继续缩小。
+    const cap = sizeFor(4);
+    const cardW = Math.min(layout.w, cap.w);
+    grid.style.setProperty("--cols", String(layout.cols));
+    grid.style.setProperty("--card-w", `${Math.max(46, Math.floor(cardW))}px`);
   };
 
   function syncUnits() {
@@ -440,6 +532,7 @@ export function openBattle({ registry, config, onExit }) {
           wrap.remove();
           s.cardEls.delete(uid);
           s.statusSig.delete(uid);
+          s.effectBarSig.delete(uid);
         }
       }
       for (const pub of list) {
@@ -578,20 +671,27 @@ export function openBattle({ registry, config, onExit }) {
     const card = active.card || {};
     const skills = s.battle.allSkillsOf(active);
     const skillButtons = skills
-      .map((sk, i) =>
-        sk.type === "active"
-          ? `<button class="tbt-skill ${s.pending?.index === i ? "is-targeting" : ""}" type="button" data-skill="${i}">
-               <b>${escapeHtml(sk.name)}</b>
+      .map((sk, i) => {
+        if (sk.type !== "active") return "";
+        const icon = resolveCardIcon(sk);
+        return `<button class="tbt-skill ${s.pending?.index === i ? "is-targeting" : ""}" type="button" data-skill="${i}">
+               <div class="tbt-skill-main">${
+                 icon ? `<img class="tbt-skill-icon" src="${escapeHtml(icon)}" alt="" draggable="false" />` : ""
+               }<b>${escapeHtml(sk.name)}</b></div>
                <span>手动选择目标</span>
-             </button>`
-          : ""
-      )
+             </button>`;
+      })
       .join("");
+    const cancelSkillButton = s.pending
+      ? `<button class="tbt-skill is-cancel" type="button" data-cancel>
+           <b>取消技能</b><span>返回选择技能</span>
+         </button>`
+      : "";
     const targetTip = s.pending
       ? `<div class="tbt-act-hint"><b>选择目标</b> · 点击${sideName(
           active.side === "ally" ? "enemy" : "ally"
-        )}单位 <button class="btn tiny" type="button" data-cancel>取消</button></div>`
-      : `<div class="tbt-act-hint">选择一个技能，或结束行动</div>`;
+        )}单位</div>`
+      : `<div class="tbt-act-hint">选择一个技能，或结束行动；点其他未行动单位可换人</div>`;
     el.innerHTML = `
       <div class="tbt-act-head">
         <img class="tbt-act-portrait" src="${resolveCardImage(card)}" alt="" draggable="false"
@@ -603,15 +703,16 @@ export function openBattle({ registry, config, onExit }) {
         <button class="btn tiny" type="button" data-info="${escapeHtml(active.uid)}">数据</button>
       </div>
       ${targetTip}
-      <div class="tbt-skills">${skillButtons || `<span class="tbt-act-hint">没有主动技能</span>`}</div>
+      <div class="tbt-skills">${skillButtons || `<span class="tbt-act-hint">没有主动技能</span>`}${cancelSkillButton}</div>
       <button class="tbt-end" type="button" data-end>结束行动</button>`;
   }
 
   /* ---------------- 数据面板 ---------------- */
   function effectDesc(def) {
     if (!def) return "（效果不存在）";
-    const auto = def.autoConsume ? "（自动消耗：持有者行动、流程触发后减 1 层）" : "";
-    return (def.description || "（这个效果还没有填写描述）") + auto;
+    const auto = def.autoConsume ? "（自动消耗：每次执行完该效果的流程后消耗 1 层）" : "";
+    const bar = def.bar ? `（条式显示${def.barInvert ? " · 反转条" : ""}）` : "";
+    return (def.description || "（这个效果还没有填写描述）") + auto + bar;
   }
 
   function buffDesc(buff) {
@@ -668,29 +769,24 @@ export function openBattle({ registry, config, onExit }) {
     }</b></li>`;
   }
 
-  function openDetail(uid) {
-    const unit = unitOf(uid);
-    if (!unit || !refs.detail) return;
-    const card = unit.card || {};
-    const stats = s.battle.statsOf(unit);
-    const pub = pubOf(uid);
-    const quality = QUALITY_LABEL[card.quality] || card.quality || "白";
-    const status = pub?.acted ? "本回合已行动" : "本回合未行动";
-    const invincible = unit.invincible || s.battle.state.invincibleSides.includes(unit.side);
-
+  /** 数据面板里的效果列表：单位效果 + 运行时增益（技能 / 效果介绍按同一索引取） */
+  function collectEffects(unit) {
     const effects = [];
     for (const layer of unit.effects || []) {
       const def = s.registry.getEffect(layer.id);
       effects.push({
+        key: `e:${layer.id}`,
         name: def?.name || layer.id,
         stacks: def?.stackable ? layer.stacks : null,
         desc: effectDesc(def),
+        icon: resolveCardIcon(def),
         polarity: effectPolarityOf(def),
         tag: layer.inheritedFrom ? "继承" : "",
       });
     }
     for (const buff of unit.buffs || []) {
       effects.push({
+        key: `b:${buff.uid}`,
         name: buff.label,
         stacks: null,
         desc: buffDesc(buff),
@@ -698,6 +794,20 @@ export function openBattle({ registry, config, onExit }) {
         tag: "增益",
       });
     }
+    return effects;
+  }
+
+  function openDetail(uid) {
+    const unit = unitOf(uid);
+    if (!unit || !refs.detail) return;
+    detailUnitUid = uid;
+    const card = unit.card || {};
+    const stats = s.battle.statsOf(unit);
+    const pub = pubOf(uid);
+    const quality = QUALITY_LABEL[card.quality] || card.quality || "白";
+    const status = pub?.acted ? "本回合已行动" : "本回合未行动";
+    const invincible = unit.invincible || s.battle.state.invincibleSides.includes(unit.side);
+    const effects = collectEffects(unit);
     const resist = stats.resistances || {};
     const skills = s.battle.allSkillsOf(unit);
 
@@ -715,6 +825,14 @@ export function openBattle({ registry, config, onExit }) {
           <button class="tbt-close" type="button" data-close-detail aria-label="关闭">×</button>
         </header>
         <div class="tbt-sheet-body">
+          ${
+            card.description
+              ? `<section class="tbd-section">
+                  <h4>角色介绍</h4>
+                  <p class="tbd-entry-desc">${escapeHtml(card.description)}</p>
+                </section>`
+              : ""
+          }
           <section class="tbd-section">
             <h4>数值</h4>
             <ul class="tbd-stats">
@@ -736,8 +854,14 @@ export function openBattle({ registry, config, onExit }) {
                 ? effects
                     .map(
                       (eff) => `
-                <div class="tbd-eff">
+                <div class="tbd-eff" role="button" tabindex="0" data-effect-key="${escapeHtml(eff.key)}"
+                     aria-label="查看效果 ${escapeHtml(eff.name)} 的介绍">
                   <div class="tbd-eff-head">
+                    ${
+                      eff.icon
+                        ? `<img class="tbd-eff-icon" src="${escapeHtml(eff.icon)}" alt="" draggable="false" />`
+                        : ""
+                    }
                     <span>${escapeHtml(eff.name)}</span>
                     ${eff.stacks ? `<em>${eff.stacks} 层</em>` : ""}
                     ${
@@ -748,6 +872,7 @@ export function openBattle({ registry, config, onExit }) {
                         : ""
                     }
                     ${eff.tag ? `<em>${escapeHtml(eff.tag)}</em>` : ""}
+                    <span class="tbd-entry-more" aria-hidden="true">介绍 ›</span>
                   </div>
                   <p>${escapeHtml(eff.desc)}</p>
                 </div>`
@@ -763,9 +888,14 @@ export function openBattle({ registry, config, onExit }) {
                 ? `<div class="tbd-skills">${skills
                     .map(
                       (sk) =>
-                        `<span class="tbd-skill">${escapeHtml(sk.name)}<em>${
-                          sk.type === "active" ? "主动" : "被动"
-                        }</em></span>`
+                        `<button type="button" class="tbd-skill" data-skill-id="${escapeHtml(sk.id)}"
+                          aria-label="查看技能 ${escapeHtml(sk.name)} 的介绍">${
+                            resolveCardIcon(sk)
+                              ? `<img class="tbd-skill-icon" src="${escapeHtml(resolveCardIcon(sk))}" alt="" draggable="false" />`
+                              : ""
+                          }${escapeHtml(sk.name)}<em>${
+                            sk.type === "active" ? "主动" : "被动"
+                          }</em><span class="tbd-entry-more" aria-hidden="true">介绍 ›</span></button>`
                     )
                     .join("")}</div>`
                 : `<p class="tbd-empty">没有技能。</p>`
@@ -774,6 +904,74 @@ export function openBattle({ registry, config, onExit }) {
         </div>
       </div>`;
     refs.detail.hidden = false;
+  }
+
+  /** 技能 / 效果介绍的小面板：保留「返回角色」和关闭 */
+  function entrySheet({ glyph, icon, title, subtitle, body }) {
+    return `<div class="tbt-sheet tbd-entry-sheet" role="dialog" aria-modal="true"
+      aria-label="${escapeHtml(title)} 的介绍">
+      <header class="tbt-sheet-head">
+        ${
+          icon
+            ? `<img class="tbd-entry-glyph tbd-entry-icon" src="${escapeHtml(icon)}" alt="" draggable="false" />`
+            : `<div class="tbd-entry-glyph" aria-hidden="true">${escapeHtml(glyph)}</div>`
+        }
+        <div class="tbt-sheet-title">
+          <h3>${escapeHtml(title)}</h3>
+          <p>${escapeHtml(subtitle)}</p>
+        </div>
+        <button class="tbt-close" type="button" data-close-detail aria-label="关闭">×</button>
+      </header>
+      <div class="tbt-sheet-body">
+        <button class="tbd-back" type="button" data-back-detail>← 返回角色</button>
+        ${body}
+      </div>
+    </div>`;
+  }
+
+  function openSkillIntro(uid, skillId) {
+    const unit = unitOf(uid);
+    const skill = unit ? s.battle.allSkillsOf(unit).find((sk) => sk.id === skillId) : null;
+    if (!skill || !refs.detail) return;
+    detailUnitUid = uid;
+    const type = skill.type === "active" ? "主动技能" : "被动技能";
+    const nodes = Array.isArray(skill.flow?.nodes) ? skill.flow.nodes.length : 0;
+    refs.detail.innerHTML = entrySheet({
+      glyph: "技",
+      icon: resolveCardIcon(skill),
+      title: skill.name,
+      subtitle: [type, nodes ? `流程 ${nodes} 块` : "", unit.name].filter(Boolean).join(" · "),
+      body: `<section class="tbd-section">
+        <h4>技能介绍</h4>
+        <p class="tbd-entry-desc">${escapeHtml(skill.description || "这个技能还没有填写介绍。")}</p>
+      </section>`,
+    });
+    refs.detail.hidden = false;
+    refs.detail.querySelector("[data-back-detail]")?.focus();
+  }
+
+  function openEffectIntro(uid, effectKey) {
+    const unit = unitOf(uid);
+    const eff = unit ? collectEffects(unit).find((item) => item.key === effectKey) : null;
+    if (!eff || !refs.detail) return;
+    detailUnitUid = uid;
+    const meta = [
+      eff.polarity ? EFFECT_POLARITY_LABEL[eff.polarity] : "",
+      eff.tag || "",
+      eff.stacks ? `${eff.stacks} 层` : "",
+    ].filter(Boolean);
+    refs.detail.innerHTML = entrySheet({
+      glyph: "效",
+      icon: eff.icon,
+      title: eff.name,
+      subtitle: [...meta, unit.name].join(" · "),
+      body: `<section class="tbd-section">
+        <h4>效果介绍</h4>
+        <p class="tbd-entry-desc">${escapeHtml(eff.desc)}</p>
+      </section>`,
+    });
+    refs.detail.hidden = false;
+    refs.detail.querySelector("[data-back-detail]")?.focus();
   }
 
   /* ---------------- 日志 ---------------- */
@@ -799,20 +997,29 @@ export function openBattle({ registry, config, onExit }) {
     }
     const aRect = rectOf(ev.attacker);
     const tRect = rectOf(ev.target);
-    if (aRect && tRect && !s.destroyed) {
+    const additional = Boolean(ev.isAdditionalDamage);
+    // 附加伤害不视为攻击：没有飞弹，直接在目标身上收拢一下就结算
+    if (!additional && aRect && tRect && !s.destroyed) {
       await s.fx.launch(aRect, tRect, { attribute: ev.attribute });
     } else {
-      await sleep(160);
+      await sleep(additional ? 90 : 160);
     }
     if (s.destroyed) return;
     const hitRect = rectOf(ev.target) || tRect;
     if (hitRect) {
-      s.fx.explode(hitRect, { attribute: ev.attribute });
       const immune = ev.finalDamage <= 0 || ev.targetInvincible || ev.immune;
+      if (additional) s.fx.impact(hitRect, { attribute: ev.attribute });
+      else s.fx.explode(hitRect, { attribute: ev.attribute });
       s.fx.floatText(
         hitRect,
         immune ? "免疫" : fmt(ev.finalDamage),
-        { attribute: ev.attribute, crit: Boolean(ev.crit), kind: immune ? "mute" : "damage" }
+        {
+          attribute: ev.attribute,
+          crit: Boolean(ev.crit),
+          kind: immune ? "mute" : "damage",
+          size: additional ? 20 : undefined,
+          tag: additional && !immune ? "附加" : "",
+        }
       );
       flashHit(ev.target);
     }
@@ -826,7 +1033,8 @@ export function openBattle({ registry, config, onExit }) {
       }`,
       cls
     );
-    await sleep(ev.finalDamage > 0 ? 150 : 120);
+    // 附加伤害的跳字要留够时间让人看清「附加」标签
+    await sleep(additional ? 220 : ev.finalDamage > 0 ? 150 : 120);
   }
 
   async function playHeal(ev) {
@@ -920,6 +1128,12 @@ export function openBattle({ registry, config, onExit }) {
           await sleep(120);
           break;
         }
+        case "effect:removed": {
+          // 层数变化 / 移除后立刻刷新进度条，避免已失效的效果还挂在血条上方
+          syncUnits();
+          await sleep(80);
+          break;
+        }
         case "death": {
           const unit = unitOf(ev.unit);
           const wrap = s.cardEls.get(ev.unit);
@@ -969,7 +1183,6 @@ export function openBattle({ registry, config, onExit }) {
         case "immune":
         case "buff:expired":
         case "buff:removed":
-        case "effect:removed":
         case "action:start":
         case "action:skip":
         case "skill:granted":
@@ -1218,6 +1431,12 @@ export function openBattle({ registry, config, onExit }) {
     if (!active) return;
     const skill = s.battle.allSkillsOf(active)[index];
     if (!skill) return;
+    // 再次点同一个技能 = 取消选择，回到技能列表
+    if (s.pending && s.pending.index === index) {
+      s.pending = null;
+      refreshAll();
+      return;
+    }
     // 非人机单位：即使只有一个敌人，也由玩家手动点选目标
     const enemies = s.battle.publicBattle().units.filter((u) => u.side !== active.side && u.state === "alive");
     if (!enemies.length) {
@@ -1232,7 +1451,31 @@ export function openBattle({ registry, config, onExit }) {
     refs.detail.onclick = (event) => {
       if (event.target === refs.detail || event.target.closest("[data-close-detail]")) {
         refs.detail.hidden = true;
+        detailUnitUid = null;
+        return;
       }
+      const back = event.target.closest("[data-back-detail]");
+      if (back && detailUnitUid) {
+        openDetail(detailUnitUid);
+        return;
+      }
+      const skill = event.target.closest("[data-skill-id]");
+      if (skill && detailUnitUid) {
+        openSkillIntro(detailUnitUid, skill.dataset.skillId);
+        return;
+      }
+      const eff = event.target.closest("[data-effect-key]");
+      if (eff && detailUnitUid) {
+        openEffectIntro(detailUnitUid, eff.dataset.effectKey);
+      }
+    };
+    // 效果条目是 div + role=button，原生不会把 Enter / 空格转成 click，这里补上
+    refs.detail.onkeydown = (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const eff = event.target.closest("[data-effect-key]");
+      if (!eff || !detailUnitUid) return;
+      event.preventDefault();
+      openEffectIntro(detailUnitUid, eff.dataset.effectKey);
     };
   }
 

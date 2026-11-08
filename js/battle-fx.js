@@ -435,6 +435,58 @@ export class BattleFX {
   }
 
   /**
+   * 瞬时命中（附加伤害 / 反噬这类「不视为攻击」的伤害）。
+   * 没有飞弹：卡面上直接收拢一圈碎屑 + 一次冲击环，读起来像「侵蚀」而不是「打一拳」，
+   * 这样和普通攻击的飞弹/爆开在画面上分得开。
+   * @param {{x:number,y:number,w:number,h:number}} rect 目标卡牌矩形
+   * @param {{attribute?:string,color?:string}} [opts]
+   */
+  impact(rect, opts = {}) {
+    if (this.destroyed || this.hidden || !rect) return;
+    const c = colorOf(opts.color || opts.attribute);
+    const cx = rect.x + rect.w / 2;
+    const cy = rect.y + rect.h / 2;
+    const radius = Math.max(rect.w, rect.h) * 0.5;
+    // 向内收拢的碎屑：从卡牌外缘飞向中心
+    for (let i = 0; i < 14; i += 1) {
+      const ang = rand(0, TAU);
+      const start = radius * rand(0.85, 1.25);
+      const life = rand(0.26, 0.42);
+      const spd = start / life;
+      this.particles.push({
+        x: cx + Math.cos(ang) * start,
+        y: cy + Math.sin(ang) * start,
+        dx: -Math.cos(ang),
+        dy: -Math.sin(ang),
+        spd,
+        decel: spd * 0.7,
+        alpha: rand(0.7, 1),
+        fade: rand(1.5, 2.2),
+        size: rand(1.4, 2.9),
+        h: c.h + rand(-8, 8),
+        s: clamp(c.s + rand(-6, 6), 20, 100),
+        l: Math.min(90, c.l + 12),
+        spin: rand(0, TAU),
+        spinSpeed: rand(-6, 6),
+        shape: Math.random() < 0.3 ? "square" : "dot",
+      });
+    }
+    // 一次短促的冲击环（比 aura 小、比 explode 轻）
+    this.auras.push({
+      x: cx,
+      y: cy,
+      w: rect.w,
+      h: rect.h,
+      color: c,
+      t: 0,
+      life: 0.46,
+      size: Math.max(rect.w, rect.h) * 0.92,
+      kind: "impact",
+    });
+    this._ensureLoop();
+  }
+
+  /**
    * 光环（治疗 / 增益 / 入场）：扩散双环 + 上升光点。
    * @param {{x:number,y:number,w:number,h:number}} rect
    * @param {{attribute?:string,color?:string,kind?:string,size?:number}} [opts]
@@ -522,7 +574,7 @@ export class BattleFX {
   /**
    * @param {{x:number,y:number,w?:number,h?:number}} at 卡牌矩形或点
    * @param {string|number} text
-   * @param {{attribute?:string,color?:string,kind?:string,crit?:boolean,size?:number,life?:number}} [opts]
+   * @param {{attribute?:string,color?:string,kind?:string,crit?:boolean,size?:number,life?:number,tag?:string}} [opts]
    */
   floatText(at, text, opts = {}) {
     if (this.destroyed || this.hidden) return;
@@ -537,6 +589,8 @@ export class BattleFX {
       lower: kind === "heal" ? "#2E9E5B" : kind === "mute" ? "#7D9FA1" : pair.lower,
       crit: Boolean(opts.crit),
       size: opts.size || (opts.crit ? 30 : 23),
+      /** 数字下方的小标签（如「附加」），用来区分伤害类型 */
+      tag: opts.tag ? String(opts.tag) : "",
       t: 0,
       life: opts.life || 0.9,
       drift: rand(-10, 10),
@@ -580,6 +634,17 @@ export class BattleFX {
       ctx.font = `700 11px ${FONT}`;
       ctx.fillStyle = t.lower;
       ctx.fillText("暴击", 0, -t.size * 0.78);
+    }
+
+    // 类型标签（附加 / 本源等）：压在数字下方，白描边保证在浅底上读得清
+    if (t.tag) {
+      ctx.globalAlpha = alpha;
+      ctx.font = `800 11px ${FONT}`;
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = "rgba(247, 255, 255, 0.95)";
+      ctx.strokeText(t.tag, 0, t.size * 0.84);
+      ctx.fillStyle = "#14616B";
+      ctx.fillText(t.tag, 0, t.size * 0.84);
     }
     ctx.restore();
     ctx.globalAlpha = 1;
