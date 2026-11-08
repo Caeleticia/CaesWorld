@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="css/menu.css" />
   <link rel="stylesheet" href="css/editor.css" />
   <link rel="stylesheet" href="css/training.css" />
+  <link rel="stylesheet" href="css/local.css" />
   <link rel="stylesheet" href="css/subpage.css" />
 </head>
 <body class="is-loading">
@@ -348,7 +349,7 @@
           <ul>
             <li>编辑器工程、草稿与删除标记</li>
             <li>本地导入的模组、启用 / 停用状态</li>
-            <li>训练场设置、当前阵容与已保存卡组</li>
+            <li>训练场 / 同屏的设置、当前阵容与已保存卡组 / ban 卡组</li>
             <li>导出临时备份、页面缓存（Cache Storage / IndexedDB）</li>
           </ul>
           <p class="settings-usage" id="settings-usage">本地存储：读取中…</p>
@@ -364,7 +365,7 @@
       <div class="ed-modal-box" role="dialog" aria-modal="true" aria-labelledby="settings-confirm-title">
         <h2 id="settings-confirm-title">清除所有浏览器数据</h2>
         <p class="muted" id="settings-confirm-desc">
-          将删除本站在浏览器里保存的编辑器工程、本地模组、训练场设置和缓存；服务器上的文件不会被动到。此操作不可撤销。
+          将删除本站在浏览器里保存的编辑器工程、本地模组、训练场 / 同屏设置和缓存；服务器上的文件不会被动到。此操作不可撤销。
         </p>
         <div class="ed-modal-actions">
           <button class="btn small" id="settings-confirm-cancel" type="button">取消</button>
@@ -424,7 +425,7 @@
       </header>
 
       <div class="tbt-board">
-        <!-- 红方卡区（横屏在左，竖屏在上） -->
+        <!-- 红方卡区（横屏在左，竖屏在下） -->
         <section class="tbt-side" data-side="ally">
           <header class="tbt-side-head">
             <span class="tw-dot" data-side="red"></span><b>红方</b>
@@ -443,7 +444,7 @@
           <div class="tbt-log" id="tb-log" aria-live="polite"></div>
         </div>
 
-        <!-- 蓝方卡区（横屏在右，竖屏在下） -->
+        <!-- 蓝方卡区（横屏在右，竖屏在上） -->
         <section class="tbt-side" data-side="enemy">
           <header class="tbt-side-head">
             <span class="tw-dot" data-side="blue"></span><b>蓝方</b>
@@ -464,6 +465,163 @@
       <div class="tbt-modal" id="tb-detail" hidden></div>
       <!-- 战斗结果 -->
       <div class="tbt-modal tbt-result" id="tb-result" hidden></div>
+    </div>
+  </main>
+
+  <!-- ======================= 游玩 / 同屏：配置 ======================= -->
+  <main id="play-page" class="tw-page" hidden>
+    <div class="tw-stage" id="play-stage">
+      <header class="tw-topbar">
+        <button class="btn small" id="play-back" type="button">← 返回</button>
+        <div class="tw-title">游玩 · 同屏 <span class="tw-sub" id="play-pack"></span></div>
+        <div class="tw-top-right"><span class="tw-hint" id="play-hint"></span></div>
+      </header>
+
+      <!-- 竖屏：ban卡 / 设置（初始 ban卡） -->
+      <div class="tw-seg pcfg-seg" id="play-seg" data-side="ban" role="tablist" aria-label="切换配置页面">
+        <span class="tw-seg-thumb" aria-hidden="true"></span>
+        <button class="tw-seg-btn is-active" type="button" data-side="ban" role="tab">ban卡</button>
+        <button class="tw-seg-btn" type="button" data-side="settings" role="tab">设置</button>
+      </div>
+
+      <div class="pcfg-cols" id="pcfg-cols">
+        <!-- 牌库：同屏采用抽牌制，这里就是双方的抽牌池（被 ban 的卡不会进入） -->
+        <section class="tcfg-panel pcfg-lib pcfg-panel" id="pcfg-lib">
+          <header class="tcfg-head">
+            <span class="tw-dot" data-side="red"></span>
+            <h2>牌库</h2>
+            <span class="tcfg-count" id="pcfg-lib-count">0 张</span>
+          </header>
+          <div class="pcfg-lib-hint">点卡牌加入 / 移出 ban 区。战斗时双方各自从「牌库 − ban」中抽牌，不在这里构筑卡组。</div>
+          <div class="tlib-filter">
+            <input type="search" id="pcfg-filter" placeholder="筛选单位…" autocomplete="off" />
+            <select id="pcfg-pack" title="按卡包筛选"></select>
+          </div>
+          <div class="tlib-list" id="pcfg-lib-list"></div>
+        </section>
+
+        <!-- ban 卡区 -->
+        <section class="tcfg-panel pcfg-ban pcfg-panel" id="pcfg-ban">
+          <header class="tcfg-head">
+            <h2>ban 卡区</h2>
+            <span class="tcfg-count" id="pcfg-ban-count">0 张</span>
+            <button class="btn tiny" type="button" id="pcfg-ban-clear">清空</button>
+          </header>
+          <div class="pcfg-ban-hint">被 ban 的卡不会进入任何一方的抽牌池；不可获取的卡首次出现时自动加入。</div>
+          <div class="tdeck-list pcfg-ban-list" id="pcfg-ban-list"></div>
+          <div class="tdeck-saved">
+            <div class="tsaved-head">
+              <span>已保存 ban 卡组</span>
+              <button class="btn tiny" type="button" id="pcfg-save-ban">＋ 保存当前</button>
+            </div>
+            <div class="tsaved-list" id="pcfg-saved-list"></div>
+          </div>
+        </section>
+
+        <!-- 设置 -->
+        <section class="tcfg-panel pcfg-settings pcfg-panel" id="pcfg-settings">
+          <header class="tcfg-head"><h2>设置</h2></header>
+          <div class="pcfg-settings-body">
+            <div class="pcfg-set-group">
+              <label class="tset"><span>场上最多单位</span>
+                <input id="pcfg-max" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" />
+              </label>
+            </div>
+            <div class="pcfg-set-group">
+              <label class="tset"><span>初始抽牌数</span>
+                <input id="pcfg-initial" type="number" min="1" max="20" step="1" value="8" inputmode="numeric" />
+              </label>
+              <label class="tset"><input id="pcfg-refill" type="checkbox" checked /><span>是否补牌</span></label>
+              <label class="tset pcfg-refill-only"><span>补牌间隔回合</span>
+                <input id="pcfg-refill-every" type="number" min="1" max="99" step="1" value="3" inputmode="numeric" />
+              </label>
+              <label class="tset pcfg-refill-only"><span>补牌数</span>
+                <input id="pcfg-refill-count" type="number" min="0" max="20" step="1" value="2" inputmode="numeric" />
+              </label>
+            </div>
+            <div class="pcfg-set-group">
+              <label class="tset"><input id="pcfg-samename" type="checkbox" checked /><span>允许同名角色</span></label>
+            </div>
+            <div class="pcfg-set-group pcfg-set-group--two">
+              <label class="tset"><input id="pcfg-red-ai" type="checkbox" /><span>人机红方</span></label>
+              <label class="tset"><input id="pcfg-blue-ai" type="checkbox" /><span>人机蓝方</span></label>
+            </div>
+            <div class="pcfg-start">
+              <p class="tstart-hint" id="pcfg-start-hint"></p>
+              <button class="tstart-btn" id="pcfg-start" type="button">开始战斗</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="tw-toast" id="play-toast" hidden></div>
+    </div>
+  </main>
+
+  <!-- ======================= 游玩 / 同屏：战斗 ======================= -->
+  <main id="play-battle-page" class="tw-page" hidden>
+    <div class="tw-stage" id="pb-stage">
+      <header class="tw-topbar tbt-topbar">
+        <button class="btn small" id="pb-back" type="button">← 返回配置</button>
+        <div class="tw-title">同屏对战 <span class="tw-sub">第 <b id="pb-round">1</b> 回合</span></div>
+        <div class="tbt-status" id="pb-status" data-side="red">准备中</div>
+      </header>
+
+      <div class="tbt-board" id="pb-board">
+        <section class="tbt-side" data-side="ally">
+          <header class="tbt-side-head">
+            <span class="tw-dot" data-side="red"></span><b>红方</b>
+            <span class="tbt-deck-count" id="pb-red-deck">牌组余 0</span>
+            <span class="tbt-badge" id="pb-red-badge"></span>
+          </header>
+          <div class="tbt-zone"><div class="tbt-grid" id="pb-red-grid"></div></div>
+          <button class="lbt-hand-btn" id="pb-red-hand" type="button">手牌 <b>0</b></button>
+        </section>
+
+        <div class="tbt-center">
+          <div class="tbt-turn" id="pb-turn" data-side="red">
+            <b id="pb-turn-side">红方行动</b>
+            <small id="pb-turn-hint">选择 1 个未行动单位</small>
+          </div>
+          <div class="tbt-log" id="pb-log" aria-live="polite"></div>
+        </div>
+
+        <section class="tbt-side" data-side="enemy">
+          <header class="tbt-side-head">
+            <span class="tw-dot" data-side="blue"></span><b>蓝方</b>
+            <span class="tbt-deck-count" id="pb-blue-deck">牌组余 0</span>
+            <span class="tbt-badge" id="pb-blue-badge"></span>
+          </header>
+          <div class="tbt-zone"><div class="tbt-grid" id="pb-blue-grid"></div></div>
+          <button class="lbt-hand-btn" id="pb-blue-hand" type="button">手牌 <b>0</b></button>
+        </section>
+      </div>
+
+      <footer class="tbt-actions" id="pb-actions"></footer>
+
+      <canvas class="tbt-fx" id="pb-fx" aria-hidden="true"></canvas>
+
+      <!-- 手牌 / 布阵 -->
+      <div class="lbt-hand-overlay" id="pb-hand-overlay" hidden>
+        <div class="lbt-hand-sheet" role="dialog" aria-modal="true" aria-labelledby="pb-hand-title">
+          <header class="lbt-hand-head">
+            <h2 id="pb-hand-title">红方手牌</h2>
+            <span class="lbt-hand-hint" id="pb-hand-hint"></span>
+            <button class="lbt-hand-close" id="pb-hand-close" type="button" aria-label="关闭">×</button>
+          </header>
+          <div class="lbt-hand-cards" id="pb-hand-cards"></div>
+          <footer class="lbt-hand-foot">
+            <button class="btn primary" id="pb-hand-done" type="button" hidden>完成布阵</button>
+          </footer>
+        </div>
+      </div>
+
+      <!-- 补牌动画层 -->
+      <div class="lbt-refill-layer" id="pb-refill-layer" aria-hidden="true"></div>
+
+      <!-- 战斗结果 -->
+      <div class="tbt-modal tbt-result" id="pb-result" hidden></div>
+      <div class="tw-toast" id="pb-toast" hidden></div>
     </div>
   </main>
 
