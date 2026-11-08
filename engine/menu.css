@@ -1,0 +1,478 @@
+/* ==========================================================================
+   menu.css —— 主菜单
+   左侧边栏（品牌 / 你知道吗 / 标签 + 弹出选项） | 右侧头图
+   ========================================================================== */
+
+.main-menu {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  overflow: hidden;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 20px;
+  padding: max(18px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right))
+           max(18px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+  animation: menu-in 520ms var(--ease-out) both;
+}
+
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ==========================================================================
+   左侧边栏
+   ========================================================================== */
+.sidebar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  padding: 20px 14px 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(229, 255, 255, 0.92));
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-md);
+  /* 侧栏自己的方格纸 */
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(229, 255, 255, 0.92));
+  background-size: var(--cell) var(--cell), var(--cell) var(--cell), 100% 100%;
+}
+
+.sidebar-brand {
+  display: grid;
+  gap: 4px;
+  padding: 2px 6px 6px;
+  border-bottom: 1.5px dashed var(--line-strong);
+}
+
+.sidebar-brand .cw-slogan {
+  font-size: 14px;
+  letter-spacing: 0.18em;
+  padding-bottom: 4px;
+}
+
+.cw-tip--side {
+  width: 100%;
+  padding: 8px 10px 10px;
+  transform: rotate(-0.4deg);
+}
+
+.cw-tip--side .cw-tip-label {
+  padding-left: 10px;
+}
+
+.cw-tip--side .cw-tip-text {
+  padding-left: 10px;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.cw-tip--side::before {
+  left: 4px;
+  width: 3px;
+}
+
+.cw-tip--side::after {
+  display: none;
+}
+
+/* ---------------------------- 标签导航 ---------------------------- */
+.tab-nav {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 2px 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.tab {
+  position: relative;
+  border-radius: var(--r-lg);
+  border: 1.5px solid transparent;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+  transition:
+    transform var(--speed) var(--ease-out),
+    background-color var(--speed),
+    border-color var(--speed),
+    box-shadow var(--speed);
+  animation: tab-in 420ms var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 55ms);
+}
+
+@keyframes tab-in {
+  from { opacity: 0; transform: translateX(-10px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.tab + .tab {
+  margin-top: 0;
+}
+
+/* 标签内层按钮撑满整行；焦点环画在外层卡片上 */
+.tab-btn {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px 9px 10px;
+  border-radius: inherit;
+  text-align: left;
+}
+
+.tab-btn:focus-visible {
+  outline: none;
+}
+
+.tab:has(.tab-btn:focus-visible) {
+  outline: 3px solid var(--accent-blue);
+  outline-offset: 3px;
+}
+
+.tab::before {
+  /* 标签左侧的颜色条 */
+  content: "";
+  position: absolute;
+  left: -1.5px;
+  top: 22%;
+  bottom: 22%;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background: var(--tab-color, var(--brand-deep));
+  transform: scaleY(0.4);
+  opacity: 0;
+  transition: transform var(--speed) var(--ease-spring), opacity var(--speed);
+}
+
+.tab:hover {
+  background: #fff;
+  border-color: var(--line);
+  transform: translateX(2px);
+}
+
+.tab:hover::before,
+.tab.is-open::before {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+.tab.is-open {
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--tab-color, var(--brand)) 18%, #fff), #fff 70%);
+  border-color: color-mix(in srgb, var(--tab-color, var(--brand-deep)) 45%, var(--line));
+  box-shadow: var(--shadow-sm);
+}
+
+.tab-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--tab-color, var(--brand-ink));
+  background: color-mix(in srgb, var(--tab-color, var(--brand)) 15%, #fff);
+  border: 1.5px solid color-mix(in srgb, var(--tab-color, var(--brand-deep)) 35%, transparent);
+  transition: transform var(--speed) var(--ease-spring);
+}
+
+.tab-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.tab:hover .tab-icon,
+.tab.is-open .tab-icon {
+  transform: rotate(-6deg) scale(1.06);
+}
+
+.tab-name {
+  font-family: var(--font-hand);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--ink);
+}
+
+.tab-caret {
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--ink-3);
+  border-bottom: 2px solid var(--ink-3);
+  transform: rotate(-45deg);
+  transition: transform var(--speed) var(--ease-out), border-color var(--speed);
+}
+
+.tab.is-open .tab-caret {
+  border-color: var(--tab-color, var(--brand-ink));
+  transform: rotate(45deg);
+}
+
+/* ---------------------------- 弹出选项 ---------------------------- */
+.tab-pop {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 300ms var(--ease-out);
+}
+
+.tab.is-open .tab-pop {
+  grid-template-rows: 1fr;
+}
+
+/* grid 0fr→1fr 折叠：内层需要 min-height:0 与 overflow */
+.pop-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pop-list {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  margin: 4px 4px 6px 48px;
+  padding-left: 10px;
+  border-left: 2px dashed color-mix(in srgb, var(--tab-color, var(--brand-deep)) 50%, transparent);
+}
+
+.pop-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  font-family: var(--font-hand);
+  font-size: 16px;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+  text-align: left;
+  transition: background-color 160ms, color 160ms, transform 160ms var(--ease-out);
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.tab.is-open .pop-item {
+  animation: pop-in 260ms var(--ease-out) both;
+  animation-delay: calc(60ms + var(--j, 0) * 40ms);
+}
+
+@keyframes pop-in {
+  to { opacity: 1; transform: none; }
+}
+
+.pop-item::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  margin-left: -14px;
+  border-radius: 2px;
+  background: #fff;
+  border: 1.5px solid var(--tab-color, var(--brand-deep));
+  transition: background-color 160ms, transform 160ms var(--ease-spring);
+}
+
+.pop-item:hover {
+  background: color-mix(in srgb, var(--tab-color, var(--brand)) 14%, #fff);
+  color: var(--ink);
+  transform: translateX(2px);
+}
+
+.pop-item:hover::before {
+  background: var(--tab-color, var(--brand-deep));
+  transform: rotate(45deg) scale(1.15);
+}
+
+.pop-item:active {
+  transform: translateX(2px) scale(0.98);
+}
+
+/* ==========================================================================
+   右侧：头图（每次进入随机一张，拍立得样式）
+   ========================================================================== */
+.stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  padding: 36px 16px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: var(--r-xl);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(229, 255, 255, 0.35));
+  border: 1.5px dashed var(--line-strong);
+}
+
+.stage-picture {
+  position: relative;
+  display: grid;
+  place-items: center;
+  max-width: min(78%, 720px);
+  max-height: 100%;
+  min-height: 0;
+  padding: 12px 12px 18px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  transform: rotate(-1.6deg);
+  animation: pic-in 620ms var(--ease-spring) both;
+}
+
+/* 顶部胶带 */
+.stage-picture::before {
+  content: "";
+  position: absolute;
+  top: -12px;
+  left: 50%;
+  width: 96px;
+  height: 22px;
+  margin-left: -48px;
+  background: rgba(189, 243, 243, 0.7);
+  border: 1px solid rgba(127, 195, 199, 0.5);
+  transform: rotate(-2.5deg);
+}
+
+@keyframes pic-in {
+  from { opacity: 0; transform: translateY(16px) rotate(3deg) scale(0.94); }
+  to   { opacity: 1; transform: translateY(0) rotate(-1.6deg) scale(1); }
+}
+
+.stage-picture.is-swapping {
+  animation: pic-out 260ms ease-in both;
+}
+
+@keyframes pic-out {
+  to { opacity: 0; transform: translateY(-8px) rotate(2deg) scale(0.96); }
+}
+
+.stage-picture-img {
+  max-width: 100%;
+  max-height: min(58vh, 560px);
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  border-radius: 4px;
+  background:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: var(--cell) var(--cell);
+}
+
+/* ==========================================================================
+   平板：侧栏收窄
+   ========================================================================== */
+@media (max-width: 900px) {
+  .main-menu {
+    grid-template-columns: 250px minmax(0, 1fr);
+    gap: 14px;
+  }
+  .tab-name { font-size: 17px; }
+}
+
+/* ==========================================================================
+   手机竖屏：上下布局（侧栏变成顶部卡片，头图在下面）
+   ========================================================================== */
+@media (max-width: 680px), (max-aspect-ratio: 4/5) {
+  body {
+    --cell: 18px;
+  }
+
+  .main-menu {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+    gap: 10px;
+    padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+             max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  }
+
+  .sidebar {
+    max-height: 58vh;
+    padding: 12px 10px 8px;
+    gap: 10px;
+    border-radius: var(--r-lg);
+  }
+
+  /* 竖屏顶部卡片：品牌保留并放大标题，下面接「你知道吗」与标签 */
+  .sidebar-brand {
+    display: grid;
+    justify-items: center;
+    gap: 2px;
+    padding: 0 6px 8px;
+    text-align: center;
+  }
+
+  .sidebar-brand .cw-title--small {
+    font-size: clamp(32px, 11vw, 46px);
+    letter-spacing: 0.01em;
+  }
+
+  .sidebar-brand .cw-slogan {
+    font-size: 13px;
+    letter-spacing: 0.2em;
+    padding-bottom: 3px;
+  }
+
+  .cw-tip--side .cw-tip-text {
+    font-size: 13px;
+  }
+
+  /* 竖屏纵向空间紧：按钮高度收在 36px，行间距 6px */
+  .tab-nav {
+    gap: 6px;
+  }
+
+  .tab {
+    border-radius: 10px;
+  }
+
+  .tab-btn {
+    padding: 4px 10px 4px 8px;
+  }
+
+  .tab-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+  }
+
+  .tab-icon svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .tab-name {
+    font-size: 16px;
+  }
+
+  .pop-list {
+    margin: 2px 4px 4px 46px;
+  }
+
+  .pop-item {
+    padding: 5px 10px;
+    font-size: 15px;
+  }
+
+  .stage {
+    padding: 20px 10px;
+  }
+
+  .stage-picture {
+    max-width: 88%;
+  }
+
+  .stage-picture-img {
+    max-height: 34vh;
+  }
+}

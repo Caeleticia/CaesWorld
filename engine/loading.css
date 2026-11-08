@@ -1,0 +1,189 @@
+/* ==========================================================================
+   loading.css —— 载入页面
+   一张钉在方格纸中央的便签：标题 / 你知道吗 / 铅笔进度条
+   ========================================================================== */
+
+.loading-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 28px max(18px, env(safe-area-inset-right)) 28px max(18px, env(safe-area-inset-left));
+  overflow: hidden;
+  transition: opacity 480ms var(--ease-out), transform 480ms var(--ease-out);
+}
+
+/* 载入页退场 */
+.loading-screen.is-leaving {
+  opacity: 0;
+  transform: scale(1.04);
+  pointer-events: none;
+}
+
+.loading-screen.is-gone {
+  display: none;
+}
+
+.loading-note {
+  position: relative;
+  width: min(560px, 100%);
+  padding: clamp(28px, 5vh, 48px) clamp(22px, 4vw, 40px) clamp(24px, 4vh, 36px);
+  display: grid;
+  gap: clamp(18px, 3.2vh, 30px);
+  justify-items: center;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(236, 251, 252, 0.98)),
+    var(--surface);
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-md), 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+  transform: rotate(-0.4deg);
+  animation: note-in 620ms var(--ease-spring) both;
+}
+
+/* 便签顶部的方格纹路带 */
+.loading-note::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 64px;
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: var(--cell) var(--cell);
+  -webkit-mask-image: linear-gradient(180deg, #000, transparent);
+  mask-image: linear-gradient(180deg, #000, transparent);
+  pointer-events: none;
+}
+
+@keyframes note-in {
+  from { opacity: 0; transform: translateY(18px) rotate(-2.5deg) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) rotate(-0.4deg) scale(1); }
+}
+
+.loading-note .cw-head {
+  position: relative;
+}
+
+/* » 进度条：纸槽 + 荧光笔填充 + 笔尖 */
+.loading-progress {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+
+.bar-track {
+  position: relative;
+  height: 16px;
+  border-radius: 999px;
+  background:
+    repeating-linear-gradient(90deg, transparent 0 9px, rgba(31, 92, 95, 0.08) 9px 10px),
+    #e9f7f8;
+  border: 1.5px solid var(--line-strong);
+  box-shadow: 0 1px 0 #fff inset, 0 2px 0 rgba(127, 195, 199, 0.25);
+  overflow: visible;
+}
+
+.bar-fill {
+  position: absolute;
+  inset: 2px auto 2px 2px;
+  width: 0%;
+  max-width: calc(100% - 4px);
+  border-radius: 999px;
+  background:
+    repeating-linear-gradient(115deg, rgba(255, 255, 255, 0.35) 0 8px, transparent 8px 16px),
+    linear-gradient(90deg, var(--brand-deep), #4fc3ca 60%, var(--accent-2));
+  background-size: 32px 100%, 100% 100%;
+  box-shadow: 0 0 0 1px rgba(31, 92, 95, 0.15) inset;
+  transition: width 420ms var(--ease-out);
+}
+
+/* 填充上的流动斜纹，表示“正在推进” */
+.bar-fill::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: repeating-linear-gradient(115deg, rgba(255, 255, 255, 0.45) 0 8px, transparent 8px 16px);
+  animation: bar-stripes 900ms linear infinite;
+}
+
+@keyframes bar-stripes {
+  from { background-position: 0 0; }
+  to   { background-position: 32px 0; }
+}
+
+/* 笔尖：进度条末端的小圆点 */
+.bar-fill::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -5px;
+  width: 14px;
+  height: 14px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff 0 2px, #ffb020 55%, #e08a00 100%);
+  box-shadow: 0 2px 5px rgba(224, 138, 0, 0.5);
+  opacity: 0;
+  transition: opacity 200ms;
+}
+
+.bar-fill.has-progress::after {
+  opacity: 1;
+}
+
+.bar-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-family: var(--font-hand);
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.bar-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-status::after {
+  content: "…";
+  display: inline-block;
+  width: 1.2em;
+  text-align: left;
+  animation: dots 1.2s steps(4, end) infinite;
+}
+
+.bar-status.is-done::after {
+  content: "";
+  animation: none;
+}
+
+@keyframes dots {
+  0%   { content: ""; }
+  25%  { content: "."; }
+  50%  { content: ".."; }
+  75%  { content: "..."; }
+}
+
+.bar-pct {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--brand-ink);
+}
+
+@media (max-width: 520px), (max-height: 560px) {
+  .loading-note {
+    gap: 16px;
+    padding-top: 26px;
+  }
+  .loading-note .cw-title { font-size: clamp(40px, 13vw, 56px); }
+}
