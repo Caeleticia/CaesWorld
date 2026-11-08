@@ -685,8 +685,23 @@
 }
 .tw-page[data-orient="portrait"] .tbt-board {
   display: grid;
+  /* 竖屏：蓝方在上、红方在下（横屏仍是左红 / 右蓝） */
+  grid-template-areas:
+    "enemy"
+    "center"
+    "ally";
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1.02fr) auto minmax(0, 1.02fr);
   gap: 6px;
+}
+.tw-page[data-orient="portrait"] .tbt-side[data-side="enemy"] {
+  grid-area: enemy;
+}
+.tw-page[data-orient="portrait"] .tbt-center {
+  grid-area: center;
+}
+.tw-page[data-orient="portrait"] .tbt-side[data-side="ally"] {
+  grid-area: ally;
 }
 
 /* 阵营卡区 */
