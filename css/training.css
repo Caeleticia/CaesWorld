@@ -777,18 +777,18 @@
   padding: 0;
   border-radius: 9px;
   overflow: hidden;
-  background: #0d1417;
-  border: 2px solid rgba(255, 255, 255, 0.9);
-  box-shadow: 0 2px 0 rgba(23, 57, 60, 0.18), 0 8px 18px rgba(23, 57, 60, 0.2);
+  background: #d7f4f4;
+  border: 2px solid #9ed6d6;
+  box-shadow: 0 2px 0 rgba(31, 92, 95, 0.16), 0 8px 18px rgba(31, 92, 95, 0.18);
   cursor: pointer;
   text-align: left;
   transition: transform 160ms var(--ease-out), box-shadow 160ms, border-color 160ms;
   isolation: isolate;
 }
-.tbt-card:hover { transform: translateY(-2px); box-shadow: 0 4px 0 rgba(23, 57, 60, 0.18), 0 12px 22px rgba(23, 57, 60, 0.24); }
+.tbt-card:hover { transform: translateY(-2px); box-shadow: 0 4px 0 rgba(31, 92, 95, 0.18), 0 12px 22px rgba(31, 92, 95, 0.22); }
 .tbt-card:active { transform: translateY(0) scale(0.985); }
 
-.tbt-card[data-quality="white"] { border-color: #cfdcdd; }
+.tbt-card[data-quality="white"] { border-color: #a9dcdc; }
 .tbt-card[data-quality="blue"] { border-color: #7fc8ff; }
 .tbt-card[data-quality="gold"] { border-color: #ffd066; }
 .tbt-card[data-quality="rainbow"] { border-color: #e6b8ff; }
@@ -800,15 +800,11 @@
   height: 100%;
   object-fit: cover;
   object-position: center top;
-  background: #24323a;
+  background: #d7f4f4;
 }
 .tbt-card-shade {
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(180deg, rgba(6, 16, 20, 0.72) 0%, rgba(6, 16, 20, 0.02) 34%),
-    linear-gradient(0deg, rgba(6, 16, 20, 0.82) 0%, rgba(6, 16, 20, 0.1) 36%, transparent 60%);
-  pointer-events: none;
+  /* 卡面不再用整条遮罩带；只让文字 / 数据自己带描边或底槽 */
+  display: none;
 }
 .tbt-card-name {
   position: absolute;
@@ -819,7 +815,7 @@
   font-weight: 700;
   line-height: 1.15;
   color: #fff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 2px rgba(0, 0, 0, 0.8);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -830,8 +826,8 @@
   left: 6px;
   font-size: 8px;
   letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.82);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
 }
 .tbt-card-atk {
   position: absolute;
@@ -850,8 +846,8 @@
   bottom: 13px;
   height: 5px;
   border-radius: 99px;
-  background: rgba(0, 0, 0, 0.55);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
   overflow: hidden;
 }
 .tbt-card-hpbar i {
@@ -873,19 +869,24 @@
   font-size: 8px;
   line-height: 1.1;
   text-align: center;
-  color: rgba(255, 255, 255, 0.94);
+  color: #fff;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
   font-variant-numeric: tabular-nums;
 }
 
-/* 没有卡面时的战斗卡牌：深色底 + 首字水印，不要露出编辑器的占位图 */
+/* 没有卡面时的战斗卡牌：平涂浅青底 + 首字水印，不要露出编辑器的占位图 */
 .tbt-card[data-no-art="1"] {
-  background-color: #0d1417;
-  background-image:
-    radial-gradient(circle at 50% 38%, rgba(70, 110, 116, 0.55), rgba(10, 18, 22, 0.98) 72%),
-    repeating-linear-gradient(45deg, rgba(255, 176, 32, 0.07) 0 2px, transparent 2px 9px);
+  background-color: #d7f4f4;
+  background-image: none;
 }
 .tbt-card[data-no-art="1"] .tbt-card-img { display: none; }
+.tbt-card[data-no-art="1"] .tbt-card-name {
+  color: #17393c;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+.tbt-card[data-no-art="1"] .tbt-card-lv { color: #3c6669; text-shadow: none; }
+.tbt-card[data-no-art="1"] .tbt-card-atk { color: #8a5c00; text-shadow: none; }
+.tbt-card[data-no-art="1"] .tbt-card-hptext { color: #17393c; text-shadow: none; }
 .tbt-card-monogram {
   display: none;
   position: absolute;
@@ -896,8 +897,8 @@
   font-size: calc(var(--card-w, 110px) * 0.34);
   font-weight: 900;
   line-height: 1;
-  color: rgba(229, 255, 255, 0.18);
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  color: rgba(31, 92, 95, 0.24);
+  text-shadow: none;
   pointer-events: none;
 }
 .tbt-card[data-no-art="1"] .tbt-card-monogram { display: block; }
@@ -1160,6 +1161,9 @@
 .tbt-skill:hover { background: #f0ffff; border-color: var(--brand-deep); transform: translateY(-1px); }
 .tbt-skill:active { transform: translateY(1px); }
 .tbt-skill.is-targeting { border-color: var(--accent); background: #fff3f6; box-shadow: 0 0 0 2px rgba(255, 107, 139, 0.25); }
+.tbt-skill.is-cancel { border-color: #f0b4c1; background: #fff7f9; color: #c93e5d; }
+.tbt-skill.is-cancel b { color: #c93e5d; }
+.tbt-skill.is-cancel:hover { background: #fff0f4; border-color: #e08aa0; }
 .tbt-skill:disabled { opacity: 0.45; }
 .tbt-end {
   flex: none;
@@ -1361,7 +1365,16 @@
   background: #fff;
   border: 1px solid var(--line);
   border-radius: 7px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
 }
+.tbd-eff:hover,
+.tbd-eff:focus-visible {
+  border-color: var(--brand-deep);
+  background: #f4ffff;
+  outline: none;
+}
+.tbd-eff:focus-visible { box-shadow: 0 0 0 2px rgba(127, 216, 221, 0.5); }
 .tbd-eff + .tbd-eff { margin-top: 4px; }
 .tbd-eff-head {
   display: flex;
@@ -1387,13 +1400,77 @@
 
 .tbd-skills { display: flex; flex-wrap: wrap; gap: 4px; }
 .tbd-skill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
   padding: 3px 8px;
   border-radius: 6px;
   border: 1px solid var(--line);
   background: #fff;
+  color: var(--ink);
+  font-family: inherit;
   font-size: 10.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
 }
+.tbd-skill:hover,
+.tbd-skill:focus-visible {
+  border-color: var(--brand-deep);
+  background: #f4ffff;
+  outline: none;
+}
+.tbd-skill:focus-visible { box-shadow: 0 0 0 2px rgba(127, 216, 221, 0.5); }
 .tbd-skill em { font-style: normal; color: var(--ink-3); font-size: 9px; margin-left: 4px; }
+
+.tbd-entry-more {
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.tbd-eff-head .tbd-entry-more { margin-left: auto; }
+.tbd-skill .tbd-entry-more { margin-left: 3px; }
+
+.tbd-entry-sheet { width: min(420px, 92%); }
+.tbd-entry-glyph {
+  width: 38px;
+  height: 50px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--brand-strong);
+  color: var(--brand-ink);
+  font-family: var(--font-hand);
+  font-size: 22px;
+  font-weight: 900;
+}
+.tbd-back {
+  margin: 0 0 9px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.tbd-back:hover,
+.tbd-back:focus-visible {
+  border-color: var(--brand-deep);
+  background: #f4ffff;
+  color: var(--ink);
+}
+.tbd-entry-desc {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--ink-2);
+  white-space: pre-line;
+}
 
 /* 战斗结果 */
 .tbt-result .tbt-sheet { width: min(400px, 88%); }
@@ -1433,4 +1510,114 @@
 /* 横屏失败兜底：极窄屏仍保证不滚动（舞台等比缩放由 JS 负责） */
 @media (orientation: landscape) and (max-height: 300px) {
   .tw-stage { gap: 6px; }
+}
+
+/* 技能 / 效果图标 */
+.tbt-skill-main {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.tbt-skill-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+}
+.tbd-eff-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  align-self: center;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+}
+.tbd-skill-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  align-self: center;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+}
+.tbd-entry-icon {
+  object-fit: contain;
+  padding: 4px;
+  background: #fff;
+}
+
+/* 条式显示的效果：血条上方的进度条（当前 / 上限） */
+.tbt-card-effectbars {
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  bottom: 21px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 2px;
+  pointer-events: none;
+}
+.tbt-card-effectbars[hidden] { display: none; }
+.tbt-card-effectbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  height: 9px;
+}
+.tbt-card-effectbar-glyph {
+  width: 8px;
+  flex: none;
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+.tbt-card-effectbar-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 9px;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+  overflow: hidden;
+}
+.tbt-card-effectbar-track i {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-radius: 99px;
+  transition: width 220ms var(--ease-out);
+}
+.tbt-card-effectbar-num {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.tbt-card[data-no-art="1"] .tbt-card-effectbar-glyph,
+.tbt-card[data-no-art="1"] .tbt-card-effectbar-num {
+  color: #17393c;
+  text-shadow: none;
+}
+.tbt-card[data-no-art="1"] .tbt-card-effectbar-track {
+  background: rgba(31, 92, 95, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.62);
 }
