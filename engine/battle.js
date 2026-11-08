@@ -194,6 +194,10 @@ export function createBattle(setup) {
     firstSide: first,
     /** side 模式：本回合已经行动过的单位 uid */
     acted: [],
+    /** side 模式：本回合已经触发过「单位行动开始时」的单位 uid（换人时不重复触发） */
+    started: [],
+    /** side 模式：当前行动单位是否已经使用过技能（用于禁止用过技能后再换单位） */
+    actionUsed: false,
     /** side 模式：每侧场上最多单位数 */
     maxUnits: fieldSize,
     /** 整方无敌 */
@@ -383,6 +387,9 @@ export function createBattle(setup) {
     if (!isAlive(u)) return null;
     const def = registry.getEffect(eid);
     if (!def) throw new Error(`未知效果：${eid}`);
+    const rawLayers = extra.layers === undefined ? 1 : Number(extra.layers);
+    const add = Number.isFinite(rawLayers) ? Math.max(0, Math.floor(rawLayers)) : 1;
+    if (add <= 0) return null;
     let layer = u.effects.find((e) => e.id === eid);
     const isNew = !layer;
     if (isNew) {
@@ -393,11 +400,15 @@ export function createBattle(setup) {
     const stackable = Boolean(def.stackable);
     const rawCap = Number(def.maxStacks);
     const cap = Number.isFinite(rawCap) ? Math.max(0, Math.floor(rawCap)) : 1;
-    if (!stackable) layer.stacks = 1;
-    else if (layer.stacks < 1) layer.stacks = 1;
-    else if (cap === 0 || layer.stacks < cap) layer.stacks += 1;
+    if (!stackable) {
+      layer.stacks = 1;
+    } else {
+      const next = Math.max(0, Number(layer.stacks) || 0) + add;
+      layer.stacks = cap === 0 ? next : Math.min(cap, next);
+      if (layer.stacks < 1) layer.stacks = 1;
+    }
     recomputeAttrBonuses(u);
-    log(BATTLE_EVENT.EFFECT_ADDED, { unit: u.uid, effect: eid, stacks: layer.stacks });
+    log(BATTLE_EVENT.EFFECT_ADDED, { unit: u.uid, effect: eid, stacks: layer.stacks, layers: add });
     // 只有「第一次获得该效果」才算一次获得；重复附加只刷新层数
     if (isNew) emit("unitEnter", [u]);
     emit("dataUpdate", [u]);
@@ -468,14 +479,17 @@ export function createBattle(setup) {
   }
 
   /**
-   * 被动技能的触发流程：技能类型为 passive、且流程里有「触发」积木时，
-   * 把技能包装成与效果卡同形的触发源，让它的流程随事件广播自动运行
-   * （主动技能只在 useSkill 时执行，不参与事件广播）。
+   * 技能的事件触发流程：技能流程里有「触发」积木时，把技能包装成与效果卡
+   * 同形的触发源，让它的流程随事件广播自动运行。
+   *
+   * 主动技能的 skillCast / skillCastSelf 由 useSkill 执行，排除在广播外避免重复；
+   * 主动技能上的其他事件触发（如单位退场时）仍然随事件广播执行。
+   * 被动技能的全部触发都随事件广播。
    */
-  function passiveSkillEffectsOf(u) {
+  function eventSkillEffectsOf(u) {
     const out = [];
     for (const skill of u.skills || []) {
-      if (!skill || skill.type !== "passive" || !skill.flow) continue;
+      if (!skill || !skill.flow) continue;
       const nodes = Array.isArray(skill.flow.nodes) ? skill.flow.nodes : [];
       const triggers = nodes
         .filter((n) => n && n.type === "trigger" && n.options && n.options.event)
@@ -483,7 +497,8 @@ export function createBattle(setup) {
           id: n.id,
           event: n.options.event,
           unitScope: n.options.unitScope || "self",
-        }));
+        }))
+        .filter((t) => skill.type === "passive" || (t.event !== "skillCast" && t.event !== "skillCastSelf"));
       if (!triggers.length) continue;
       const flows = {};
       for (const t of triggers) flows[t.id] = skill.flow;
@@ -494,7 +509,7 @@ export function createBattle(setup) {
         flows,
         attrBonus: [],
         /** 标记来源，便于日志/去重区分（技能 id 与效果 id 可能重名） */
-        passiveSkill: true,
+        passiveSkill: skill.type === "passive",
       });
     }
     return out;
@@ -539,6 +554,29 @@ export function createBattle(setup) {
   }
 
   /**
+   * 自动消耗：每次该效果的触发流程执行完后消耗 1 层。
+   * · 只剩 1 层 → 移除整个效果；
+   * · 不通过层数计数的效果 → 直接移除；
+   * · 无视「不可解除」标记（自动消耗不是解除效果，是效果自身的代价）。
+   */
+  function autoConsumeAfterFlow(unit, effect) {
+    if (!effect || !effect.autoConsume || effect.__member) return;
+    if (state.status === "finished") return;
+    const layer = (unit.effects || []).find((e) => e.id === effect.id);
+    if (!layer) return;
+    // 层数效果每次减 1；非层数效果直接把这一层全部移除
+    const removed = removeLayers(unit, layer, effect.stackable ? 1 : layer.stacks);
+    if (!removed) return;
+    log(BATTLE_EVENT.EFFECT_REMOVED, {
+      unit: unit.uid,
+      effectId: effect.id,
+      layers: removed,
+      reason: "auto-consume",
+    });
+    emit("dataUpdate", [unit]);
+  }
+
+  /**
    * 广播事件：找出所有「身上有该事件触发」的效果并执行其流程。
    * @param {string} eventType
    * @param {object[]} targets 事件涉及的单位
@@ -551,6 +589,8 @@ export function createBattle(setup) {
       return;
     }
     const globalEvent = eventType === "turnStart" || eventType === "turnEnd";
+    /** 「我方单位攻击时」：事件对象是攻击者，但同阵营所有存活单位身上的触发都参与 */
+    const allyAttackEvent = eventType === "allyAttack";
     const candidates = [];
     const seen = new Set();
     // 退场事件的目标已经不在 livingUnits() 里，但它的「退场时」触发仍然要执行；
@@ -562,17 +602,19 @@ export function createBattle(setup) {
       }
     }
     for (const u of triggerUnits) {
-      // 效果卡（卡面成员 + 已附加效果）与被动技能的触发流程共用同一套广播
+      // 效果卡（卡面成员 + 已附加效果）与技能的事件触发共用同一套广播
       const sources = [
         ...activeEffectsOf(u).map((effect) => ({ effect, key: effect.id })),
-        ...passiveSkillEffectsOf(u).map((effect) => ({ effect, key: `skill:${effect.id}` })),
+        ...eventSkillEffectsOf(u).map((effect) => ({ effect, key: `skill:${effect.id}` })),
       ];
       for (const { effect, key: sourceKey } of sources) {
         if (!triggerMatches(effect, eventType, info)) continue;
         // 全局事件人人有份；其余事件只有「事件涉及的单位」身上的效果才会触发
         // （受击事件的目标就是正在挨打的单位，所以反伤不会再反向触发攻击方）
+        // 「我方单位攻击时」则让攻击者同阵营的所有单位都参与。
         // 事件对象必须带上单位 key（单位由 makeUnit 建立，key = uid）
-        const relevant = globalEvent || targets.some((t) => t && t.key === u.key);
+        const sameSide = allyAttackEvent && targets.some((t) => t && t.side === u.side);
+        const relevant = globalEvent || sameSide || targets.some((t) => t && t.key === u.key);
         if (!relevant) continue;
         const key = `${u.key}|${sourceKey}`;
         if (seen.has(key)) continue;
@@ -622,31 +664,12 @@ export function createBattle(setup) {
             env.self = unit;
           }
           try {
-            runFlow(prepared, env, { triggerNode: prepared.nodes.has(block.id) ? block.id : undefined });
+            const run = runFlow(prepared, env, { triggerNode: prepared.nodes.has(block.id) ? block.id : undefined });
+            // 触发条件没通过（或没有可执行的触发入口）= 这条流程没有真正执行，不结算自动消耗
+            if (run.ran && !run.triggerBlocked) autoConsumeAfterFlow(unit, effect);
           } catch (err) {
             log(BATTLE_EVENT.FLOW_ERROR, { owner: unit.uid, effect: effect.id, reason: String((err && err.message) || err) });
           }
-        }
-      }
-      // 自动消耗：持有者行动开始（unitTurnStart）时，本效果对应的流程跑完后掉一层
-      if (eventType === "unitTurnStart") {
-        const consumed = new Set();
-        for (const { unit, effect } of candidates) {
-          if (!effect.autoConsume || effect.__member || state.status === "finished" || !isAlive(unit)) continue;
-          const key = `${unit.key}|${effect.id}`;
-          if (consumed.has(key)) continue;
-          consumed.add(key);
-          const layer = unit.effects.find((e) => e.id === effect.id);
-          if (!layer) continue;
-          const removed = removeLayers(unit, layer, 1);
-          if (!removed) continue;
-          log(BATTLE_EVENT.EFFECT_REMOVED, {
-            unit: unit.uid,
-            effectId: effect.id,
-            layers: removed,
-            reason: "auto-consume",
-          });
-          emit("dataUpdate", [unit]);
         }
       }
     } finally {
@@ -705,10 +728,12 @@ export function createBattle(setup) {
           targets: A.stats.lastAttackTargets.map((k) => (getUnit(k) ? getUnit(k).uid : k)),
         });
         emit("attack", [A]);
+        emit("allyAttack", [A]);
       },
       healUnit: (target, amount) => heal(getUnit(target), amount, "flow"),
       setHp: (target, value) => setHp(getUnit(target), value, "flow"),
-      attachEffect: (target, eid) => attachEffect(getUnit(target), eid, { source: owner }),
+      attachEffect: (target, eid, layers) =>
+        attachEffect(getUnit(target), eid, { source: owner, layers }),
       removeEffectByMode: (target, opts) => removeEffectByMode(getUnit(target), opts),
       summon: (opts) => summonUnits(opts),
       skipTurn: (target) => {
@@ -1022,8 +1047,9 @@ export function createBattle(setup) {
       recomputeAttrBonuses(unit);
     }
     state.units.push(unit);
-    // side 模式：回合中途召唤出来的单位本回合不再行动
-    if (sideMode && markActed && !state.acted.includes(unit.uid)) state.acted.push(unit.uid);
+    // 召唤出来的单位默认「视为未行动」：本回合仍然可以行动。
+    // 只有调用方显式要求（markActed: true）时才记成已行动——例如「回合开始的部署」不需要。
+    if (markActed && !state.acted.includes(unit.uid)) state.acted.push(unit.uid);
     log(BATTLE_EVENT.SUMMON, {
       unit: uid,
       cardId: unitId,
@@ -1040,7 +1066,8 @@ export function createBattle(setup) {
     if (!registry.getUnit(unitId)) throw new Error(`未知单位卡：${unitId}`);
     const side = explicitSide || (parent ? parent.side : owner ? owner.side : "enemy");
     const spawned = [];
-    const acted = markActed === undefined ? sideMode && !state.deploying : Boolean(markActed);
+    // 默认不标记「已行动」：召唤物当回合就能行动（见 spawnCard 的注释）
+    const acted = markActed === undefined ? false : Boolean(markActed);
     for (let i = 0; i < count; i += 1) {
       const unit = spawnCard({
         unitId,
@@ -1212,6 +1239,7 @@ export function createBattle(setup) {
       return;
     }
     state.acted = [];
+    state.started = [];
     state.activeId = null;
     state.deploying = true;
     deployFromDeck("ally");
@@ -1265,14 +1293,23 @@ export function createBattle(setup) {
    * @returns {boolean} 是否选上
    */
   function selectUnit(unitRef) {
-    if (!sideMode || state.status !== "running" || state.phase !== BATTLE_PHASE.SELECT) return false;
+    if (!sideMode || state.status !== "running") return false;
+    // side 模式：select 阶段选人；act 阶段且还没用技能时，允许点另一个未行动单位换人
+    if (state.phase !== BATTLE_PHASE.SELECT && state.phase !== BATTLE_PHASE.ACT) return false;
+    if (state.phase === BATTLE_PHASE.ACT && state.actionUsed) return false;
     const u = getUnit(unitRef);
     if (!isAlive(u) || u.side !== state.sideTurn || state.acted.includes(u.uid)) return false;
+    if (state.phase === BATTLE_PHASE.ACT && state.activeId === u.uid) return true;
     state.activeId = u.uid;
     state.phase = BATTLE_PHASE.ACT;
+    state.actionUsed = false;
     state.actionSeq += 1;
     log(BATTLE_EVENT.TURN_START, { activeId: u.uid });
-    emit("unitTurnStart", [u]);
+    // 换人时同一个单位本回合只触发一次「行动开始时」，避免开始效果重复结算
+    if (!state.started.includes(u.uid)) {
+      state.started.push(u.uid);
+      emit("unitTurnStart", [u]);
+    }
     if (state.status !== "running") return false;
     if (!isAlive(u)) {
       // 行动开始效果把人打死了：这个单位的行动直接结束
@@ -1289,6 +1326,7 @@ export function createBattle(setup) {
     const uid = state.activeId;
     const A = uid ? getUnit(uid) : null;
     state.activeId = null;
+    state.actionUsed = false;
     state.phase = BATTLE_PHASE.SELECT;
     if (A && isAlive(A)) {
       emit("unitTurnEnd", [A]);
@@ -1332,6 +1370,7 @@ export function createBattle(setup) {
       skillName: skill.name,
       target: primary ? primary.uid : null,
     });
+    state.actionUsed = true;
 
     // 当前目标：技能的目标单独放一个变量，因为执行时会被其他流程里的流程上下文盖住
     const prev = state.current;
@@ -1427,6 +1466,7 @@ export function createBattle(setup) {
         A.stats.lastAttackHits = hitTargets.length;
         log(BATTLE_EVENT.ATTACK, { attacker: A.uid, hits: hitTargets.length, targets: hitTargets.map((t) => t.uid), skillId: skill.id });
         emit("attack", [A]);
+        emit("allyAttack", [A]);
       }
       return skill;
     } finally {
@@ -1494,6 +1534,7 @@ export function createBattle(setup) {
       cycle: state.cycle,
       actionSeq: state.actionSeq,
       activeId: state.activeId,
+      actionUsed: state.actionUsed,
       sideTurn: state.sideTurn,
       firstSide: state.firstSide,
       maxUnits: state.maxUnits,
@@ -1627,8 +1668,8 @@ export function createBattle(setup) {
     heal(unitRef, amount, { log: shouldLog = false } = {}) {
       return withMuted(!shouldLog, () => heal(unitRef, amount));
     },
-    attachEffect(unitRef, effectId, { log: shouldLog = false } = {}) {
-      return withMuted(!shouldLog, () => attachEffect(getUnit(unitRef), effectId, {}));
+    attachEffect(unitRef, effectId, { log: shouldLog = false, layers = 1 } = {}) {
+      return withMuted(!shouldLog, () => attachEffect(getUnit(unitRef), effectId, { layers }));
     },
     forceExit(unitRef, { log: shouldLog = false } = {}) {
       return withMuted(!shouldLog, () => forceExit(getUnit(unitRef)));

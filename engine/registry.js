@@ -3,7 +3,8 @@
  *
  * 战斗时只认注册表：回合开始后把单位卡、技能卡深拷贝快照进战斗，
  * 之后注册表被改名/改数值也不会影响已开始的战斗。
- * 正式数据来自单文件卡包 / 模组（mods/<文件名>.json，kind: "caeworld-pack"），由 js/mods.js 汇总后载入。
+ * 正式数据来自模组包（mods/<modname>.zip 内的 <modname>/<modname>.json，kind: "caeworld-pack"；
+ * 旧的 mods/<文件名>.json 仍兼容），由 js/mods.js 汇总后载入。
  */
 import { createUnitCard, validateUnitCard } from "./units.js";
 import { createSkillCard, validateSkillCard } from "./skills.js";
@@ -11,15 +12,17 @@ import {
   EFFECT_POLARITIES,
   effectPolarityOf,
   normalizeEffectAttrBonus,
+  parseEffectColor,
   parseId,
   validateEffectAttrBonus,
+  validateEffectDisplay,
 } from "./constants.js";
 
 export class ContentRegistry {
   constructor() {
     this.units = new Map();
     this.skills = new Map();
-    /** 效果卡：{ id, name, flags, polarity, stackable, maxStacks, triggers, flows, attrBonus, autoConsume } */
+    /** 效果卡：{ id, name, flags, polarity, stackable, maxStacks, triggers, flows, attrBonus, autoConsume, color, bar, barInvert } */
     this.effects = new Map();
     this.errors = [];
   }
@@ -78,6 +81,10 @@ export class ContentRegistry {
     if (def.autoConsume !== undefined && typeof def.autoConsume !== "boolean") {
       errors.push("autoConsume 必须是布尔值");
     }
+    if (def.image !== undefined && def.image !== null && typeof def.image !== "string") {
+      errors.push("image 必须是字符串或 null");
+    }
+    errors.push(...validateEffectDisplay(def));
     if (errors.length) {
       this.errors.push(`效果 ${def.id || "(无 id)"}: ${errors.join("；")}`);
       return { ok: false, errors };
@@ -100,9 +107,13 @@ export class ContentRegistry {
       triggers: Array.isArray(def.triggers) ? def.triggers.map((t) => ({ ...t })) : [],
       flows: typeof def.flows === "object" && def.flows ? structuredClone(def.flows) : {},
       attrBonus: normalizeEffectAttrBonus(def.attrBonus),
-      /** 自动消耗：持有者行动时，流程触发后自动移除一层 */
+      /** 自动消耗：每次该效果的触发流程执行完后消耗 1 层 */
       autoConsume: Boolean(def.autoConsume),
       description: def.description || "",
+      ...(def.image === null ? { image: null } : def.image ? { image: String(def.image) } : {}),
+      ...(def.color ? { color: parseEffectColor(def.color) || "" } : {}),
+      bar: Boolean(def.bar),
+      barInvert: Boolean(def.bar && def.barInvert),
       ...(def.pack ? { pack: String(def.pack) } : {}),
       ...(def.packName ? { packName: String(def.packName) } : {}),
     });

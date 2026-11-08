@@ -16,8 +16,10 @@ import {
   EFFECT_POLARITIES,
   effectPolarityOf,
   normalizeEffectAttrBonus,
+  parseEffectColor,
   parseId,
   validateEffectAttrBonus,
+  validateEffectDisplay,
 } from "./constants.js";
 import { prepareFlow, FLOW_SCHEMA } from "./flow.js";
 
@@ -81,9 +83,13 @@ export function createCharacter() {
     /** 三系抗性；本源是真实伤害，没有抗性 */
     resistances: { physical: 0.05, magic: 0.05, spirit: 0.05 },
     label: "",
+    /** 角色介绍：卡牌库的卡牌详情里展示 */
+    description: "",
     occupiesSlot: true,
     countsAsUnit: true,
     invincible: false,
+    /** 可获取：默认勾选，目前无用途（预留卡池 / 掉落筛选） */
+    obtainable: true,
     image: "",
     skillIds: [],
   };
@@ -161,6 +167,8 @@ export function createSkill(id = "custom_skill_new", name = "新技能") {
     name,
     type: "active",
     description: "",
+    /** 技能图标路径；空 = 取模组 icons/skill/<短 id>.*，null = 强制不用图标 */
+    image: "",
     pack: "default",
     packName: "默认包",
     flow: emptyFlow(),
@@ -180,11 +188,19 @@ export function createEffect(id = "custom_effect_new", name = "新效果") {
     /** 层数上限：0 = 无上限，默认 1 */
     maxStacks: 1,
     description: "",
+    /** 效果图标路径；空 = 取模组 icons/effect/<短 id>.*，null = 强制不用图标 */
+    image: "",
+    /** 图标 / 进度条自定义颜色；空 = 按倾向自动取色 */
+    color: "",
+    /** 条式显示：不再显示左上角图标，改为血条上方的进度条 */
+    bar: false,
+    /** 反转条：进度 = (上限 - 当前) / 上限 */
+    barInvert: false,
     pack: "default",
     packName: "默认包",
     /** 属性修正：效果附着期间给持有者提供的面板加成，可空、可多条 */
     attrBonus: [],
-    /** 自动消耗：持有者行动时，对应流程触发后自动移除一层 */
+    /** 自动消耗：每次该效果的触发流程执行完后消耗 1 层（未开启层数计数时直接移除） */
     autoConsume: false,
     triggers: [],
     flows: {},
@@ -237,8 +253,133 @@ export const PLACEHOLDER_IMAGE =
  * 卡面图片默认目录。
  * 图片路径只写文件名时从 assets/picture/cards/ 读取；
  * 写相对路径（assets/banner/x.png）、绝对路径、http(s) / data URL 时按原值读取。
+ *
+ * 模组 zip 里的卡面优先：加载模组时用 registerModImages() 把
+ * 「卡包 id → { 图片名: blob URL }」登记进来，resolveCardImage() 会先查这里。
  */
 export const CARD_IMAGE_DIR = "assets/picture/cards";
+
+/** 模组图片登记表：`packId\0kind` → Map<小写图片名, blob URL>（仅运行时有效） */
+const MOD_IMAGE_REGISTRY = new Map();
+const CARD_KINDS = Object.freeze(["unit", "skill", "effect"]);
+
+const registryKey = (packId, kind) => `${packId}\u0000${kind}`;
+
+/**
+ * 登记模组 zip 里解出的图片。
+ * @param {string} packId 卡包 id（单位 id 的第一段，如 study）
+ * @param {Record<string, string>} images 图片名（不含扩展名，小写）→ URL
+ * @param {"unit"|"skill"|"effect"} [kind] 图片类别：单位卡面 / 技能图标 / 效果图标
+ */
+export function registerModImages(packId, images, kind = "unit") {
+  const id = String(packId || "").trim();
+  if (!id) return;
+  const category = CARD_KINDS.includes(kind) ? kind : "unit";
+  const next = new Map();
+  for (const [key, url] of Object.entries(images || {})) {
+    const name = String(key || "").trim().toLowerCase();
+    if (name && typeof url === "string" && url) next.set(name, url);
+  }
+  const mapKey = registryKey(id, category);
+  const prev = MOD_IMAGE_REGISTRY.get(mapKey);
+  if (prev) {
+    const keep = new Set(next.values());
+    for (const url of prev.values()) {
+      if (keep.has(url)) continue; // 同一批图片重复登记时不要撤销还在用的 URL
+      if (url.startsWith("blob:")) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          /* 忽略：旧 URL 已失效也不影响新数据 */
+        }
+      }
+    }
+  }
+  if (next.size) MOD_IMAGE_REGISTRY.set(mapKey, next);
+  else MOD_IMAGE_REGISTRY.delete(mapKey);
+}
+
+/** 清空全部模组图片登记（调试 / 测试用） */
+export function clearModImages() {
+  for (const bag of MOD_IMAGE_REGISTRY.values()) {
+    for (const url of bag.values()) {
+      if (url.startsWith("blob:")) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          /* 忽略 */
+        }
+      }
+    }
+  }
+  MOD_IMAGE_REGISTRY.clear();
+}
+
+/** 卡牌类别：从 id 的类型段判断，无法判断时按单位处理 */
+export function cardKindOf(card) {
+  const parsed = parseId(String((card && card.id) || ""));
+  return parsed.ok && CARD_KINDS.includes(parsed.kind) ? parsed.kind : "unit";
+}
+
+/** 卡牌 id 的图片键：parseId 的标识段，失败时退回最后一段 */
+function imageKeyFromId(id) {
+  const parsed = parseId(String(id || ""));
+  if (parsed.ok) return parsed.key.toLowerCase();
+  const parts = String(id || "").split("_").filter(Boolean);
+  return (parts[parts.length - 1] || "").toLowerCase();
+}
+
+/**
+ * 显式 image 字段里能对应到模组图片的名字：
+ *  · "unit1" / "unit1.jpg"                 → unit1
+ *  · "images/unit1.jpg"                    → unit1（单位卡面）
+ *  · "icons/skill/unit1.jpg"               → unit1（技能图标）
+ *  · "icons/effect/unit1.jpg"              → unit1（效果图标）
+ * 其余（带别的目录、绝对路径、URL…）返回 ""，交给普通路径解析。
+ */
+function imageKeyFromPath(raw, kind = "unit") {
+  const norm = String(raw || "").replace(/\\/g, "/");
+  const parts = norm.split("/").filter(Boolean);
+  const stem = (name) => name.replace(/\.[^.]+$/, "").toLowerCase();
+  if (parts.length === 1) return stem(parts[0]);
+  if (parts.length === 2 && parts[0].toLowerCase() === "images") {
+    return kind === "unit" ? stem(parts[1]) : "";
+  }
+  if (parts.length === 3 && parts[0].toLowerCase() === "icons" && parts[1].toLowerCase() === kind) {
+    return stem(parts[2]);
+  }
+  if (parts.length === 2 && parts[0].toLowerCase() === kind) return stem(parts[1]);
+  return "";
+}
+
+/** 查卡包登记表；没有命中返回 ""。modId 与 pack 都试（卡包 id 通常等于模组名） */
+function lookupModImage(card, raw, kind = "unit") {
+  const bags = [];
+  for (const key of [card.modId, card.pack]) {
+    if (!key) continue;
+    const bag = MOD_IMAGE_REGISTRY.get(registryKey(String(key), kind));
+    if (bag && !bags.includes(bag)) bags.push(bag);
+  }
+  if (!bags.length) return "";
+  const keys = [];
+  if (raw) {
+    const byName = imageKeyFromPath(raw, kind);
+    if (byName) keys.push(byName);
+  } else {
+    const byId = imageKeyFromId(card.id);
+    if (byId) keys.push(byId);
+    const parts = String(card.id || "").split("_").filter(Boolean);
+    const last = (parts[parts.length - 1] || "").toLowerCase();
+    if (last && last !== byId) keys.push(last);
+  }
+  for (const bag of bags) {
+    for (const key of keys) {
+      const hit = bag.get(key);
+      if (hit) return hit;
+    }
+  }
+  return "";
+}
 
 /**
  * 卡面图片地址：
@@ -257,8 +398,8 @@ export function resolveImage(path) {
 }
 
 /**
- * 卡牌默认卡面文件名：取卡牌 id 的标识段 + .png。
- * 例：default_unit_slime → slime.png；study_unit_littleempire → littleempire.png
+ * 卡牌默认图片文件名：取卡牌 id 的标识段 + .png。
+ * 例：default_unit_slime → slime.png；study_skill_choco → choco.png
  */
 export function defaultCardImageName(card) {
   if (!card || !card.id) return "";
@@ -267,21 +408,54 @@ export function defaultCardImageName(card) {
 }
 
 /**
- * 卡牌卡面路径：
+ * 卡牌的「显式」图片路径：
  *  · image 为 null → 强制使用内置占位图（返回 ""）
  *  · image 非空     → 显式路径
- *  · image 为空     → 默认「卡牌 id 的标识.png」
+ *  · image 为空     → 单位默认「短 id.png」；技能 / 效果返回 ""（由模组图标表决定）
  */
 export function cardImagePath(card) {
   if (!card || typeof card !== "object") return "";
   if (card.image === null) return "";
   const raw = typeof card.image === "string" ? card.image.trim() : "";
-  return raw || defaultCardImageName(card);
+  if (raw) return raw;
+  return cardKindOf(card) === "unit" ? defaultCardImageName(card) : "";
 }
 
-/** 解析卡面地址：带「默认 id.png」和「默认目录 assets/picture/cards/」 */
+/** 技能 / 效果图标路径：只返回显式 image；留空时由模组图标表按短 id 查找 */
+export function cardIconPath(card) {
+  if (!card || typeof card !== "object") return "";
+  if (card.image === null) return "";
+  return typeof card.image === "string" ? card.image.trim() : "";
+}
+
+/** 解析卡面地址：优先模组 zip 内的图片，其次「默认 id.png」和默认目录 */
 export function resolveCardImage(card) {
-  return resolveImage(cardImagePath(card));
+  if (!card || typeof card !== "object") return PLACEHOLDER_IMAGE;
+  // image: null = 显式要求占位图，模组图片也不参与
+  if (card.image === null) return PLACEHOLDER_IMAGE;
+  const kind = cardKindOf(card);
+  const raw = typeof card.image === "string" ? card.image.trim() : "";
+  // 外部来源（http / data / blob / 绝对路径）不查模组表，按原值使用
+  const external = /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i.test(raw);
+  if (!external) {
+    const fromMod = lookupModImage(card, raw, kind);
+    if (fromMod) return fromMod;
+  }
+  const path = cardImagePath(card);
+  return path ? resolveImage(path) : PLACEHOLDER_IMAGE;
+}
+
+/**
+ * 技能 / 效果图标地址：没有显式图标、模组里也没有对应文件时返回 ""，
+ * 让界面继续用文字字形兜底（而不是显示占位图）。
+ */
+export function resolveCardIcon(card) {
+  if (!card || typeof card !== "object" || card.image === null) return "";
+  const kind = cardKindOf(card);
+  if (kind === "unit") return resolveCardImage(card);
+  const raw = typeof card.image === "string" ? card.image.trim() : "";
+  if (!raw) return lookupModImage(card, "", kind);
+  return resolveCardImage(card);
 }
 
 /* ------------------------------------------------------------------ */
@@ -363,6 +537,10 @@ export function validateProject(project) {
     if (effect.autoConsume !== undefined && typeof effect.autoConsume !== "boolean") {
       list.push("自动消耗必须是布尔值");
     }
+    if (effect.image !== undefined && effect.image !== null && typeof effect.image !== "string") {
+      list.push("图标路径必须是字符串");
+    }
+    list.push(...validateEffectDisplay(effect));
     if (effectIds.has(effect.id)) list.push(`效果 id 重复：${effect.id}`);
     effectIds.add(effect.id);
     for (const t of effect.triggers || []) {
@@ -407,9 +585,12 @@ export function characterToUnit(ch) {
     speed: ch.speed,
     resistances: ch.resistances,
     label: ch.label,
+    description: ch.description,
     occupiesSlot: ch.occupiesSlot,
     countsAsUnit: ch.countsAsUnit,
     invincible: ch.invincible,
+    // 旧工程没有这个字段：undefined 会回落到默认 true
+    obtainable: ch.obtainable,
     skills: (ch.skillIds || []).slice(),
   });
   if (ch.pack) base.pack = String(ch.pack);
@@ -433,12 +614,15 @@ export function skillToContent(skill) {
   });
   if (skill.pack) card.pack = String(skill.pack);
   if (skill.packName) card.packName = String(skill.packName);
+  if (skill.image === null) card.image = null;
+  else if (skill.image) card.image = String(skill.image);
   if (skill.description) card.description = skill.description;
   return card;
 }
 
 export function effectToContent(effect) {
   const maxStacks = Math.floor(Number(effect.maxStacks));
+  const color = parseEffectColor(effect.color);
   return {
     id: effect.id,
     name: effect.name || "未命名效果",
@@ -447,6 +631,10 @@ export function effectToContent(effect) {
     stackable: Boolean(effect.stackable),
     maxStacks: Number.isFinite(maxStacks) ? Math.max(0, maxStacks) : 1,
     description: effect.description || "",
+    ...(effect.image === null ? { image: null } : effect.image ? { image: String(effect.image) } : {}),
+    ...(color ? { color } : {}),
+    ...(effect.bar ? { bar: true } : {}),
+    ...(effect.bar && effect.barInvert ? { barInvert: true } : {}),
     ...(effect.pack ? { pack: String(effect.pack) } : {}),
     ...(effect.packName ? { packName: String(effect.packName) } : {}),
     triggers: (effect.triggers || []).map((t) => ({ ...t.block })),
@@ -519,7 +707,7 @@ export function normalizeFlow(flow) {
       // 常量：数据线没接时运行时用的值
       const consts = (n.ui && n.ui.const) || {};
       const keep = {};
-      for (const key of ["unitId", "skillId", "effectId", "attribute", "label", "count"]) {
+      for (const key of ["unitId", "skillId", "effectId", "attribute", "label", "count", "value"]) {
         if (consts[key] !== undefined && consts[key] !== "") keep[key] = consts[key];
       }
       if (Object.keys(keep).length) out.options = keep;

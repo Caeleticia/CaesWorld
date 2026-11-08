@@ -3,10 +3,10 @@
  *
  * 每个积木：
  *   kind        积木类型 id（存档里节点的 type）
- *   group       所属大类（trigger/action/structure/logic/data）
+ *   group       所属大类（trigger/action/structure/logic/data/variable）
  *   title       显示名
  *   subtitle    副标题（补充说明）
- *   color       上方附着色（由大类颜色派生，五种）
+ *   color       上方附着色（由大类颜色派生）
  *   ports       端口定义：direction = in/out，type = 数据类型（数据端口必须带 type）
  *   options     可选设置（下拉/勾选/文本框）
  *   inflow      输入流端点名（执行流从哪个端口进来，默认 "in"）
@@ -19,7 +19,7 @@
  */
 
 /** 数据类型 */
-export const DATA_TYPES = Object.freeze(["targetset", "target", "number", "string", "condition"]);
+export const DATA_TYPES = Object.freeze(["targetset", "target", "number", "string", "condition", "any"]);
 
 export const DATA_TYPE_LABEL = Object.freeze({
   targetset: "目标集",
@@ -27,7 +27,22 @@ export const DATA_TYPE_LABEL = Object.freeze({
   number: "数字",
   string: "字符串",
   condition: "条件",
+  any: "任意",
 });
+
+/** 变量类型（声明变量时选；布尔在流程里就是 condition 数据类型） */
+export const VARIABLE_TYPES = Object.freeze([
+  { value: "number", label: "数字" },
+  { value: "string", label: "字符串" },
+  { value: "boolean", label: "布尔" },
+]);
+
+/** 变量类型 → 「声明变量」值输入端口的数据类型 */
+export function variablePortType(type) {
+  if (type === "string") return "string";
+  if (type === "boolean") return "condition";
+  return "number";
+}
 
 /** 大类：颜色 = 积木上方的附着色，也决定端口配色 */
 export const BLOCK_GROUPS = Object.freeze({
@@ -36,6 +51,7 @@ export const BLOCK_GROUPS = Object.freeze({
   structure: { label: "结构类", color: "#E6B422" },
   logic: { label: "条件类", color: "#3FA45B" },
   data: { label: "数据类", color: "#5FB0E6" },
+  variable: { label: "变量类", color: "#9B59B6" },
 });
 
 const TRIGGER_EVENTS = Object.freeze([
@@ -46,6 +62,7 @@ const TRIGGER_EVENTS = Object.freeze([
   { value: "skillCast", label: "单位释放技能" },
   { value: "skillCastSelf", label: "单位释放该技能（仅本技能自身）" },
   { value: "attack", label: "单位攻击时" },
+  { value: "allyAttack", label: "我方单位攻击时" },
   { value: "attacked", label: "单位受击时" },
   { value: "lethalDamage", label: "单位受致命伤害时" },
   { value: "unitEnter", label: "单位入场时" },
@@ -70,7 +87,7 @@ const MATH_OPERATORS = Object.freeze([
   { value: "mul", label: "a × b" },
   { value: "div", label: "a ÷ b" },
   { value: "mod", label: "a mod b（取余）" },
-  { value: "pos", label: "pos(a,b) 正数化" },
+  { value: "pos", label: "a^b（幂）" },
   { value: "log", label: "log_a(b) 对数" },
   { value: "perm", label: "P(a,b) 排列" },
   { value: "comb", label: "C(a,b) 组合" },
@@ -160,9 +177,9 @@ export function buildFlowCatalog(ctx = {}) {
     group: "trigger",
     title: "触发",
     subtitle: "满足条件时触发",
-    note: "流程入口。技能流程可以放多个触发，每个触发执行它后面的内容；效果的每个触发是一条独立流程。",
+    note: "流程入口。技能流程可以放多个触发，每个触发执行它后面的内容；效果的每个触发是一条独立流程。可选的「单位集」+「条件」会在集合里任一单位满足条件时才继续。",
     ports: [
-      { id: "unit", label: "单位（可选）", direction: "in", type: "target" },
+      { id: "unit", label: "单位集（可选）", direction: "in", type: "targetset" },
       { id: "condition", label: "条件（可选）", direction: "in", type: "condition" },
       { id: "next", direction: "out" },
     ],
@@ -255,11 +272,13 @@ export function buildFlowCatalog(ctx = {}) {
     kind: "attachEffect",
     group: "action",
     title: "附加效果",
-    subtitle: "为目标附加一个效果",
+    subtitle: "为目标附加一个效果，可指定层数",
+    note: "「层数」可以接数值积木，也可以直接在积木上键入；留空默认 1 层。效果卡开启层数计数后才按层数叠加，上限看 maxStacks。",
     ports: [
       { id: "in", direction: "in" },
       { id: "targets", label: "目标集", direction: "in", type: "targetset" },
       { id: "effectId", label: "效果 id（字符串）", direction: "in", type: "string" },
+      { id: "value", label: "层数", direction: "in", type: "number" },
       { id: "next", direction: "out" },
     ],
     outflows: ["next"],
@@ -300,7 +319,7 @@ export function buildFlowCatalog(ctx = {}) {
     kind: "summon",
     group: "action",
     title: "召唤单位",
-    subtitle: "召唤单位到场上",
+    subtitle: "召唤单位到场上；单位 id 留空 = 召唤自己",
     ports: [
       { id: "in", direction: "in" },
       { id: "unitId", label: "召唤单位 id（字符串）", direction: "in", type: "string" },
@@ -315,7 +334,7 @@ export function buildFlowCatalog(ctx = {}) {
     kind: "summonChild",
     group: "action",
     title: "召唤子单位",
-    subtitle: "为每个单位召唤子单位，父单位退场时子单位也退场",
+    subtitle: "为每个单位召唤子单位，父单位退场时子单位也退场；目标集 / 单位 id 留空 = 自己",
     ports: [
       { id: "in", direction: "in" },
       { id: "targets", label: "目标集（父单位）", direction: "in", type: "targetset" },
@@ -618,6 +637,65 @@ export function buildFlowCatalog(ctx = {}) {
     subtitle: "获取指定单位",
     ports: [{ id: "target", direction: "out", type: "target" }],
     options: [{ key: "which", label: "单位", control: "select", options: [{ value: "self", label: "自己" }], default: "self" }],
+  });
+
+  /* ---------------- 6 变量类 ---------------- */
+  // 变量的作用域是「一次流程执行」：每次释放技能 / 触发流程都会重新声明，
+  // 流程跑完就清空，因此不跨回合保存，不同技能可以放心用同名变量。
+  def({
+    kind: "declareVariable",
+    group: "variable",
+    title: "声明变量",
+    subtitle: "创建一个变量并赋值",
+    note: "变量只在本次流程执行内有效：每次释放技能 / 触发流程都会重新声明，流程结束即清空，不跨回合保存；不同技能可以用同名变量互不影响。「值」不连线时按类型取默认值（数字 0 / 字符串空 / 布尔 false）。",
+    ports: [
+      { id: "in", direction: "in" },
+      { id: "value", label: "值", direction: "in", type: "number" },
+      { id: "next", direction: "out" },
+    ],
+    outflows: ["next"],
+    options: [
+      { key: "name", label: "变量名", control: "text", default: "var" },
+      { key: "type", label: "类型", control: "select", options: VARIABLE_TYPES, default: "number" },
+    ],
+  });
+  def({
+    kind: "readVariable",
+    group: "variable",
+    title: "读取变量",
+    subtitle: "读取变量的当前值",
+    note: "变量必须先「声明」。未声明时读到空值；每次都读最新值（不进流程值缓存），可以直接接到攻击数值、比较、条件等输入。",
+    volatile: true,
+    ports: [{ id: "value", label: "变量值（类型随变量）", direction: "out", type: "any" }],
+    options: [{ key: "name", label: "变量名", control: "text", default: "var" }],
+  });
+  def({
+    kind: "setVariable",
+    group: "variable",
+    title: "设置变量值",
+    subtitle: "把变量改成新的值",
+    note: "按声明时的类型转换后写入；变量未声明时不做任何事。",
+    ports: [
+      { id: "in", direction: "in" },
+      { id: "value", label: "新的变量值", direction: "in", type: "any" },
+      { id: "next", direction: "out" },
+    ],
+    outflows: ["next"],
+    options: [{ key: "name", label: "变量名", control: "text", default: "var" }],
+  });
+  def({
+    kind: "addVariable",
+    group: "variable",
+    title: "增加变量值",
+    subtitle: "给数字变量加上一个值",
+    note: "只对声明为「数字」的变量生效；未声明或非数字变量时不做任何事。",
+    ports: [
+      { id: "in", direction: "in" },
+      { id: "value", label: "增加值", direction: "in", type: "number" },
+      { id: "next", direction: "out" },
+    ],
+    outflows: ["next"],
+    options: [{ key: "name", label: "变量名", control: "text", default: "var" }],
   });
 
   /* ---------------- 7 补全（实现 5-8 的「用 5-9 指代」） ---------------- */

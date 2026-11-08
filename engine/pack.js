@@ -1,7 +1,8 @@
 /**
  * pack.js —— 卡包 / 卡组文档工具（单文件模组格式）
  *
- * 应用现在只使用单文件卡包：mods/<文件名>.json（kind: "caeworld-pack"）。
+ * 应用现在使用模组包：mods/<modname>.zip 里的 <modname>/<modname>.json（kind: "caeworld-pack"）；
+ * 旧的 mods/<文件名>.json 仍兼容。
  * 旧的拆分卡组格式已移除，这里只保留不依赖目录结构的通用工具。
  */
 

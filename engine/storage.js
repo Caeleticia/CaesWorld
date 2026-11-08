@@ -16,7 +16,7 @@ import { createBattle } from "./battle.js";
 import { validateUnitCard, createUnitCard } from "./units.js";
 import { validateSkillCard, createSkillCard } from "./skills.js";
 import { normalizeSlot } from "./targeting.js";
-import { EFFECT_POLARITIES, parseId, validateEffectAttrBonus } from "./constants.js";
+import { EFFECT_POLARITIES, parseId, validateEffectAttrBonus, validateEffectDisplay } from "./constants.js";
 
 export const SCHEMA_VERSION = 1;
 /** 内置槽位名 */
@@ -96,6 +96,10 @@ export function validateContent(doc) {
       const n = Number(raw.maxStacks);
       if (!Number.isFinite(n) || n < 0) errors.push(`效果 ${id}: maxStacks 必须是 ≥ 0 的数字`);
     }
+    if (raw && raw.image !== undefined && raw.image !== null && typeof raw.image !== "string") {
+      errors.push(`效果 ${id}: image 必须是字符串或 null`);
+    }
+    for (const e of validateEffectDisplay(raw)) errors.push(`效果 ${id}: ${e}`);
     for (const e of validateEffectAttrBonus(raw && raw.attrBonus)) errors.push(`效果 ${id}: ${e}`);
   }
 

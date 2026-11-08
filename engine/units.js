@@ -1,7 +1,7 @@
 /**
  * units.js —— 单位卡：默认值、规范化、校验
  *
- * 一张单位卡 = 名字 + 基础数值 + 三项开关 + 技能 id 列表 + 可选的条件加成(bonuses)。
+ * 一张单位卡 = 名字 + 基础数值 + 三项开关 + 技能 id 列表 + 可选的条件加成(bonuses) + 角色介绍(description)。
  * 「效果加成」不写在卡上，而是由加成系统实时叠算（见 modifiers.js）；
  * 效果也不能初始挂在单位上——只能在战斗中用「附加效果」积木附加。
  */
@@ -39,9 +39,13 @@ export function createUnitDefaults() {
     resistances: resistanceFill(UNIT_DEFAULTS.resistances),
     /** 标签（一个单位一个，可为空） */
     label: UNIT_DEFAULTS.label,
+    /** 角色介绍：卡牌库详情里展示的背景 / 设定文本 */
+    description: "",
     occupiesSlot: UNIT_DEFAULTS.occupiesSlot,
     countsAsUnit: UNIT_DEFAULTS.countsAsUnit,
     invincible: UNIT_DEFAULTS.invincible,
+    /** 可获取：默认 true。目前只是卡面标记，还没有玩法读取它 */
+    obtainable: UNIT_DEFAULTS.obtainable,
     /** 技能：按顺序存放技能 id（战斗内每次使用技能时按索引取） */
     skills: [],
     /** 可选：条件加成（常驻 buff），格式见 modifiers.js → fromBonusOverrides */
@@ -51,11 +55,20 @@ export function createUnitDefaults() {
   };
 }
 
+/** 单位卡上的布尔开关（编辑器里是勾选框） */
+export const UNIT_SWITCH_KEYS = Object.freeze(["occupiesSlot", "countsAsUnit", "invincible", "obtainable"]);
+
 /** 把外部输入补全成完整单位卡（不改原对象）。缺失字段一律取默认值。 */
 export function createUnitCard(input = {}) {
   const base = createUnitDefaults();
   const card = { ...base, ...input };
+  // 显式传了 undefined 也当「没填」处理（旧工程 / 旧卡包没有这些字段）；
+  // 明确给了非布尔值的仍然留给 validateUnitCard 报错。
+  for (const key of UNIT_SWITCH_KEYS) {
+    if (card[key] === undefined) card[key] = base[key];
+  }
   card.label = input.label === undefined || input.label === null ? "" : String(input.label);
+  card.description = input.description === undefined || input.description === null ? "" : String(input.description);
   card.resistances = resistanceFill(input.resistances ?? base.resistances);
   card.skills = Array.isArray(input.skills) ? input.skills.slice() : [];
   card.bonuses = Array.isArray(input.bonuses) ? input.bonuses.map((b) => ({ ...b })) : [];
@@ -126,7 +139,11 @@ export function validateUnitCard(card) {
   if (typeof card.label !== "string") errors.push("label 必须是字符串");
   else if (card.label.length > 40) errors.push("label 最多 40 个字符");
 
-  for (const key of ["occupiesSlot", "countsAsUnit", "invincible"]) {
+  if (card.description !== undefined && typeof card.description !== "string") {
+    errors.push("description 必须是字符串");
+  }
+
+  for (const key of UNIT_SWITCH_KEYS) {
     if (typeof card[key] !== "boolean") errors.push(`${key} 必须是布尔值`);
   }
 

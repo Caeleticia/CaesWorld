@@ -13,7 +13,7 @@
  *  - 数据流（带类型的端口，画在积木两侧）：一个输出可以接多个输入，反过来不行；类型必须一致。
  *  - 「触发」积木没有执行流的输入，是流程的起点。
  */
-import { buildFlowCatalog, inputPortIds } from "./flow-catalog.js";
+import { buildFlowCatalog, inputPortIds, variablePortType } from "./flow-catalog.js";
 
 export const FLOW_SCHEMA = 1;
 export const MAX_STEPS = 20000;
@@ -27,6 +27,15 @@ const toList = (v) => {
   return [v];
 };
 const unitKey = (u) => u.key;
+
+/* 变量：值只在一次流程执行内有效（存在 runFlow 的 local.vars 里，跑完即丢） */
+const VAR_TYPES = Object.freeze(["number", "string", "boolean"]);
+const varDefault = (type) => (type === "number" ? 0 : type === "string" ? "" : false);
+function coerceVar(type, v) {
+  if (type === "number") return num(v);
+  if (type === "string") return str(v);
+  return Boolean(v);
+}
 
 /**
  * 目标集 → 单位数组。
@@ -79,7 +88,7 @@ export function prepareFlow(flow, opts = {}) {
       options[o.key] = n.options && n.options[o.key] !== undefined ? n.options[o.key] : o.default;
     }
     const consts = {};
-    for (const key of ["unitId", "skillId", "effectId", "attribute", "label", "count"]) {
+    for (const key of ["unitId", "skillId", "effectId", "attribute", "label", "count", "value"]) {
       const v = n.options && n.options[key];
       if (v !== undefined && v !== null && v !== "") consts[key] = typeof v === "string" ? v : num(v);
     }
@@ -141,6 +150,10 @@ export function prepareFlow(flow, opts = {}) {
       // 「回复 / 攻击」等积木的执行流输入端只接受执行流
       errors.push(`积木 ${to.id} 没有输入端口 ${l.portTo}`);
       continue;
+    }
+    // 「声明变量」的「值」输入端口类型随 type 选项变化（数字 / 字符串 / 布尔→条件）
+    if (to.block.kind === "declareVariable" && inPort.id === "value") {
+      inPort = { ...inPort, type: variablePortType(to.options.type) };
     }
 
     // 端口有没有「类型」是区分执行流 / 数据流的唯一依据：
@@ -271,10 +284,16 @@ function compareValues(a, b, operator) {
  *   damage(target, value, attribute, { source, additional, ignoreReduction })
  *   noteAttack(source, targets, totalDamage)  // 普通攻击结算后登记「单位攻击时」
  *   healUnit / setHp
- *   attachEffect(target, effectId) / removeEffectByMode(target, opts)
+ *   attachEffect(target, effectId, layers) / removeEffectByMode(target, opts)
  *   summon({ unitId, count, label, ignoreLimit, parent, owner })
  *   skipTurn / grantImmune / forceExit / giveSkill
  *   interrupted       置 true 可中止当前循环
+ *
+ * 循环（条件/遍历/次数）的每一次迭代都会重新求值条件与数据积木，
+ * 因此「范围内随机整数」在每一轮都会重掷，可用于「N% 概率继续」这类流程。
+ *
+ * 变量（声明 / 读取 / 设置 / 增加）的作用域是本次 runFlow：每次释放技能或触发流程都会
+ * 重新声明，流程跑完即丢，不跨回合保存；不同技能、不同触发流程之间的同名变量互不影响。
  *
  * @param {object} prepared prepareFlow 的结果
  * @param {object} env
@@ -290,12 +309,20 @@ export function runFlow(prepared, env, opts = {}) {
   const visited = [];
   let steps = 0;
   let currentNodeId = null;
+  /** 起点触发的条件未通过：流程被挡在入口，后续积木一个都没执行 */
+  let triggerBlocked = false;
 
   function inputNode(nodeId, port) {
     return prepared.inputOwner.get(`${nodeId}.${port}`) || null;
   }
 
-  /** 求一个端口上的值（缓存设在 local.memo 里，保证同一次执行只算一次） */
+  /**
+   * 求一个端口上的值。
+   *
+   * 缓存（local.memo）只覆盖「同一轮求值」：同一个数据积木在一次求值里被多个输入读到时
+   * 值保持一致；循环的每一次迭代都会清空它（见 resetMemo），所以随机数每轮都会重掷、
+   * 条件每轮都会重判。玩家的选择（chooseUnit）另存 local.sticky，一次流程执行里只问一次。
+   */
   function valueOf(node, port, local) {
     const fromId = inputNode(node.id, port);
     if (!fromId) {
@@ -322,13 +349,44 @@ export function runFlow(prepared, env, opts = {}) {
     return null;
   }
 
+  function scopeKey(local) {
+    return local && local.unit ? unitKey(local.unit) : "";
+  }
+
   function evalNode(node, local) {
-    const scope = local.unit ? unitKey(local.unit) : "";
+    // 「读取变量」每次都取最新值：不进值缓存，避免读到本轮循环里设置之前的值
+    if (node.block && node.block.volatile) return evalNodeInner(node, local);
+    const scope = scopeKey(local);
     const hit = local.memo.find((m) => m.id === node.id && m.scope === scope);
     if (hit) return hit.value;
     const out = evalNodeInner(node, local);
     local.memo.push({ id: node.id, scope, value: out });
     return out;
+  }
+
+  /**
+   * 「选择单位」是玩家的一次决定：在同一次流程执行里只问一次，
+   * 循环迭代清缓存时也不会被清掉（否则每多打一次就多问一次）。
+   */
+  function evalSticky(node, local, compute) {
+    if (!local.sticky) local.sticky = [];
+    const scope = scopeKey(local);
+    const hit = local.sticky.find((m) => m.id === node.id && m.scope === scope);
+    if (hit) return hit.value;
+    const out = compute();
+    local.sticky.push({ id: node.id, scope, value: out });
+    return out;
+  }
+
+  /** 循环迭代边界：清空同一轮的值缓存，让随机数 / 条件 / 面板数值重新求值 */
+  function resetMemo(local) {
+    if (local && Array.isArray(local.memo)) local.memo.length = 0;
+  }
+
+  /** 当前流程执行的变量表：跟着 local 走（forEach 的 local 副本共享同一张表） */
+  function varsOf(local) {
+    if (!local.vars) local.vars = new Map();
+    return local.vars;
   }
 
   function dynamicInputs(node) {
@@ -337,9 +395,9 @@ export function runFlow(prepared, env, opts = {}) {
       .map((k) => k.slice(node.id.length + 1));
     const list = inputPortIds(node.block, node.options, connected.length);
     if (!list.includes("in1")) return list;
-    const used = connected.filter((p) => list.includes(p));
-    const free = list.find((p) => !used.includes(p));
-    return free ? [...used, free] : list;
+    // 求值只取真正连上的输入。编辑器会多画一个空闲的「+1」端口，
+    // 但如果把它当成 0 参与 min/max，min 会恒为 0。
+    return connected.filter((p) => list.includes(p));
   }
 
   function evalNodeInner(node, local) {
@@ -367,6 +425,11 @@ export function runFlow(prepared, env, opts = {}) {
           case "mul": return a * b;
           case "div": return b === 0 ? 0 : a / b;
           case "mod": return b === 0 ? 0 : a % b;
+          case "pos": {
+            // 幂运算 a^b；结果不是有限数（负数开非整数次方、0 的负数次方、溢出）时按 0
+            const r = a ** b;
+            return Number.isFinite(r) ? r : 0;
+          }
           case "log": return a <= 0 || b <= 0 || a === 1 ? 0 : Math.log(b) / Math.log(a);
           case "perm": return permutations(a, b);
           case "comb": return combinations(a, b);
@@ -394,10 +457,11 @@ export function runFlow(prepared, env, opts = {}) {
         const side = o.side === "ally" ? env.sideOf(env.self) : env.otherSide(env.sideOf(env.self));
         return env.listSide(side);
       }
-      case "chooseUnit": {
-        const raw = valueOf(node, "targets", local);
-        return env.pickForPlayer(raw ? toList(raw) : null, { multiple: o.multiple !== false });
-      }
+      case "chooseUnit":
+        return evalSticky(node, local, () => {
+          const raw = valueOf(node, "targets", local);
+          return env.pickForPlayer(raw ? toList(raw) : null, { multiple: o.multiple !== false });
+        });
       case "setOp": {
         const a = toList(valueOf(node, "a", local));
         const b = toList(valueOf(node, "b", local));
@@ -421,6 +485,11 @@ export function runFlow(prepared, env, opts = {}) {
         // 不连目标：永远读流程拥有者自己（技能施放者 / 效果持有者）
         if (!env.self) return o.field === "name" || o.field === "label" || o.field === "id" ? "" : 0;
         return env.unitData(env.self, o.field, { effectId: valueOf(node, "effectId", local) });
+      }
+      case "readVariable": {
+        const entry = varsOf(local).get(str(o.name).trim());
+        // 未声明：读到空值（接到数值输入时按 0、接到条件时按 false）
+        return entry ? entry.value : undefined;
       }
       case "filterSet": {
         const list = toList(valueOf(node, "targets", local));
@@ -482,8 +551,15 @@ export function runFlow(prepared, env, opts = {}) {
 
     switch (node.type) {
       case "trigger": {
-        const unit = v("unit");
-        if (unit && unit.key && !condOf(node, "condition", local)) return;
+        // 可选「单位集」+ 条件：集合里只要有单位满足条件，这条触发流程才继续
+        const units = unitList(v("unit"));
+        if (units.length) {
+          const passed = units.some((u) => condOf(node, "condition", { ...local, unit: u }));
+          if (!passed) {
+            triggerBlocked = true;
+            return;
+          }
+        }
         go(nextId("next"));
         return;
       }
@@ -525,7 +601,11 @@ export function runFlow(prepared, env, opts = {}) {
       }
       case "attachEffect": {
         const eid = str(v("effectId"));
-        if (eid) for (const t of unitList(valueOf(node, "targets", local))) env.attachEffect(t, eid);
+        const layers =
+          v("value") === undefined ? 1 : Math.max(0, Math.floor(num(v("value"))));
+        if (eid && layers > 0) {
+          for (const t of unitList(valueOf(node, "targets", local))) env.attachEffect(t, eid, layers);
+        }
         go(nextId("next"));
         return;
       }
@@ -542,7 +622,8 @@ export function runFlow(prepared, env, opts = {}) {
         return;
       }
       case "summon": {
-        const unitId = str(v("unitId"));
+        // 单位 id 留空 = 召唤流程拥有者自己（常用于「分裂」）
+        const unitId = str(v("unitId")) || (env.self && env.self.cardId) || "";
         const count = v("count") === undefined ? 1 : Math.max(0, Math.floor(num(v("count"))));
         const label = str(v("label"));
         if (unitId && count > 0) {
@@ -552,8 +633,10 @@ export function runFlow(prepared, env, opts = {}) {
         return;
       }
       case "summonChild": {
-        const parents = unitList(valueOf(node, "targets", local));
-        const unitId = str(v("unitId"));
+        const connectedParents = unitList(valueOf(node, "targets", local));
+        // 目标集 / 单位 id 留空时都回落到流程拥有者自己，方便做「分裂」
+        const parents = connectedParents.length ? connectedParents : env.self ? [env.self] : [];
+        const unitId = str(v("unitId")) || (env.self && env.self.cardId) || "";
         const count = v("count") === undefined ? 1 : Math.max(0, Math.floor(num(v("count"))));
         const label = str(v("label"));
         if (unitId && count > 0) {
@@ -583,13 +666,48 @@ export function runFlow(prepared, env, opts = {}) {
         go(nextId("next"));
         return;
       }
+      case "declareVariable": {
+        const name = str(o.name).trim();
+        if (name) {
+          const type = VAR_TYPES.includes(o.type) ? o.type : "number";
+          const raw = valueOf(node, "value", local);
+          varsOf(local).set(name, {
+            type,
+            value: raw === undefined ? varDefault(type) : coerceVar(type, raw),
+          });
+        }
+        go(nextId("next"));
+        return;
+      }
+      case "setVariable": {
+        const name = str(o.name).trim();
+        const entry = name ? varsOf(local).get(name) : null;
+        if (entry) {
+          const raw = valueOf(node, "value", local);
+          entry.value = coerceVar(entry.type, raw === undefined ? varDefault(entry.type) : raw);
+        }
+        go(nextId("next"));
+        return;
+      }
+      case "addVariable": {
+        const name = str(o.name).trim();
+        const entry = name ? varsOf(local).get(name) : null;
+        if (entry && entry.type === "number") {
+          entry.value = num(entry.value) + num(valueOf(node, "value", local));
+        }
+        go(nextId("next"));
+        return;
+      }
       case "branch": {
         go(nextId(condOf(node, "condition", local) ? "true" : "false"));
         return;
       }
       case "whileLoop": {
         let iterations = 0;
-        while (condOf(node, "condition", local) && !env.interrupted) {
+        while (!env.interrupted) {
+          // 每次判定前清空缓存：条件里的随机数要重新掷，血量等数值要重新读
+          resetMemo(local);
+          if (!condOf(node, "condition", local)) break;
           iterations += 1;
           if (iterations > MAX_LOOP_ITERATIONS) throw new Error("条件循环次数超限（条件可能永远成立）");
           go(nextId("body"));
@@ -598,8 +716,10 @@ export function runFlow(prepared, env, opts = {}) {
         return;
       }
       case "forEach": {
-        for (const u of unitList(valueOf(node, "targets", local))) {
+        const targets = unitList(valueOf(node, "targets", local));
+        for (const u of targets) {
           if (env.interrupted) break;
+          resetMemo(local);
           go(nextId("body"), { ...local, unit: o.context === "stay" ? local.unit : u });
         }
         go(nextId("end"));
@@ -609,6 +729,7 @@ export function runFlow(prepared, env, opts = {}) {
         const times = Math.min(Math.max(0, Math.floor(num(v("count")))), MAX_LOOP_ITERATIONS);
         for (let i = 0; i < times; i += 1) {
           if (env.interrupted) break;
+          resetMemo(local);
           go(nextId("body"), { ...local, index: i });
         }
         go(nextId("end"));
@@ -632,8 +753,8 @@ export function runFlow(prepared, env, opts = {}) {
   const start = startId ? nodes.get(startId) : null;
   if (!start) return { ran: false, steps: 0, visited: [] };
 
-  step(start, { unit: null, memo: [] });
-  return { ran: true, steps, visited };
+  step(start, { unit: null, memo: [], sticky: [], vars: new Map() });
+  return { ran: true, steps, visited, triggerBlocked };
 }
 
 /** 便捷方法：直接给 (flow, env) 运行 */

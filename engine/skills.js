@@ -44,6 +44,8 @@ export function createSkillDefaults() {
      */
     effects: [],
     requiresTarget: true,
+    /** 技能图标路径；空 = 取模组 icons/skill/<短 id>.*，null = 强制不用图标 */
+    image: "",
   };
 }
 
@@ -115,6 +117,10 @@ export function validateSkillCard(skill) {
 
   if (typeof skill.requiresTarget !== "boolean") {
     errors.push("requiresTarget 必须是布尔值");
+  }
+
+  if (skill.image !== undefined && skill.image !== null && typeof skill.image !== "string") {
+    errors.push("image 必须是字符串或 null");
   }
 
   return { ok: errors.length === 0, errors };

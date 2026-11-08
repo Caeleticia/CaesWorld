@@ -87,6 +87,72 @@ export function effectPolarityOf(def) {
   return "positive";
 }
 
+/** 效果图标 / 进度条的默认颜色：按倾向取色，等价于原来状态图标的绿 / 红 / 黄 */
+export const EFFECT_DEFAULT_COLORS = Object.freeze({
+  positive: "#59c98a",
+  negative: "#ff6b8b",
+  special: "#ffb020",
+});
+
+/**
+ * 解析效果颜色：支持 #RGB / #RRGGBB / RGB / RRGGBB / rgb(...) / rgba(...)。
+ * @param {string} value
+ * @returns {string|null} 规范化后的 #rrggbb；空值返回 ""；非法返回 null
+ */
+export function parseEffectColor(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const hex = raw.replace(/^#/, "");
+  if (/^[0-9a-f]{3}$/i.test(hex)) {
+    return `#${hex.split("").map((c) => c + c).join("")}`.toLowerCase();
+  }
+  if (/^[0-9a-f]{6}$/i.test(hex)) return `#${hex}`.toLowerCase();
+  const m = raw.match(
+    /^rgba?\(\s*(\d+(?:\.\d+)?%?)\s*[,\s]\s*(\d+(?:\.\d+)?%?)\s*[,\s]\s*(\d+(?:\.\d+)?%?)(?:\s*[,/]\s*[\d.]+%?)?\s*\)$/i
+  );
+  if (!m) return null;
+  const channel = (part) => {
+    const n = Number(String(part).replace("%", ""));
+    if (!Number.isFinite(n)) return 0;
+    const v = String(part).endsWith("%") ? (n / 100) * 255 : n;
+    return Math.max(0, Math.min(255, Math.round(v)));
+  };
+  return `#${[m[1], m[2], m[3]].map((c) => channel(c).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** 效果的实际颜色：自定义颜色优先，否则按倾向取默认色 */
+export function effectColorOf(def) {
+  const custom = parseEffectColor(def && def.color);
+  if (custom) return custom;
+  return EFFECT_DEFAULT_COLORS[effectPolarityOf(def)] || EFFECT_DEFAULT_COLORS.positive;
+}
+
+/**
+ * 校验效果的颜色 / 条式显示 / 反转条字段。
+ * @param {object} def
+ * @returns {string[]}
+ */
+export function validateEffectDisplay(def) {
+  const errors = [];
+  if (!def || typeof def !== "object") return errors;
+  if (def.bar !== undefined && typeof def.bar !== "boolean") errors.push("bar 必须是布尔值");
+  if (def.barInvert !== undefined && typeof def.barInvert !== "boolean") {
+    errors.push("barInvert 必须是布尔值");
+  }
+  if (def.color !== undefined && def.color !== null && typeof def.color !== "string") {
+    errors.push("color 必须是字符串");
+  } else if (def.color && parseEffectColor(def.color) === null) {
+    errors.push("color 必须是 HEX 或 rgb(...)");
+  }
+  if (def.bar) {
+    if (!def.stackable) errors.push("条式显示必须开启层数计数");
+    const max = Math.floor(Number(def.maxStacks));
+    if (!Number.isFinite(max) || max <= 0) errors.push("条式显示必须有上限（maxStacks > 0）");
+  }
+  if (def.barInvert && !def.bar) errors.push("只有条式显示的效果才能反转条");
+  return errors;
+}
+
 /**
  * 效果「属性修正」可用的键：效果附着期间给持有者提供的面板加成。
  *
@@ -195,6 +261,8 @@ export const UNIT_DEFAULTS = Object.freeze({
   occupiesSlot: true,
   countsAsUnit: true,
   invincible: false,
+  /** 可获取：默认勾选。目前只是标记，还没有任何玩法用到（预留给卡池 / 掉落 / 图鉴筛选） */
+  obtainable: true,
 });
 
 /** 默认品质顺序即“从低到高” */
