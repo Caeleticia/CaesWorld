@@ -28,9 +28,11 @@ import {
   resolveCardIcon,
   cardImagePath,
   PLACEHOLDER_IMAGE,
+  skillNeedsPlayerTarget,
 } from "../engine/index.js";
 import { createStageScaler, STAGE_DESIGN } from "./training-stage.js";
 import { BattleFX } from "./battle-fx.js";
+import { chooseAISkill } from "./battle-ai.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const escapeHtml = (s) =>
@@ -674,11 +676,12 @@ export function openBattle({ registry, config, onExit }) {
       .map((sk, i) => {
         if (sk.type !== "active") return "";
         const icon = resolveCardIcon(sk);
+        const needsTarget = skillNeedsPlayerTarget(sk);
         return `<button class="tbt-skill ${s.pending?.index === i ? "is-targeting" : ""}" type="button" data-skill="${i}">
                <div class="tbt-skill-main">${
                  icon ? `<img class="tbt-skill-icon" src="${escapeHtml(icon)}" alt="" draggable="false" />` : ""
                }<b>${escapeHtml(sk.name)}</b></div>
-               <span>手动选择目标</span>
+               <span>${needsTarget ? "手动选择目标" : "直接施放"}</span>
              </button>`;
       })
       .join("");
@@ -988,6 +991,36 @@ export function openBattle({ registry, config, onExit }) {
   /* ---------------- 特效播放 ---------------- */
   const attrName = (attr) => ATTRIBUTE_INFO[attr]?.label || "物理";
 
+  /** 伤害日志：单体与群攻共用 */
+  function logDamage(ev, attacker, target) {
+    if (!target) return;
+    const cls = sideKey(target.side) === "red" ? "is-red" : "is-blue";
+    const amount = ev.finalDamage > 0 ? fmt(ev.finalDamage) : "免疫";
+    const from = attacker ? `[${attacker.side === "ally" ? "红" : "蓝"}]${attacker.name}` : "?";
+    addLog(
+      `${from} → [${target.side === "ally" ? "红" : "蓝"}]${target.name}  ${amount}${ev.crit ? "（暴击）" : ""}${
+        ev.isAdditionalDamage ? " · 附加" : ev.isTrueDamage ? " · 本源" : ` · ${attrName(ev.attribute)}`
+      }`,
+      cls
+    );
+  }
+
+  /** 命中表现：爆炸 / 冲击、跳字、受击闪烁 */
+  function impactDamage(ev, hitRect, additional) {
+    if (!hitRect) return;
+    const immune = ev.finalDamage <= 0 || ev.targetInvincible || ev.immune;
+    if (additional) s.fx.impact(hitRect, { attribute: ev.attribute });
+    else s.fx.explode(hitRect, { attribute: ev.attribute });
+    s.fx.floatText(hitRect, immune ? "免疫" : fmt(ev.finalDamage), {
+      attribute: ev.attribute,
+      crit: Boolean(ev.crit),
+      kind: immune ? "mute" : "damage",
+      size: additional ? 20 : undefined,
+      tag: additional && !immune ? "附加" : "",
+    });
+    flashHit(ev.target);
+  }
+
   async function playDamage(ev) {
     const attacker = unitOf(ev.attacker);
     const target = unitOf(ev.target);
@@ -1006,35 +1039,50 @@ export function openBattle({ registry, config, onExit }) {
     }
     if (s.destroyed) return;
     const hitRect = rectOf(ev.target) || tRect;
-    if (hitRect) {
-      const immune = ev.finalDamage <= 0 || ev.targetInvincible || ev.immune;
-      if (additional) s.fx.impact(hitRect, { attribute: ev.attribute });
-      else s.fx.explode(hitRect, { attribute: ev.attribute });
-      s.fx.floatText(
-        hitRect,
-        immune ? "免疫" : fmt(ev.finalDamage),
-        {
-          attribute: ev.attribute,
-          crit: Boolean(ev.crit),
-          kind: immune ? "mute" : "damage",
-          size: additional ? 20 : undefined,
-          tag: additional && !immune ? "附加" : "",
-        }
-      );
-      flashHit(ev.target);
-    }
+    impactDamage(ev, hitRect, additional);
     setDisplayHp(ev.target, ev.hpAfter);
-    const cls = sideKey(target.side) === "red" ? "is-red" : "is-blue";
-    const amount = ev.finalDamage > 0 ? fmt(ev.finalDamage) : "免疫";
-    const from = attacker ? `[${attacker.side === "ally" ? "红" : "蓝"}]${attacker.name}` : "?";
-    addLog(
-      `${from} → [${target.side === "ally" ? "红" : "蓝"}]${target.name}  ${amount}${ev.crit ? "（暴击）" : ""}${
-        ev.isAdditionalDamage ? " · 附加" : ev.isTrueDamage ? " · 本源" : ` · ${attrName(ev.attribute)}`
-      }`,
-      cls
-    );
+    logDamage(ev, attacker, target);
     // 附加伤害的跳字要留够时间让人看清「附加」标签
     await sleep(additional ? 220 : ev.finalDamage > 0 ? 150 : 120);
+  }
+
+  /**
+   * 一次群攻的多个命中同时播放：所有飞弹一起出发，命中后一起爆炸 / 跳字 / 扣血。
+   * 循环体里的每次攻击是独立的批次，仍会按顺序逐个播放（见 playEvents）。
+   */
+  async function playDamageGroup(list) {
+    const entries = list.map((ev) => ({
+      ev,
+      attacker: unitOf(ev.attacker),
+      target: unitOf(ev.target),
+      aRect: rectOf(ev.attacker),
+      tRect: rectOf(ev.target),
+      additional: Boolean(ev.isAdditionalDamage),
+    }));
+    const launches = [];
+    for (const e of entries) {
+      if (!e.target || e.additional || !e.aRect || !e.tRect || s.destroyed) continue;
+      // 统一命中时间：群攻的飞弹一起出发、一起到达
+      launches.push(s.fx.launch(e.aRect, e.tRect, { attribute: e.ev.attribute, arriveIn: 0.32 }));
+    }
+    // 没有飞弹（附加伤害 / 没拿到卡牌位置）时也给一个统一的蓄力节拍
+    if (launches.length) await Promise.all(launches);
+    else await sleep(entries.some((e) => e.additional) ? 90 : 160);
+    if (s.destroyed) return;
+
+    let anyAdditional = false;
+    let anyPositive = false;
+    for (const e of entries) {
+      if (!e.target) continue;
+      const ev = e.ev;
+      const hitRect = rectOf(ev.target) || e.tRect;
+      impactDamage(ev, hitRect, e.additional);
+      setDisplayHp(ev.target, ev.hpAfter);
+      logDamage(ev, e.attacker, e.target);
+      if (e.additional) anyAdditional = true;
+      if (ev.finalDamage > 0) anyPositive = true;
+    }
+    await sleep(anyAdditional ? 220 : anyPositive ? 150 : 120);
   }
 
   async function playHeal(ev) {
@@ -1052,7 +1100,20 @@ export function openBattle({ registry, config, onExit }) {
 
   async function playEvents(events) {
     if (!events || !events.length) return;
-    for (const ev of events) {
+    // 同一次「攻击」积木产生的多目标命中共享 attackGroup：整组同时播放。
+    // 循环体里的每轮攻击是不同批次，所以仍会一轮一轮依次播放。
+    const attackGroups = new Map();
+    for (let i = 0; i < events.length; i += 1) {
+      const ev = events[i];
+      if (ev.type !== "damage" || ev.attackGroup === undefined || ev.attackGroup === null) continue;
+      const list = attackGroups.get(ev.attackGroup) || [];
+      list.push({ index: i, ev });
+      attackGroups.set(ev.attackGroup, list);
+    }
+    const playedDamage = new Set();
+    for (let i = 0; i < events.length; i += 1) {
+      if (playedDamage.has(i)) continue;
+      const ev = events[i];
       if (s.destroyed) return;
       switch (ev.type) {
         case "battle:start":
@@ -1097,9 +1158,16 @@ export function openBattle({ registry, config, onExit }) {
           await sleep(180);
           break;
         }
-        case "damage":
-          await playDamage(ev);
+        case "damage": {
+          const group = ev.attackGroup ? attackGroups.get(ev.attackGroup) : null;
+          if (group && group.length > 1) {
+            for (const item of group) playedDamage.add(item.index);
+            await playDamageGroup(group.map((item) => item.ev));
+          } else {
+            await playDamage(ev);
+          }
           break;
+        }
         case "heal":
           await playHeal(ev);
           break;
@@ -1313,20 +1381,17 @@ export function openBattle({ registry, config, onExit }) {
 
     const active = activeUnit();
     if (!active) return;
-    const skills = s.battle.allSkillsOf(active)
-      .map((sk, i) => ({ sk, i }))
-      .filter((x) => x.sk.type === "active");
-    if (skills.length) {
-      // 人机先用能用的技能；没有目标就用默认索敌
-      const choice = skills[Math.floor(Math.random() * skills.length)];
-      const enemies = s.battle
-        .publicBattle()
-        .units.filter((u) => u.side !== active.side && u.state === "alive")
-        .sort((a, b) => a.hp / Math.max(1, a.hpMax) - b.hp / Math.max(1, b.hpMax) || Math.abs(a.slot) - Math.abs(b.slot));
-      const target = enemies[0] || null;
-      const events = take(() =>
-        s.battle.useSkill(choice.i, target ? { targetRef: target.uid } : undefined)
-      );
+    const choice = chooseAISkill(s.battle, active, s.registry);
+    if (choice) {
+      s.preferredTargets = choice.targetUid ? [choice.targetUid] : [];
+      let events = [];
+      try {
+        events = take(() =>
+          s.battle.useSkill(choice.index, choice.targetUid ? { targetRef: choice.targetUid } : undefined)
+        );
+      } finally {
+        s.preferredTargets = [];
+      }
       await playEvents(events);
     }
     if (s.destroyed) return;
@@ -1437,7 +1502,12 @@ export function openBattle({ registry, config, onExit }) {
       refreshAll();
       return;
     }
-    // 非人机单位：即使只有一个敌人，也由玩家手动点选目标
+    // 全体 / 固定目标 / 纯自身等技能不需要选目标：直接施放，不进入选目标状态
+    if (!skillNeedsPlayerTarget(skill)) {
+      executeSkill(index, null);
+      return;
+    }
+    // 需要选目标的技能：即使只有一个敌人，也由玩家手动点选目标
     const enemies = s.battle.publicBattle().units.filter((u) => u.side !== active.side && u.state === "alive");
     if (!enemies.length) {
       executeSkill(index, null);

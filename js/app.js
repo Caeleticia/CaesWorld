@@ -181,6 +181,7 @@ async function boot() {
     if (itemId === "library") openLibrary();
     if (itemId === "editor") openEditor();
     if (itemId === "training") openTraining();
+    if (itemId === "local") openLocal();
     if (itemId === "mod-manager") openModManager();
     if (itemId === "settings") openSettings();
   });
@@ -211,6 +212,7 @@ async function boot() {
       document.title = "Cae'sWorld · 主菜单";
       // 直接带 hash 打开（#training / #editor / #library / #mods）也能进对应页面
       if (location.hash === "#training") openTraining();
+      else if (location.hash === "#play") openLocal();
       else if (location.hash === "#editor") openEditor();
       else if (location.hash === "#library") openLibrary();
       else if (location.hash === "#mods") openModManager();
@@ -228,7 +230,7 @@ async function boot() {
 let editorLoaded = false;
 let editorModule = null;
 
-const SUBPAGE_SELECTORS = ["#editor-page", "#library-page", "#mod-page", "#settings-page", "#training-page", "#battle-page"];
+const SUBPAGE_SELECTORS = ["#editor-page", "#library-page", "#mod-page", "#settings-page", "#training-page", "#battle-page", "#play-page", "#play-battle-page"];
 
 /** 打开某个子页面前，先把其它子页面收起来（主菜单也隐藏） */
 function hideSubpages(except = null) {
@@ -335,6 +337,30 @@ function closeSettings() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 游玩 / 同屏                                                         */
+/* ------------------------------------------------------------------ */
+async function openLocal() {
+  const page = $("#play-page");
+  if (!page) return;
+  hideSubpages(page);
+  page.hidden = false;
+  location.hash = "#play";
+  const mod = await import("./local-view.js");
+  await mod.initLocal();
+}
+
+function closeLocal() {
+  const page = $("#play-page");
+  if (!page) return;
+  const battle = $("#play-battle-page");
+  const battleOpen = battle && !battle.hidden;
+  if (page.hidden && !battleOpen) return;
+  page.hidden = true;
+  if (battle) battle.hidden = true;
+  showMenuIfNoSubpage();
+}
+
+/* ------------------------------------------------------------------ */
 /* 训练场                                                              */
 /* ------------------------------------------------------------------ */
 async function openTraining() {
@@ -364,6 +390,7 @@ window.addEventListener("hashchange", () => {
   if (location.hash !== "#mods") closeModManager();
   if (location.hash !== "#settings") closeSettings();
   if (location.hash !== "#training") closeTraining();
+  if (location.hash !== "#play") closeLocal();
 });
 
 boot().catch((err) => {

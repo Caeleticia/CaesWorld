@@ -59,7 +59,7 @@ const ZIP_DB_VERSION = 2;
 const ZIP_STORE = "files";
 /* 服务器模组的浏览器缓存：按 mods/index.txt 的文件名存原始字节，删掉后刷新会重新下载 */
 const SERVER_STORE = "server";
-const SERVER_CACHE_VERSION = 1;
+const SERVER_CACHE_VERSION = 2;
 
 const clean = (v) => (typeof v === "string" ? v.trim() : "");
 const fileNameOf = (name) => {
@@ -683,6 +683,73 @@ export function loadEditorPackContent() {
   }
 }
 
+
+/** 默认包的「分裂」标准流程：被击败时召唤 2 个史莱姆。 */
+const DEFAULT_SPLIT_FLOW = Object.freeze({
+  schema: 1,
+  kind: "flow",
+  nodes: [
+    { id: "trg1", type: "trigger", options: { event: "unitExit", unitScope: "self" }, pos: { x: 359, y: 175 } },
+    {
+      id: "summon1",
+      type: "summon",
+      options: { ignoreLimit: true, unitId: "default_unit_slime" },
+      pos: { x: 610, y: 173 },
+    },
+    {
+      id: "num1",
+      type: "number",
+      options: { mode: "const", value: 2, min: 0, max: 10 },
+      pos: { x: 359, y: 396 },
+    },
+  ],
+  links: [
+    { id: "trg1.next->summon1.in", from: "trg1", port: "next", to: "summon1", portTo: "in" },
+    { id: "num1.num->summon1.count", from: "num1", port: "num", to: "summon1", portTo: "count" },
+  ],
+});
+
+/**
+ * 默认包兼容修复：
+ *  - 旧缓存 / 旧编辑器工程里的史莱姆可能还挂着不存在的 default_skill_bloodlust；
+ *  - 旧的大史莱姆「分裂」可能没有流程，按描述补成「退场时召唤 2 个史莱姆」。
+ * 只修默认包的两个固定 id，不碰玩家的自定义卡。
+ */
+function repairDefaultContent(units, skills) {
+  const slime = units.find((u) => u && u.id === "default_unit_slime");
+  if (slime && Array.isArray(slime.skills)) {
+    slime.skills = slime.skills.filter((sid) => sid !== "default_skill_bloodlust");
+  }
+  const big = units.find((u) => u && u.id === "default_unit_bigslime");
+  if (!big) return;
+  if (!Array.isArray(big.skills)) big.skills = [];
+  let split = skills.find((s) => s && s.id === "default_skill_new");
+  if (!split) {
+    split = {
+      id: "default_skill_new",
+      name: "分裂",
+      type: "passive",
+      valueSource: "atk",
+      format: "flow",
+      targets: 1,
+      effects: [],
+      requiresTarget: false,
+      description: "被击败时，变成两个史莱姆",
+      flow: structuredClone(DEFAULT_SPLIT_FLOW),
+      pack: "default",
+      packName: "默认包",
+    };
+    skills.push(split);
+  }
+  if (!big.skills.includes("default_skill_new")) big.skills.push("default_skill_new");
+  if (!split.flow || !Array.isArray(split.flow.nodes) || split.flow.nodes.length === 0) {
+    split.format = "flow";
+    split.type = split.type || "passive";
+    split.description = split.description || "被击败时，变成两个史莱姆";
+    split.flow = structuredClone(DEFAULT_SPLIT_FLOW);
+  }
+}
+
 /**
  * 汇总内容：启用的模组（默认包也是模组）+ 编辑器工程。
  * 同一 id 后面的来源覆盖前面的来源（编辑器优先、本地模组优先于服务器模组）。
@@ -727,12 +794,15 @@ export async function loadContentPacks({ includeEditor = true } = {}) {
     );
   };
 
+  const units = merge("units");
+  const skills = merge("skills");
+  repairDefaultContent(units, skills);
   return {
     packs,
     disabledModIds,
     disabledPackIds,
-    units: merge("units"),
-    skills: merge("skills"),
+    units,
+    skills,
     effects: merge("effects"),
     errors,
   };

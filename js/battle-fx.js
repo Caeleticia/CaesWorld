@@ -250,7 +250,8 @@ export class BattleFX {
   /**
    * @param {{x:number,y:number,w:number,h:number}} from 发射者卡牌矩形（舞台坐标）
    * @param {{x:number,y:number,w:number,h:number}} to 目标卡牌矩形
-   * @param {{attribute?:string,color?:string,onHit?:Function}} [opts]
+   * @param {{attribute?:string,color?:string,onHit?:Function,arriveIn?:number}} [opts]
+   *   arriveIn: 统一的命中时间（秒）。群攻用它让多枚飞弹同时到达；不传则按距离算。
    * @returns {Promise<void>} 命中时 resolve
    */
   launch(from, to, opts = {}) {
@@ -276,10 +277,16 @@ export class BattleFX {
       const x0 = a.x + dx * startPad;
       const y0 = a.y + dy * startPad;
       const color = colorOf(opts.color || opts.attribute);
-      const v0 = clamp(dist * 3.4, 620, 1500);
+      const travel = Math.max(1, dist - startPad);
       const accel = clamp(dist * 1.1, 140, 520);
+      const syncIn = Number(opts.arriveIn);
+      const sync = Number.isFinite(syncIn) && syncIn > 0;
+      // 普通飞弹按距离算初速；群攻传入 arriveIn 时反推初速，让所有飞弹同时命中
+      const v0 = sync
+        ? Math.max(1, (travel - 0.5 * accel * syncIn * syncIn) / syncIn)
+        : clamp(dist * 3.4, 620, 1500);
       // 命中时刻：v0 t + ½ a t² = dist
-      const tHit = (-v0 + Math.sqrt(v0 * v0 + 2 * accel * dist)) / accel;
+      const tHit = sync ? syncIn : (-v0 + Math.sqrt(v0 * v0 + 2 * accel * dist)) / accel;
       const bullet = {
         x0,
         y0,
@@ -287,7 +294,7 @@ export class BattleFX {
         y: y0,
         dx,
         dy,
-        dist: dist - startPad,
+        dist: travel,
         v0,
         accel,
         t: 0,
