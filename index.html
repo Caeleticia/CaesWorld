@@ -86,9 +86,15 @@
         <button class="btn small" id="btn-save" type="button">保存</button>
         <button class="btn small" id="btn-export" type="button">导出卡包</button>
         <button class="btn small" id="btn-import" type="button">导入</button>
-        <input type="file" id="import-file" accept="application/json" hidden />
+        <input type="file" id="import-file" accept=".zip,.json,application/zip,application/json" hidden />
       </div>
     </header>
+
+    <div class="editor-packbar">
+      <label class="editor-pack-label" for="ed-edit-pack">编辑中卡包</label>
+      <select id="ed-edit-pack" title="角色 / 技能 / 效果共用同一个编辑中卡包"></select>
+      <span class="editor-pack-hint">角色 / 技能 / 效果共用；选「全部卡包」时新建卡进入草稿包</span>
+    </div>
 
     <nav class="ed-tabs" role="tablist">
       <button class="ed-tab is-active" data-tab="character" type="button">设计角色</button>
@@ -103,7 +109,6 @@
         <div class="ed-col ed-col-form">
           <div class="list-head">
             <select id="ed-character-list" class="grow" title="选择要编辑的角色"></select>
-            <select id="ed-character-pack" class="pack-filter" title="按卡包筛选角色"></select>
             <button class="btn small" id="btn-new-character" type="button">新建角色</button>
             <button class="btn small danger" id="btn-delete-character" type="button" data-action="delete-character" disabled>删除角色</button>
           </div>
@@ -125,13 +130,16 @@
             <label class="form-field"><span>暴击伤害</span><input id="f-critdmg" type="number" step="0.1" /></label>
             <label class="form-field"><span>速度</span><input id="f-speed" type="number" /></label>
             <label class="form-field"><span>标签</span><input id="f-label" placeholder="可选，一个单位一个标签" /></label>
-            <label class="form-field"><span>卡面图片路径</span><input id="f-image" placeholder="slime.png 或 assets/banner/xxx.png" /><em>默认填卡牌短 id.png（如 slime.png），从 assets/picture/cards/ 读取；也可填完整路径 / URL</em></label>
+            <label class="form-field form-field-wide"><span>角色介绍</span><textarea id="f-intro" rows="3" placeholder="角色背景 / 设定介绍，会显示在卡牌库的卡牌详情里"></textarea></label>
+            <label class="form-field"><span>卡面图片路径</span><input id="f-image" placeholder="slime.png 或 assets/banner/xxx.png" /><em>默认填卡牌短 id.png（如 slime.png）：先取所属模组 zip 的 images/，找不到再从 assets/picture/cards/ 读；也可填完整路径 / URL</em></label>
           </div>
           <div class="form-row">
             <label class="form-check"><input id="f-occupy" type="checkbox" /> 占位</label>
             <label class="form-check"><input id="f-count" type="checkbox" /> 计数</label>
             <label class="form-check"><input id="f-invincible" type="checkbox" /> 无敌</label>
+            <label class="form-check" title="默认勾选。目前只是标记，还没有玩法用到"><input id="f-obtainable" type="checkbox" /> 可获取</label>
           </div>
+          <p class="muted">「可获取」默认勾选，目前无用途（预留给卡池 / 掉落 / 图鉴筛选）。</p>
           <fieldset class="resist-box">
             <legend>各系抗性（本源为真实伤害，无抗性）</legend>
             <label>物理 <input id="f-res-physical" type="number" step="0.01" /></label>
@@ -146,12 +154,11 @@
 
         <div class="ed-col ed-col-preview">
           <h2>卡面预览</h2>
-          <p class="muted">把模组卡包 JSON（mods/&lt;包 ID&gt;.json）、单张卡或编辑器工程 JSON 拖到这里即可导入继续改。</p>
+          <p class="muted">把模组 zip（modname/modname.json + images/）、卡包 JSON、单张卡或编辑器工程 JSON 拖到这里即可导入继续改。</p>
           <div class="card-preview" id="ed-card-preview"></div>
           <p class="muted" id="ed-unit-stats"></p>
           <h2>挂载技能</h2>
           <div class="mount-list" id="ed-mount-skills"></div>
-          <p class="muted">效果不能初始挂载，只能在战斗中用「附加效果」积木附加。</p>
         </div>
       </div>
     </section>
@@ -163,7 +170,6 @@
           <div id="ed-skill-col">
             <div class="list-head">
               <select id="ed-skill-list" class="grow"></select>
-              <select id="ed-skill-pack" class="pack-filter" title="按卡包筛选技能"></select>
               <button class="btn small" id="btn-new-skill" type="button" data-action="new-skill">新建技能</button>
               <button class="btn small danger" id="btn-delete-skill" type="button" data-action="delete-skill" disabled>删除技能</button>
             </div>
@@ -172,7 +178,6 @@
           <div id="ed-effect-col" hidden>
             <div class="list-head">
               <select id="ed-effect-list" class="grow"></select>
-              <select id="ed-effect-pack" class="pack-filter" title="按卡包筛选效果"></select>
               <button class="btn small" id="btn-new-effect" type="button" data-action="new-effect">新建效果</button>
               <button class="btn small danger" id="btn-delete-effect" type="button" data-action="delete-effect" disabled>删除效果</button>
             </div>
@@ -189,6 +194,12 @@
               <button class="btn tiny" id="btn-fit" type="button">适应</button>
               <button class="btn tiny" id="btn-locate" type="button" title="把视角移动到离视口中心最近的积木">定位</button>
               <button class="btn tiny" id="btn-tidy" type="button" title="自动整理积木位置">整理</button>
+              <button class="btn tiny" id="btn-template" type="button" title="插入模板：撞击（默认史莱姆）" hidden>模板</button>
+              <label class="canvas-mode" title="滑钮切换：拖拽画布 / 切割连线">
+                <span data-mode="pan">拖拽</span>
+                <input type="checkbox" id="canvas-mode" role="switch" aria-label="切换拖拽画布或切割连线" />
+                <span data-mode="cut">切割</span>
+              </label>
               <button class="btn tiny danger" id="btn-delete-block" type="button" disabled>删除积木</button>
               <button class="btn tiny danger" id="btn-clear-flow" type="button">清空</button>
             </div>
@@ -198,7 +209,8 @@
             <div class="canvas-wrap">
               <div class="blocks-canvas" id="blocks-canvas">
                 <div class="blocks-world" id="blocks-world"></div>
-                <div class="cut-marker" id="cut-marker"></div>
+                <div class="erase-cursor" id="erase-cursor"></div>
+                <div class="erase-hint" id="erase-hint" hidden>切割模式 · 拖过连线删除（松手退出）</div>
                 <div class="flow-empty" id="flow-empty"></div>
               </div>
             </div>
@@ -234,7 +246,7 @@
     <div class="ed-modal" id="ed-export-modal" hidden>
       <div class="ed-modal-box" role="dialog" aria-modal="true" aria-label="导出卡包">
         <h2>导出卡包</h2>
-        <p class="muted">选择一个卡包，导出为卡包文件（工程 + 内容合并，可直接导入回来）。</p>
+        <p class="muted">选择一个卡包，导出为模组 ZIP（<code>&lt;id&gt;/&lt;id&gt;.json</code> + <code>images/</code> + <code>README.md</code>，可直接放进 <code>mods/</code>，也能再导入编辑器）。</p>
         <select id="ed-export-pack"></select>
         <div class="ed-modal-actions">
           <button class="btn small" id="btn-export-cancel" type="button">取消</button>
@@ -289,11 +301,15 @@
           <button class="sub-tab" type="button" data-lib-tab="skills" role="tab">技能</button>
           <button class="sub-tab" type="button" data-lib-tab="effects" role="tab">效果</button>
         </div>
-        <input id="library-search" type="search" placeholder="搜索名字 / id…" autocomplete="off" />
+        <input id="library-search" type="search" placeholder="搜索名字 / id / 介绍…" autocomplete="off" />
         <span class="sub-count" id="library-count">0</span>
       </div>
       <div id="library-list" class="card-grid"></div>
     </section>
+
+    <div class="lib-detail" id="library-detail" hidden>
+      <div class="lib-detail-sheet" id="library-detail-sheet" role="dialog" aria-modal="true" aria-labelledby="library-detail-title"></div>
+    </div>
   </main>
 
   <!-- ======================= 模组 / 模组管理 ======================= -->
@@ -303,13 +319,13 @@
       <div class="subpage-title">模组 · 模组管理 <small id="mod-status"></small></div>
       <div class="subpage-actions">
         <button class="btn small" id="mod-import" type="button">导入模组</button>
-        <input type="file" id="mod-file" accept=".json,.js,.txt,application/json,text/plain" hidden />
+        <input type="file" id="mod-file" accept=".zip,.json,application/zip,application/json" hidden />
         <button class="btn small" id="mod-refresh" type="button">刷新</button>
       </div>
     </header>
     <section class="subpage-body">
       <p class="mod-hint">
-        服务器模组从 <code>mods/index.txt</code> 读取清单、从 <code>mods/</code> 读取模组文件；导入的模组保存在浏览器本地，启用 / 停用只影响本地。
+        服务器模组从 <code>mods/index.txt</code> 读取清单、从 <code>mods/</code> 读取模组包（推荐 ZIP：<code>modname/modname.json</code> + <code>images/</code> + <code>icons/skill/</code> + <code>icons/effect/</code> + <code>README.md</code>），并缓存在浏览器里；导入的模组保存在浏览器本地，启用 / 停用只影响本地。删除服务器模组只清浏览器缓存，点「刷新」或重新打开页面会重新缓存；编辑器工程里的同名卡仍优先于模组内容。
       </p>
       <div id="mod-list" class="mod-list"></div>
     </section>
