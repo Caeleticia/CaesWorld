@@ -401,3 +401,304 @@
 
 /* 同屏战斗在行动栏上方留出布阵空间 */
 .tw-page[data-orient="portrait"] .lbt-board .tbt-grid { inset: 3px 21px 30px; }
+
+/* 手牌按钮固定在屏幕左右下角（不再塞进卡区，竖屏也不会被卡牌挤走） */
+.lbt-hand-btn {
+  position: fixed;
+  z-index: 40;
+  left: max(8px, env(safe-area-inset-left, 0px));
+  bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  top: auto;
+}
+.lbt-hand-btn[data-side="enemy"] {
+  left: auto;
+  right: max(8px, env(safe-area-inset-right, 0px));
+}
+.lbt-hand-btn[hidden] { display: none !important; }
+
+/* 行动栏给左右下角的手牌按钮让位，避免按钮压住技能 / 结束行动 */
+#play-battle-page .tbt-actions {
+  padding-left: 76px;
+  padding-right: 76px;
+}
+
+/* 手牌卡：放大镜叠在卡面右下角（只在布阵时出现） */
+.lbt-hand-card { cursor: pointer; }
+.lbt-hand-card.is-disabled { opacity: 0.4; filter: grayscale(0.5); cursor: not-allowed; }
+.lbt-hc-art { position: relative; display: block; }
+.lbt-hc-art > img { display: block; }
+.lbt-hc-mag {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.9);
+  background: rgba(23, 57, 60, 0.72);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: 0 2px 6px rgba(23, 57, 60, 0.3);
+  cursor: zoom-in;
+}
+.lbt-hc-mag:hover { background: var(--brand-ink); transform: scale(1.06); }
+.lbt-hc-mag:active { transform: scale(0.96); }
+
+/* 角色详情弹层要盖住手牌弹层 */
+#pb-detail { z-index: 45; }
+
+/* 选中技能时展示描述 */
+.tbt-skill-desc {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  padding: 4px 8px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 7px 7px 0;
+  background: #fff7f9;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+.tbt-skill-desc b {
+  flex: none;
+  font-size: 11px;
+  color: #b93455;
+}
+.tbt-skill-desc span {
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.tw-page[data-orient="portrait"] .tbt-skill-desc { grid-column: 1 / -1; }
+
+/* ---------------- 抽牌演出：品质光束 / 金卡剪影 / 光环立绘 ---------------- */
+.lbt-draw {
+  position: absolute;
+  left: 50%;
+  top: 44%;
+  width: 150px;
+  height: 200px;
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(0 12px 20px rgba(23, 57, 60, 0.32));
+  transition: transform 420ms cubic-bezier(0.4, 0, 0.2, 1), opacity 420ms ease-in;
+}
+.lbt-draw-beams {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  z-index: 1;
+  opacity: 0;
+  pointer-events: none;
+}
+.lbt-draw-rays {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  animation: lbt-draw-rays-spin 7s linear infinite;
+}
+/* 每束光是一条从中心向外逐渐变透明的宽光带，而不是硬边细线 */
+.lbt-draw-rays i {
+  position: absolute;
+  left: -9px;
+  bottom: 0;
+  width: 18px;
+  height: 280px;
+  transform-origin: 50% 100%;
+  transform: rotate(calc(var(--i) * 36deg));
+  border-radius: 9px;
+  background: linear-gradient(to top, var(--ray-color, var(--q-color, #cfdcdd)) 0%, transparent 100%);
+  filter: blur(0.8px);
+  opacity: 0.82;
+}
+.lbt-draw[data-quality="gold"] .lbt-draw-beams,
+.lbt-draw[data-quality="rainbow"] .lbt-draw-beams {
+  filter: saturate(1.2) brightness(1.18);
+}
+.lbt-draw.is-beaming .lbt-draw-beams {
+  animation: lbt-draw-beams-in 420ms ease-out both;
+}
+@keyframes lbt-draw-beams-in {
+  0% { opacity: 0; }
+  60% { opacity: 1; }
+  100% { opacity: 0.82; }
+}
+@keyframes lbt-draw-rays-spin {
+  to { transform: rotate(360deg); }
+}
+
+.lbt-draw-halo {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 300px;
+  height: 300px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.95) 0 12%,
+    rgba(255, 224, 140, 0.9) 30%,
+    var(--q-color, #ffb020) 48%,
+    transparent 72%
+  );
+  opacity: 0;
+  z-index: 2;
+  pointer-events: none;
+  box-shadow: 0 0 50px 16px rgba(255, 176, 32, 0.25);
+}
+.lbt-draw.is-revealed .lbt-draw-halo {
+  animation: lbt-draw-halo 1.6s ease-out both, lbt-draw-halo-pulse 1.4s ease-in-out 0.2s infinite;
+}
+@keyframes lbt-draw-halo {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+  60% { opacity: 0.9; transform: translate(-50%, -50%) scale(1.06); }
+  100% { opacity: 0.75; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes lbt-draw-halo-pulse {
+  50% { opacity: 0.55; }
+}
+
+.lbt-draw-card {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  perspective: 900px;
+}
+.lbt-draw-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.lbt-draw.is-flipped .lbt-draw-inner { transform: rotateY(180deg); }
+.lbt-draw-face {
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  backface-visibility: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.7);
+  background: #fff;
+}
+.lbt-draw-back {
+  background:
+    radial-gradient(circle at 50% 42%, rgba(217, 180, 90, 0.28), transparent 58%),
+    #3b4345;
+  box-shadow: inset 0 0 0 7px #3b4345, inset 0 0 0 9px #d9b45a;
+}
+.lbt-draw-back::after {
+  content: "";
+  position: absolute;
+  inset: 22px;
+  border: 2px solid #d9b45a;
+  border-radius: 7px;
+  box-shadow: inset 0 0 0 2px rgba(217, 180, 90, 0.22);
+}
+.lbt-draw-front { transform: rotateY(180deg); background: #d7f4f4; }
+.lbt-draw-front img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: transparent;
+  transition: filter 360ms ease, opacity 360ms ease;
+}
+.lbt-draw-shine {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 32%, rgba(255, 255, 255, 0.9) 48%, transparent 62%);
+  transform: translateX(-130%);
+  pointer-events: none;
+}
+.lbt-draw.is-revealed .lbt-draw-shine { animation: lbt-draw-shine 900ms ease-out; }
+@keyframes lbt-draw-shine {
+  to { transform: translateX(130%); }
+}
+
+/* 金 / 彩卡：剪影阶段 —— 卡面底色保持正常浅蓝，角色像素变黑、保留透明度 */
+.lbt-draw.is-silhouette .lbt-draw-front {
+  background: #d7f4f4;
+}
+.lbt-draw.is-silhouette .lbt-draw-front img {
+  filter: brightness(0);
+  opacity: 1;
+}
+
+.lbt-draw-intro {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 10px);
+  width: 260px;
+  transform: translateX(-50%);
+  padding: 6px 9px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 9px;
+  background: rgba(23, 57, 60, 0.58);
+  backdrop-filter: blur(2px);
+  text-align: center;
+  opacity: 0;
+  z-index: 4;
+  pointer-events: none;
+  transition: opacity 260ms ease;
+}
+.lbt-draw-intro b {
+  display: block;
+  font-family: var(--font-hand);
+  font-size: 20px;
+  letter-spacing: 0.08em;
+  color: #fff;
+  text-shadow: 0 2px 8px rgba(23, 57, 60, 0.75);
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 320ms ease, transform 320ms ease;
+}
+.lbt-draw-intro p {
+  margin: 3px 0 0;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 1px 6px rgba(23, 57, 60, 0.8);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.lbt-draw.is-intro .lbt-draw-intro,
+.lbt-draw.is-revealed .lbt-draw-intro { opacity: 1; }
+.lbt-draw.is-silhouette .lbt-draw-intro b { opacity: 0; }
+.lbt-draw.is-revealed .lbt-draw-intro b { opacity: 1; transform: none; }
+
+.lbt-draw.is-flying {
+  opacity: 0;
+  transform: translate(calc(-50% + var(--fly-x, 0px)), calc(-50% + var(--fly-y, 0px))) scale(0.16);
+  transition: transform 420ms cubic-bezier(0.4, 0, 0.2, 1), opacity 420ms ease-in;
+}
+
+/* 手牌卡外层：卡牌按钮 + 独立的放大镜按钮（避免嵌套按钮） */
+.lbt-hand-card-wrap {
+  position: relative;
+  min-width: 0;
+}
+.lbt-hand-card-wrap .lbt-hand-card {
+  width: 100%;
+  height: 100%;
+}
+.lbt-hand-card-wrap .lbt-hc-mag {
+  z-index: 2;
+  right: 4px;
+  bottom: 4px;
+}

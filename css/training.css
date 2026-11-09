@@ -924,12 +924,13 @@
   top: 1px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 6px;
   z-index: 3;
 }
 .tbt-unit[data-side="ally"] .tbt-statuses { left: -20px; }
 .tbt-unit[data-side="enemy"] .tbt-statuses { right: -20px; }
 .tbt-status-ico {
+  position: relative;
   width: 17px;
   height: 17px;
   display: grid;
@@ -952,6 +953,27 @@
 .tbt-status-ico.is-buff { background: #fff8e6; border-color: #f0cf8a; color: #8a5c00; }
 .tbt-status-ico.is-invincible { background: #f3e8ff; border-color: #c9a6f0; color: #5b2f8a; }
 .tbt-status-ico.is-more { background: #eef7f7; color: var(--ink-3); border-style: dashed; }
+
+/* 叠加类效果：图标右下角圆圈里的层数 */
+.tbt-status-count {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  min-width: 12px;
+  height: 12px;
+  padding: 0 2px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 1px solid #fff;
+  background: #17393c;
+  color: #fff;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 1px 2px rgba(23, 57, 60, 0.35);
+  pointer-events: none;
+}
 
 /* 行动相关高亮 */
 .tbt-unit.is-acted { opacity: 0.52; filter: grayscale(0.55); }
