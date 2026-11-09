@@ -1199,7 +1199,14 @@ export function createBattle(setup) {
         if (!allowSameName && blockedNames.has(card.name || card.id)) continue;
         candidates.push(j);
       }
-      // 剩下的全是同名 / 不可抽的卡：这次不抽
+      // 允许同名时，即使剩下的卡名字都已在手牌 / 场上，也直接在当前牌库中抽；
+      // 每张牌仍按牌库下标等概率命中，不因为同名而降低重复卡概率。
+      if (!candidates.length && allowSameName) {
+        for (let j = 0; j < deck.length; j += 1) {
+          if (registry.getUnit(deck[j])) candidates.push(j);
+        }
+      }
+      // 只有「不允许同名」且全是同名 / 不可抽的卡时，这次才不抽
       if (!candidates.length) break;
       // 随机抽：双方即使拿到同一份牌库，也不会按同一顺序抽到同样的牌
       const pick = candidates[Math.floor(rng() * candidates.length)];
