@@ -341,22 +341,65 @@
     <section class="subpage-body">
       <p class="mod-hint">
         这里只清除当前站点在浏览器里保存的数据；服务器上的 <code>mods/</code>、<code>data/</code>、<code>assets/</code> 文件不会被删除。
+        可以按类别单独清除，也可以一次清空全部。
       </p>
       <div class="settings-list">
         <article class="settings-card">
-          <h2>浏览器数据</h2>
-          <p>清除后，这台设备的浏览器里会删除：</p>
-          <ul>
-            <li>编辑器工程、草稿与删除标记</li>
-            <li>本地导入的模组、启用 / 停用状态</li>
-            <li>训练场 / 同屏的设置、当前阵容与已保存卡组 / ban 卡组</li>
-            <li>导出临时备份、页面缓存（Cache Storage / IndexedDB）</li>
-          </ul>
+          <h2>浏览器本地数据</h2>
+          <p>卡面等资源在第一次用到之后才会缓存，不会在首次打开时全部下载。</p>
+
+          <div class="settings-rows">
+            <div class="settings-row">
+              <div class="settings-row-main">
+                <b>缓存图片</b>
+                <p>卡面 / 技能图标 / 效果图标。清除后下次打开会重新从卡包解出。</p>
+                <span class="settings-usage" id="settings-usage-images">读取中…</span>
+              </div>
+              <button class="btn small danger" type="button" data-clear="images">清除</button>
+            </div>
+
+            <div class="settings-row">
+              <div class="settings-row-main">
+                <b>卡组 / 阵容</b>
+                <p>训练场的卡组与设置、同屏的 ban 卡组与设置。</p>
+                <span class="settings-usage" id="settings-usage-decks">读取中…</span>
+              </div>
+              <button class="btn small danger" type="button" data-clear="decks">清除</button>
+            </div>
+
+            <div class="settings-row">
+              <div class="settings-row-main">
+                <b>加载的卡包</b>
+                <p>从服务器下载并解析过的模组缓存；清除后下次打开会重新下载 / 解压。</p>
+                <span class="settings-usage" id="settings-usage-packs">读取中…</span>
+              </div>
+              <button class="btn small danger" type="button" data-clear="packs">清除</button>
+            </div>
+
+            <div class="settings-row">
+              <div class="settings-row-main">
+                <b>本地导入的模组</b>
+                <p>自己导入的 ZIP / JSON 模组，以及它们的启用 / 停用状态。</p>
+                <span class="settings-usage" id="settings-usage-localmods">读取中…</span>
+              </div>
+              <button class="btn small danger" type="button" data-clear="localmods">清除</button>
+            </div>
+
+            <div class="settings-row">
+              <div class="settings-row-main">
+                <b>编辑器草稿</b>
+                <p>编辑器工程、当前卡包、导出临时备份与折叠状态。</p>
+                <span class="settings-usage" id="settings-usage-editor">读取中…</span>
+              </div>
+              <button class="btn small danger" type="button" data-clear="editor">清除</button>
+            </div>
+          </div>
+
           <p class="settings-usage" id="settings-usage">本地存储：读取中…</p>
           <div class="settings-actions">
             <button class="btn small danger" id="settings-clear" type="button">清除所有浏览器数据</button>
           </div>
-          <p class="settings-note">清除后会自动重新载入，并重新读取服务器上的默认模组；服务器文件不受影响。</p>
+          <p class="settings-note">「清除所有浏览器数据」会连同上面各项一起删除并重新载入页面；服务器文件始终不受影响。</p>
         </article>
       </div>
     </section>
@@ -439,7 +482,6 @@
         <div class="tbt-center">
           <div class="tbt-turn" id="tb-turn" data-side="red">
             <b id="tb-turn-side">红方行动</b>
-            <small id="tb-turn-hint">选择 1 个未行动单位</small>
           </div>
           <div class="tbt-log" id="tb-log" aria-live="polite"></div>
         </div>
@@ -575,13 +617,11 @@
             <span class="tbt-badge" id="pb-red-badge"></span>
           </header>
           <div class="tbt-zone"><div class="tbt-grid" id="pb-red-grid"></div></div>
-          <button class="lbt-hand-btn" id="pb-red-hand" type="button">手牌 <b>0</b></button>
         </section>
 
         <div class="tbt-center">
           <div class="tbt-turn" id="pb-turn" data-side="red">
             <b id="pb-turn-side">红方行动</b>
-            <small id="pb-turn-hint">选择 1 个未行动单位</small>
           </div>
           <div class="tbt-log" id="pb-log" aria-live="polite"></div>
         </div>
@@ -593,7 +633,6 @@
             <span class="tbt-badge" id="pb-blue-badge"></span>
           </header>
           <div class="tbt-zone"><div class="tbt-grid" id="pb-blue-grid"></div></div>
-          <button class="lbt-hand-btn" id="pb-blue-hand" type="button">手牌 <b>0</b></button>
         </section>
       </div>
 
@@ -621,8 +660,13 @@
 
       <!-- 战斗结果 -->
       <div class="tbt-modal tbt-result" id="pb-result" hidden></div>
+      <div class="tbt-modal" id="pb-detail" hidden></div>
       <div class="tw-toast" id="pb-toast" hidden></div>
     </div>
+
+    <!-- 手牌按钮：固定在屏幕左右下角，不占卡区（移动端竖排也稳定） -->
+    <button class="lbt-hand-btn" id="pb-red-hand" type="button">手牌 <b>0</b></button>
+    <button class="lbt-hand-btn" id="pb-blue-hand" type="button">手牌 <b>0</b></button>
   </main>
 
   
