@@ -107,6 +107,8 @@ export function openBattle({ registry, config, onExit }) {
     resultShown: false,
     aiStall: 0,
     aiStalled: false,
+    /** 已结算但还没播完退场动画的单位：刷新时先留在场上 */
+    deathPending: new Set(),
   };
 
   page.hidden = false;
@@ -226,6 +228,7 @@ export function openBattle({ registry, config, onExit }) {
     if (s.destroyed) return;
     s.destroyed = true;
     clearTimers();
+    s.deathPending.clear();
     s.fx?.destroy();
     s.scaler?.destroy();
     window.removeEventListener("hashchange", onHash);
@@ -386,7 +389,9 @@ export function openBattle({ registry, config, onExit }) {
               : "";
             return `<button class="tbt-status-ico ${st.cls}" type="button" data-uid="${escapeHtml(
               pub.uid
-            )}" title="${escapeHtml(st.title)}"${style}>${escapeHtml(st.glyph)}</button>`;
+            )}" title="${escapeHtml(st.title)}"${style}>${escapeHtml(st.glyph)}${
+              st.count ? `<span class="tbt-status-count" aria-hidden="true">${escapeHtml(String(st.count))}</span>` : ""
+            }</button>`;
           })
           .join("") +
           (statuses.length > 5
@@ -440,6 +445,8 @@ export function openBattle({ registry, config, onExit }) {
         cls: polarity === "negative" ? "is-bad" : polarity === "special" ? "is-special" : "is-good",
         color: custom || "",
         textColor: custom ? contrastOn(custom) : "",
+        // 叠加类效果在图标右下角圆圈里标层数
+        count: def?.stackable ? Math.max(1, Math.floor(Number(layer.stacks) || 1)) : 0,
         title: `${def?.name || layer.id}${def?.stackable ? ` ${layer.stacks} 层` : ""} · ${EFFECT_POLARITY_LABEL[polarity]}`,
       });
     }
@@ -520,7 +527,7 @@ export function openBattle({ registry, config, onExit }) {
   function syncUnits() {
     if (s.destroyed || !s.battle) return;
     const pb = s.battle.publicBattle();
-    const alive = pb.units.filter((u) => u.state === "alive");
+    const alive = pb.units.filter((u) => u.state === "alive" || s.deathPending.has(u.uid));
     for (const side of ["ally", "enemy"]) {
       const grid = side === "ally" ? refs.redGrid : refs.blueGrid;
       if (!grid) continue;
@@ -546,6 +553,7 @@ export function openBattle({ registry, config, onExit }) {
           wrap.classList.add("is-enter");
           setTimeout(() => wrap.classList.remove("is-enter"), 420);
         }
+        if (s.deathPending.has(pub.uid) && pub.state !== "alive") continue;
         updateCard(wrap, pub);
       }
       layoutZone(side);
@@ -603,16 +611,8 @@ export function openBattle({ registry, config, onExit }) {
     }
     if (refs.turn) {
       refs.turn.dataset.side = sideKey(side);
-      if (refs.turnSide) refs.turnSide.textContent = `${sideName(side)}行动`;
-      if (refs.turnHint) {
-        refs.turnHint.textContent =
-          pb.status !== "running"
-            ? "战斗结束"
-            : pb.phase === "select"
-              ? isHumanSide(side)
-                ? "选择 1 个未行动单位"
-                : "人机正在选择"
-              : "使用技能 / 结束行动";
+      if (refs.turnSide) {
+        refs.turnSide.textContent = pb.status === "running" ? `${sideName(side)}行动` : "战斗结束";
       }
     }
   }
@@ -650,7 +650,7 @@ export function openBattle({ registry, config, onExit }) {
         .filter((u) => u.side === side && u.state === "alive" && !u.acted)
         .sort((a, b) => Math.abs(a.slot) - Math.abs(b.slot));
       el.innerHTML = `
-        <div class="tbt-act-hint"><b>${sideName(side)}行动</b> · 选择 1 个本回合还没行动的单位（点卡牌也行）</div>
+        <div class="tbt-act-hint"><b>${sideName(side)}行动</b></div>
         <div class="tbt-skills">
           ${units
             .map(
@@ -690,6 +690,14 @@ export function openBattle({ registry, config, onExit }) {
            <b>取消技能</b><span>返回选择技能</span>
          </button>`
       : "";
+    // 选中技能时在行动选择区展示技能描述
+    const pendingSkill = s.pending ? skills[s.pending.index] : null;
+    const skillDesc = pendingSkill
+      ? `<div class="tbt-skill-desc" role="note">
+           <b>${escapeHtml(pendingSkill.name)}</b>
+           <span>${escapeHtml(pendingSkill.description || "这个技能还没有填写描述。")}</span>
+         </div>`
+      : "";
     const targetTip = s.pending
       ? `<div class="tbt-act-hint"><b>选择目标</b> · 点击${sideName(
           active.side === "ally" ? "enemy" : "ally"
@@ -706,6 +714,7 @@ export function openBattle({ registry, config, onExit }) {
         <button class="btn tiny" type="button" data-info="${escapeHtml(active.uid)}">数据</button>
       </div>
       ${targetTip}
+      ${skillDesc}
       <div class="tbt-skills">${skillButtons || `<span class="tbt-act-hint">没有主动技能</span>`}${cancelSkillButton}</div>
       <button class="tbt-end" type="button" data-end>结束行动</button>`;
   }
@@ -1100,6 +1109,11 @@ export function openBattle({ registry, config, onExit }) {
 
   async function playEvents(events) {
     if (!events || !events.length) return;
+    // 引擎同步结算时已经把人打死了，但 UI 还没播到退场：先别让刷新把卡删掉，
+    // 附加伤害（DOT）击杀时才会正常显示冲击、跳字和退场动画。
+    for (const ev of events) {
+      if (ev && ev.type === "death" && ev.unit) s.deathPending.add(ev.unit);
+    }
     // 同一次「攻击」积木产生的多目标命中共享 attackGroup：整组同时播放。
     // 循环体里的每轮攻击是不同批次，所以仍会一轮一轮依次播放。
     const attackGroups = new Map();
@@ -1203,6 +1217,7 @@ export function openBattle({ registry, config, onExit }) {
           break;
         }
         case "death": {
+          s.deathPending.delete(ev.unit);
           const unit = unitOf(ev.unit);
           const wrap = s.cardEls.get(ev.unit);
           if (wrap) {
@@ -1457,6 +1472,9 @@ export function openBattle({ registry, config, onExit }) {
       const active = activeUnit();
       if (pub && active && pub.side !== active.side && pub.state === "alive") {
         executeSkill(s.pending.index, uid);
+      } else {
+        // 不在当前可选目标范围 → 打开详情
+        openDetail(uid);
       }
       return;
     }

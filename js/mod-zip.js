@@ -129,14 +129,22 @@ function collectImageDir(paths, entries, prefix, label, { createUrls = true, war
     seen.add(key);
     const data = entries.get(path);
     let url = "";
-    if (createUrls && typeof URL !== "undefined" && typeof URL.createObjectURL === "function" && typeof Blob !== "undefined") {
+    let blob = null;
+    if (typeof Blob !== "undefined") {
       try {
-        url = URL.createObjectURL(new Blob([data], { type: imageMime(path) }));
+        blob = new Blob([data], { type: imageMime(path) });
+      } catch {
+        blob = null;
+      }
+    }
+    if (createUrls && blob && typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+      try {
+        url = URL.createObjectURL(blob);
       } catch {
         url = "";
       }
     }
-    list.push({ name, path, key, ext: extOf(path), size: data.length, url });
+    list.push({ name, path, key, ext: extOf(path), size: data.length, url, blob });
     if (url) urls[key] = url;
   }
   list.sort((a, b) => a.key.localeCompare(b.key));

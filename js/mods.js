@@ -40,6 +40,18 @@ import {
 } from "../engine/index.js";
 import { buildModZip, isZipBytes, stemOf, unpackModZip } from "./mod-zip.js";
 import { makePackZip } from "./pack-export.js";
+import {
+  MOD_STORES,
+  artKeyOf,
+  clearPackCache as clearPackCacheDb,
+  readArtForPack,
+  readParsedPack,
+  readAll,
+  writeArtRecord,
+  writeParsedPack,
+  deleteRecord,
+  putRecord,
+} from "./browser-cache.js";
 
 export const MODS_DIR = "mods";
 export const MODS_INDEX = "mods/index.txt";
@@ -54,11 +66,9 @@ const EDITOR_PACK_KEY = "caeworld:editor-pack";
 const EDITOR_PROJECT_KEY = "caeworld:editor-project";
 
 /* 本地导入的 ZIP 模组：localStorage 存不下图片，改用 IndexedDB */
-const ZIP_DB_NAME = "caeworld-mods-zip";
-const ZIP_DB_VERSION = 2;
-const ZIP_STORE = "files";
+const ZIP_STORE = MOD_STORES.FILES;
 /* 服务器模组的浏览器缓存：按 mods/index.txt 的文件名存原始字节，删掉后刷新会重新下载 */
-const SERVER_STORE = "server";
+const SERVER_STORE = MOD_STORES.SERVER;
 const SERVER_CACHE_VERSION = 2;
 
 const clean = (v) => (typeof v === "string" ? v.trim() : "");
@@ -247,71 +257,22 @@ export function normalizeModPackage(raw, { file = "", source = "server", archive
 /* IndexedDB：本地导入的 ZIP 模组 + 服务器模组缓存                       */
 /* ------------------------------------------------------------------ */
 
-function openZipDb() {
-  return new Promise((resolve, reject) => {
-    if (typeof indexedDB === "undefined") {
-      reject(new Error("当前浏览器不支持 IndexedDB，无法保存 ZIP 模组"));
-      return;
-    }
-    const req = indexedDB.open(ZIP_DB_NAME, ZIP_DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(ZIP_STORE)) db.createObjectStore(ZIP_STORE, { keyPath: "name" });
-      if (!db.objectStoreNames.contains(SERVER_STORE)) db.createObjectStore(SERVER_STORE, { keyPath: "name" });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error("无法打开 IndexedDB"));
-    req.onblocked = () =>
-      reject(new Error("IndexedDB 升级被其他页面占用，请关闭其他页面后刷新"));
-  });
-}
-
-function dbRequest(storeName, mode, fn) {
-  return openZipDb().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        let req;
-        const tx = db.transaction(storeName, mode);
-        try {
-          req = fn(tx.objectStore(storeName));
-        } catch (err) {
-          db.close();
-          reject(err);
-          return;
-        }
-        let result;
-        req.onsuccess = () => {
-          result = req.result;
-        };
-        req.onerror = () => reject(req.error || new Error("IndexedDB 操作失败"));
-        tx.oncomplete = () => {
-          db.close();
-          resolve(result);
-        };
-        tx.onabort = () => {
-          db.close();
-          reject(tx.error || new Error("IndexedDB 事务中止"));
-        };
-      })
-  );
-}
-
 function readZipRecords() {
-  return dbRequest(ZIP_STORE, "readonly", (store) => store.getAll()).then((list) =>
+  return readAll(ZIP_STORE).then((list) =>
     (Array.isArray(list) ? list : []).filter((rec) => rec && rec.name && rec.bytes)
   );
 }
 
 function putZipRecord(record) {
-  return dbRequest(ZIP_STORE, "readwrite", (store) => store.put(record));
+  return putRecord(ZIP_STORE, record);
 }
 
 function deleteZipRecord(name) {
-  return dbRequest(ZIP_STORE, "readwrite", (store) => store.delete(name));
+  return deleteRecord(ZIP_STORE, name);
 }
 
 function readServerRecords() {
-  return dbRequest(SERVER_STORE, "readonly", (store) => store.getAll()).then((list) =>
+  return readAll(SERVER_STORE).then((list) =>
     (Array.isArray(list) ? list : []).filter(
       (rec) => rec && rec.name && rec.bytes && rec.version === SERVER_CACHE_VERSION
     )
@@ -319,11 +280,11 @@ function readServerRecords() {
 }
 
 function putServerRecord(record) {
-  return dbRequest(SERVER_STORE, "readwrite", (store) => store.put(record));
+  return putRecord(SERVER_STORE, record);
 }
 
 function deleteServerRecord(name) {
-  return dbRequest(SERVER_STORE, "readwrite", (store) => store.delete(name));
+  return deleteRecord(SERVER_STORE, name);
 }
 
 /* ------------------------------------------------------------------ */
@@ -379,16 +340,147 @@ function cacheMatches(record, info) {
   return true;
 }
 
+/** 缓存校验戳：服务器文件变化时让解析缓存失效 */
+function serverStamp(record) {
+  if (!record) return "";
+  return [record.etag || "", record.lastModified || "", record.size || "", record.fetchedAt || ""].join("|");
+}
+
+function localStamp(record) {
+  if (!record) return "";
+  return String(record.importedAt || (record.bytes && record.bytes.byteLength) || "");
+}
+
+function imageMetaOf(item) {
+  return { name: item.name, path: item.path, key: item.key, ext: item.ext, size: item.size };
+}
+
+/**
+ * 用缓存里的「卡包 JSON + 图片 Blob」重建解包结果，避免再次纯 JS 解压。
+ * 任何一张图片缺失都返回 null，回落到重新解包（保证清掉图片缓存后仍能正常显示）。
+ */
+function restoreZipPack(fileName, meta, art) {
+  if (!meta || !Array.isArray(meta.images) || !meta.icons) return null;
+  const skillMeta = Array.isArray(meta.icons.skill) ? meta.icons.skill : [];
+  const effectMeta = Array.isArray(meta.icons.effect) ? meta.icons.effect : [];
+  const wanted = [
+    ...meta.images.map((item) => ["unit", item]),
+    ...skillMeta.map((item) => ["skill", item]),
+    ...effectMeta.map((item) => ["effect", item]),
+  ];
+  const blobs = new Map();
+  for (const rec of Array.isArray(art) ? art : []) {
+    if (rec && rec.key && rec.blob) blobs.set(rec.key, rec.blob);
+  }
+  for (const [kind, item] of wanted) {
+    if (!item || !blobs.has(artKeyOf(fileName, kind, item.key))) return null;
+  }
+
+  const make = (kind, item) => {
+    const blob = blobs.get(artKeyOf(fileName, kind, item.key));
+    let url = "";
+    try {
+      url = URL.createObjectURL(blob);
+    } catch {
+      return null;
+    }
+    return { ...item, url, blob };
+  };
+  const images = meta.images.map((item) => make("unit", item));
+  const skillIcons = skillMeta.map((item) => make("skill", item));
+  const effectIcons = effectMeta.map((item) => make("effect", item));
+  if ([...images, ...skillIcons, ...effectIcons].some((item) => !item)) {
+    for (const item of [...images, ...skillIcons, ...effectIcons]) {
+      if (item && item.url) {
+        try {
+          URL.revokeObjectURL(item.url);
+        } catch {
+          /* 忽略 */
+        }
+      }
+    }
+    return null;
+  }
+  const toUrls = (list) => Object.fromEntries(list.map((item) => [item.key, item.url]));
+  return {
+    raw: meta.raw,
+    rootDir: meta.rootDir || "",
+    modName: meta.modName || "",
+    jsonPath: meta.jsonPath || "",
+    readme: meta.readme || "",
+    readmePath: meta.readmePath || "",
+    warnings: Array.isArray(meta.warnings) ? meta.warnings : [],
+    fileCount: meta.fileCount || 0,
+    images,
+    imageUrls: toUrls(images),
+    icons: { skill: skillIcons, effect: effectIcons },
+    iconUrls: { skill: toUrls(skillIcons), effect: toUrls(effectIcons) },
+  };
+}
+
+/** 解析成功后把「JSON + 图片 Blob」写进浏览器缓存；写入失败不影响本次使用 */
+function cacheZipPack(fileName, stamp, pack) {
+  if (!fileName || !stamp) return;
+  const meta = {
+    raw: pack.raw,
+    rootDir: pack.rootDir,
+    modName: pack.modName,
+    jsonPath: pack.jsonPath,
+    readme: pack.readme,
+    readmePath: pack.readmePath,
+    warnings: pack.warnings,
+    fileCount: pack.fileCount,
+    images: (pack.images || []).map(imageMetaOf),
+    icons: {
+      skill: ((pack.icons && pack.icons.skill) || []).map(imageMetaOf),
+      effect: ((pack.icons && pack.icons.effect) || []).map(imageMetaOf),
+    },
+  };
+  const writes = [writeParsedPack(fileName, stamp, meta)];
+  const arts = [
+    ...(pack.images || []).map((item) => ["unit", item]),
+    ...(((pack.icons && pack.icons.skill) || []).map((item) => ["skill", item])),
+    ...(((pack.icons && pack.icons.effect) || []).map((item) => ["effect", item])),
+  ];
+  for (const [kind, item] of arts) {
+    if (!item || !item.blob) continue;
+    writes.push(
+      writeArtRecord({
+        key: artKeyOf(fileName, kind, item.key),
+        name: fileName,
+        kind,
+        imageKey: item.key,
+        blob: item.blob,
+        size: item.size || item.blob.size || 0,
+      })
+    );
+  }
+  Promise.all(writes).catch(() => {
+    /* 缓存写不进去（容量 / 隐私模式）时忽略，下次重新解包即可 */
+  });
+}
+
 /** 服务器文件字节 → 模组对象（ZIP / 旧 JSON） */
-function makeServerMod(bytes, fileName) {
-  if (isZipBytes(bytes)) return makeZipMod(bytes, fileName, "server");
+async function makeServerMod(bytes, fileName, stamp = "") {
+  if (isZipBytes(bytes)) return makeZipMod(bytes, fileName, "server", stamp);
   const text = new TextDecoder("utf-8").decode(bytes).replace(/^\uFEFF/, "");
   return normalizeModPackage(JSON.parse(text), { file: fileName, source: "server" });
 }
 
-/** 由 ZIP 字节生成模组（卡面先随对象带着，等合并完再登记，避免服务器 / 本地互相顶掉） */
-function makeZipMod(bytes, fileName, source) {
-  const pack = unpackModZip(bytes, { fileName });
+/** 由 ZIP 字节生成模组：优先用浏览器缓存（不再解压），缓存缺失时才解包并回写 */
+async function makeZipMod(bytes, fileName, source, stamp = "") {
+  let pack = null;
+  if (stamp) {
+    const cached = await readParsedPack(fileName);
+    if (cached && cached.stamp === stamp && cached.meta) {
+      const art = await readArtForPack(fileName);
+      pack = restoreZipPack(fileName, cached.meta, art);
+    }
+  }
+  if (!pack) {
+    pack = unpackModZip(bytes, { fileName });
+    cacheZipPack(fileName, stamp, pack);
+  }
   const mod = normalizeModPackage(pack.raw, {
     file: fileName,
     source,
@@ -484,13 +576,12 @@ export function loadServerMods({ force = false } = {}) {
         if (record && !force) {
           const info = await headServerFile(url);
           if (cacheMatches(record, info)) {
-            mod = makeServerMod(record.bytes, file);
+            mod = await makeServerMod(record.bytes, file, serverStamp(record));
             fromCache = true;
           }
         }
         if (!mod) {
           const got = await readServerFile(url);
-          mod = makeServerMod(got.bytes, file);
           record = {
             name: file,
             bytes: got.bytes,
@@ -500,6 +591,7 @@ export function loadServerMods({ force = false } = {}) {
             fetchedAt: Date.now(),
             version: SERVER_CACHE_VERSION,
           };
+          mod = await makeServerMod(got.bytes, file, serverStamp(record));
           try {
             await putServerRecord(record);
             cached.set(file, record);
@@ -519,7 +611,6 @@ export function loadServerMods({ force = false } = {}) {
         if (fromCache && !missing) {
           try {
             const got = await readServerFile(url);
-            const mod = makeServerMod(got.bytes, file);
             record = {
               name: file,
               bytes: got.bytes,
@@ -529,6 +620,7 @@ export function loadServerMods({ force = false } = {}) {
               fetchedAt: Date.now(),
               version: SERVER_CACHE_VERSION,
             };
+            const mod = await makeServerMod(got.bytes, file, serverStamp(record));
             try {
               await putServerRecord(record);
               cached.set(file, record);
@@ -543,7 +635,7 @@ export function loadServerMods({ force = false } = {}) {
         }
         if (record && record.bytes && !missing) {
           try {
-            mods.push(makeServerMod(record.bytes, file));
+            mods.push(await makeServerMod(record.bytes, file, serverStamp(record)));
             errors.push(`${file}: ${errText(err)}（已使用浏览器缓存）`);
             continue;
           } catch {
@@ -582,7 +674,7 @@ export function loadLocalMods({ force = false } = {}) {
       for (const rec of records) {
         try {
           const bytes = rec.bytes instanceof ArrayBuffer ? rec.bytes : new Uint8Array(rec.bytes).buffer;
-          mods.push(makeZipMod(bytes, rec.name, "local"));
+          mods.push(await makeZipMod(bytes, rec.name, "local", localStamp(rec)));
         } catch (err) {
           errors.push(`${rec.name}: ${errText(err)}`);
         }
@@ -825,14 +917,15 @@ export async function importModFile(file) {
 
   if (isZipBytes(bytes)) {
     const name = zipFileNameOf(file.name || "mod.zip");
+    const importedAt = Date.now();
     let mod;
     try {
-      mod = makeZipMod(bytes, name, "local");
+      mod = await makeZipMod(bytes, name, "local", String(importedAt));
     } catch (err) {
       return { ok: false, error: `ZIP 模组读取失败：${errText(err)}` };
     }
     try {
-      await putZipRecord({ name, bytes, importedAt: Date.now() });
+      await putZipRecord({ name, bytes, importedAt });
     } catch (err) {
       return { ok: false, error: `保存到浏览器失败：${errText(err)}` };
     }

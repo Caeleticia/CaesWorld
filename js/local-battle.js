@@ -27,6 +27,7 @@ import {
 import { createStageScaler, STAGE_DESIGN } from "./training-stage.js";
 import { BattleFX } from "./battle-fx.js";
 import { chooseAISkill, chooseBestDeployCard } from "./battle-ai.js";
+import { createBattleDetail } from "./battle-detail.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const escapeHtml = (s) =>
@@ -80,6 +81,8 @@ export function openLocalBattle({ registry, config, onExit }) {
     effectBarSig: new Map(),
     resultShown: false,
     aiStalled: false,
+    /** 已经结算但还没播完退场动画的单位：刷新时先留在场上，避免「附加伤害击杀时角色突然消失」 */
+    deathPending: new Set(),
     handSide: null,
     handRequired: false,
     refillBusy: false,
@@ -105,6 +108,7 @@ export function openLocalBattle({ registry, config, onExit }) {
     log: $("#pb-log"),
     actions: $("#pb-actions"),
     result: $("#pb-result"),
+    detail: $("#pb-detail"),
     canvas: $("#pb-fx"),
     redHand: $("#pb-red-hand"),
     blueHand: $("#pb-blue-hand"),
@@ -187,6 +191,28 @@ export function openLocalBattle({ registry, config, onExit }) {
   const initialEvents = s.capture || [];
   s.capture = null;
 
+  /* ---------------- 角色详情 ---------------- */
+  const setHandButtonsVisible = (visible) => {
+    if (refs.redHand) refs.redHand.hidden = !visible;
+    if (refs.blueHand) refs.blueHand.hidden = !visible;
+  };
+  const updateHandButtonsVisible = () => {
+    const blocked =
+      detail?.open ||
+      Boolean(refs.handOverlay && !refs.handOverlay.hidden) ||
+      Boolean(refs.result && !refs.result.hidden);
+    setHandButtonsVisible(!blocked);
+  };
+  const detail = createBattleDetail({
+    container: refs.detail,
+    battle: s.battle,
+    registry,
+    onOpenChange: () => {
+      updateHandButtonsVisible();
+      renderHand();
+    },
+  });
+
   /* ---------------- 生命周期 ---------------- */
   const sleep = (ms) => {
     if (s.destroyed) return Promise.resolve();
@@ -210,6 +236,8 @@ export function openLocalBattle({ registry, config, onExit }) {
     if (s.destroyed) return;
     s.destroyed = true;
     clearTimers();
+    detail?.close();
+    s.deathPending.clear();
     s.fx?.destroy();
     s.scaler?.destroy();
     window.removeEventListener("hashchange", onHash);
@@ -246,6 +274,7 @@ export function openLocalBattle({ registry, config, onExit }) {
   if (pbBack) pbBack.onclick = closeToConfig;
 
   function onKey(e) {
+    if (detail?.handleKey(e)) return;
     if (e.key !== "Escape") return;
     if (refs.handOverlay && !refs.handOverlay.hidden) {
       if (!s.handRequired) closeHand();
@@ -364,7 +393,9 @@ export function openLocalBattle({ registry, config, onExit }) {
             const style = st.color
               ? ` style="background:${escapeHtml(st.color)};border-color:${escapeHtml(st.color)};color:${escapeHtml(st.textColor)}"`
               : "";
-            return `<button class="tbt-status-ico ${st.cls}" type="button" data-status-uid="${escapeHtml(pub.uid)}" title="${escapeHtml(st.title)}"${style}>${escapeHtml(st.glyph)}</button>`;
+            return `<button class="tbt-status-ico ${st.cls}" type="button" data-status-uid="${escapeHtml(pub.uid)}" title="${escapeHtml(st.title)}"${style}>${escapeHtml(st.glyph)}${
+              st.count ? `<span class="tbt-status-count" aria-hidden="true">${escapeHtml(String(st.count))}</span>` : ""
+            }</button>`;
           })
           .join("");
       }
@@ -408,6 +439,8 @@ export function openLocalBattle({ registry, config, onExit }) {
         cls: polarity === "negative" ? "is-bad" : polarity === "special" ? "is-special" : "is-good",
         color: custom || "",
         textColor: custom ? "#fff" : "",
+        // 叠加类效果在图标右下角圆圈里标层数
+        count: def?.stackable ? Math.max(1, Math.floor(Number(layer.stacks) || 1)) : 0,
         title: `${def?.name || layer.id}${def?.stackable ? ` ${layer.stacks} 层` : ""} · ${EFFECT_POLARITY_LABEL[polarity]}`,
       });
     }
@@ -493,7 +526,7 @@ export function openLocalBattle({ registry, config, onExit }) {
   function syncUnits() {
     if (s.destroyed || !s.battle) return;
     const pb = s.battle.publicBattle();
-    const alive = pb.units.filter((u) => u.state === "alive");
+    const alive = pb.units.filter((u) => u.state === "alive" || s.deathPending.has(u.uid));
     for (const side of ["ally", "enemy"]) {
       const grid = side === "ally" ? refs.redGrid : refs.blueGrid;
       if (!grid) continue;
@@ -519,6 +552,8 @@ export function openLocalBattle({ registry, config, onExit }) {
           wrap.classList.add("is-enter");
           setTimeout(() => wrap.classList.remove("is-enter"), 420);
         }
+        // 待播退场的卡保持最后一次可见状态，等伤害事件再更新血条
+        if (s.deathPending.has(pub.uid) && pub.state !== "alive") continue;
         updateCard(wrap, pub);
       }
       for (const slot of grid.querySelectorAll(".lbt-slot")) slot.remove();
@@ -573,20 +608,16 @@ export function openLocalBattle({ registry, config, onExit }) {
 
     let statusText = "战斗结束";
     let side = pb.sideTurn;
-    let hint = "";
     if (pb.status === "running") {
       if (pb.phase === "deploy" && pb.localDeploy) {
         side = pb.localDeploy.side;
         statusText = `${sideName(side)}布阵`;
-        hint = pb.localDeploy.initial ? "选择 1~上限 个上场单位" : "场上全灭，选择新的上场单位";
       } else if (pb.phase === "select") {
         const active = activeUnit();
         statusText = active ? `${active.name} 行动中` : `${sideName(side)}行动`;
-        hint = isHumanSide(side) ? "选择 1 个未行动单位" : "人机正在决策";
       } else if (pb.phase === "act") {
         const active = activeUnit();
         statusText = active ? `${active.name} 行动中` : `${sideName(side)}行动中`;
-        hint = "选择技能或结束行动";
       }
     }
     if (refs.status) {
@@ -594,8 +625,16 @@ export function openLocalBattle({ registry, config, onExit }) {
       refs.status.dataset.side = sideKey(side);
     }
     if (refs.turn) refs.turn.dataset.side = sideKey(side);
-    if (refs.turnSide) refs.turnSide.textContent = statusText;
-    if (refs.turnHint) refs.turnHint.textContent = hint;
+    // 中间的行动标题只写「哪一方行动」，不写单位名 / 额外提示
+    if (refs.turnSide) {
+      refs.turnSide.textContent =
+        pb.status === "running" ? (pb.phase === "deploy" ? `${sideName(side)}布阵` : `${sideName(side)}行动`) : "战斗结束";
+    }
+    // 行动区标题只表示「哪一方行动」，不再追加额外提示
+    if (refs.turnHint) {
+      refs.turnHint.textContent = "";
+      refs.turnHint.hidden = true;
+    }
   }
 
   function renderActions() {
@@ -631,7 +670,7 @@ export function openLocalBattle({ registry, config, onExit }) {
       }
       const units = pb.units.filter((u) => u.side === side && u.state === "alive" && !u.acted);
       el.innerHTML = `
-        <div class="tbt-act-hint"><b>${sideName(side)}行动</b> · 选择 1 个本回合还没行动的单位（点卡牌也行）</div>
+        <div class="tbt-act-hint"><b>${sideName(side)}行动</b></div>
         <div class="tbt-skills">
           ${units
             .map(
@@ -668,6 +707,14 @@ export function openLocalBattle({ registry, config, onExit }) {
     const cancelSkillButton = s.pending
       ? `<button class="tbt-skill is-cancel" type="button" data-cancel><b>取消技能</b><span>返回选择技能</span></button>`
       : "";
+    // 选中技能：在行动选择区展示这个技能的描述
+    const pendingSkill = s.pending ? skills[s.pending.index] : null;
+    const skillDesc = pendingSkill
+      ? `<div class="tbt-skill-desc" role="note">
+           <b>${escapeHtml(pendingSkill.name)}</b>
+           <span>${escapeHtml(pendingSkill.description || "这个技能还没有填写描述。")}</span>
+         </div>`
+      : "";
     const targetTip = s.pending
       ? `<div class="tbt-act-hint"><b>选择目标</b> · 点击${sideName(active.side === "ally" ? "enemy" : "ally")}单位</div>`
       : `<div class="tbt-act-hint">选择一个技能，或结束行动</div>`;
@@ -679,8 +726,10 @@ export function openLocalBattle({ registry, config, onExit }) {
           <b>${escapeHtml(active.name)}</b>
           <span>HP ${Math.ceil(active.hp)} / ${Math.ceil(s.battle.statsOf(active).hp)}</span>
         </span>
+        <button class="btn tiny" type="button" data-info="${escapeHtml(active.uid)}">详情</button>
       </div>
       ${targetTip}
+      ${skillDesc}
       <div class="tbt-skills">${skillButtons || `<span class="tbt-act-hint">没有主动技能</span>`}${cancelSkillButton}</div>
       <button class="tbt-end" type="button" data-end>结束行动</button>`;
   }
@@ -726,15 +775,27 @@ export function openLocalBattle({ registry, config, onExit }) {
     const dup =
       !s.config.allowSameName &&
       pub.units.some((u) => u.side === side && u.state === "alive" && u.name === (card.name || card.id));
+    // 放大镜只在布阵时出现；卡牌上场后就不在手牌里了，自然不再显示
+    const showMagnifier = pub.phase === "deploy";
     return `
-      <button class="lbt-hand-card" type="button" data-hand-index="${index}" ${disabled ? "disabled" : ""}
-              title="${escapeHtml(card.name || card.id)}${dup ? " · 同名角色已在场" : ""}">
-        <img src="${escapeHtml(resolveCardImage(card))}" alt="" draggable="false"
-             onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
-        <span class="lbt-hc-name">${escapeHtml(card.name || card.id)}</span>
-        <span class="lbt-hc-meta"><span class="q-tag q-${escapeHtml(card.quality)}">${escapeHtml(q)}</span> HP ${fmt(card.baseHp)} · ATK ${fmt(card.baseAtk)}</span>
-        ${dup ? `<span class="lbt-hc-ban">同名</span>` : ""}
-      </button>`;
+      <div class="lbt-hand-card-wrap">
+        <button class="lbt-hand-card" type="button" data-hand-index="${index}" ${disabled ? "disabled" : ""}
+                title="${escapeHtml(card.name || card.id)}${dup ? " · 同名角色已在场" : ""}">
+          <span class="lbt-hc-art">
+            <img src="${escapeHtml(resolveCardImage(card))}" alt="" draggable="false"
+                 onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
+          </span>
+          <span class="lbt-hc-name">${escapeHtml(card.name || card.id)}</span>
+          <span class="lbt-hc-meta"><span class="q-tag q-${escapeHtml(card.quality)}">${escapeHtml(q)}</span> HP ${fmt(card.baseHp)} · ATK ${fmt(card.baseAtk)}</span>
+          ${dup ? `<span class="lbt-hc-ban">同名</span>` : ""}
+        </button>
+        ${
+          showMagnifier
+            ? `<button class="lbt-hc-mag" type="button" data-mag-index="${index}"
+                 aria-label="查看 ${escapeHtml(card.name || card.id)} 的详情和技能" title="查看详情和技能">🔍</button>`
+            : ""
+        }
+      </div>`;
   }
 
   function renderHand() {
@@ -770,6 +831,7 @@ export function openLocalBattle({ registry, config, onExit }) {
     s.handSide = side;
     s.handRequired = Boolean(opts.required);
     refs.handOverlay.hidden = false;
+    updateHandButtonsVisible();
     renderHand();
   }
 
@@ -782,6 +844,7 @@ export function openLocalBattle({ registry, config, onExit }) {
     s.handSide = null;
     s.handRequired = false;
     if (refs.handOverlay) refs.handOverlay.hidden = true;
+    updateHandButtonsVisible();
   }
 
   async function deployHandCard(index) {
@@ -832,6 +895,7 @@ export function openLocalBattle({ registry, config, onExit }) {
     s.handSide = null;
     s.handRequired = false;
     if (refs.handOverlay) refs.handOverlay.hidden = true;
+    updateHandButtonsVisible();
   }
 
   /* ---------------- 日志 / 特效 ---------------- */
@@ -943,34 +1007,79 @@ export function openLocalBattle({ registry, config, onExit }) {
     await sleep(240);
   }
 
+  /** 抽牌光束颜色：跟品质一致；彩卡用多色渐变，金卡走「先光束 / 剪影 / 再立绘」的完整演出 */
+  const QUALITY_BEAM = {
+    white: "#cfdcdd",
+    blue: "#3aa5f0",
+    gold: "#ffb020",
+    rainbow: "#ff6b8b",
+  };
+
   async function playRefill(ev) {
     const side = ev.side;
     const card = s.registry.getUnit(ev.cardId);
     if (!refs.refillLayer || !card || s.destroyed) return;
     s.refillBusy = true;
-    const center = { x: design.w / 2, y: design.h * 0.44 };
-    s.fx.aura({ x: center.x - 70, y: center.y - 95, w: 140, h: 190 }, {
-      color: side === "ally" ? "#FF6B8B" : "#3AA5F0",
-      kind: "buff",
-      life: 0.9,
-    });
+    const quality = card.quality || "white";
+    const special = quality === "gold" || quality === "rainbow";
+    const color = QUALITY_BEAM[quality] || QUALITY_BEAM.white;
+
+    const rayColor = (i) =>
+      quality === "rainbow" ? `hsl(${i * 36}, 92%, 62%)` : "var(--q-color)";
     const el = document.createElement("div");
-    el.className = "lbt-refill-card";
+    el.className = "lbt-draw";
+    el.dataset.quality = quality;
+    el.style.setProperty("--q-color", color);
     el.innerHTML = `
-      <div class="lbt-refill-inner">
-        <div class="lbt-refill-face lbt-refill-back"></div>
-        <div class="lbt-refill-face lbt-refill-front">
-          <img src="${escapeHtml(resolveCardImage(card))}" alt="" draggable="false"
-               onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
-          <span>${escapeHtml(card.name || card.id)}</span>
+      <div class="lbt-draw-beams" aria-hidden="true">
+        <div class="lbt-draw-rays">
+          ${Array.from({ length: 10 }, (_, i) => `<i style="--i:${i};--ray-color:${rayColor(i)}"></i>`).join("")}
         </div>
+      </div>
+      <div class="lbt-draw-halo" aria-hidden="true"></div>
+      <div class="lbt-draw-card">
+        <div class="lbt-draw-inner">
+          <div class="lbt-draw-face lbt-draw-back"></div>
+          <div class="lbt-draw-face lbt-draw-front">
+            <img src="${escapeHtml(resolveCardImage(card))}" alt="" draggable="false"
+                 onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
+            <span class="lbt-draw-shine" aria-hidden="true"></span>
+          </div>
+        </div>
+      </div>
+      <div class="lbt-draw-intro">
+        <b>${escapeHtml(card.name || card.id)}</b>
+        <p>${escapeHtml(card.description || "来自牌库的相遇。")}</p>
       </div>`;
     refs.refillLayer.append(el);
-    await sleep(140);
+
+    // 1) 先看卡背
+    await sleep(160);
     if (s.destroyed) return;
+
+    // 2) 翻面。金 / 彩卡在翻面时就先变成黑色剪影，避免翻到正面时闪一下原图
+    if (special) el.classList.add("is-silhouette");
     el.classList.add("is-flipped");
-    await sleep(380);
+    await sleep(special ? 520 : 360);
     if (s.destroyed) return;
+
+    // 3) 翻转后出现品质光束
+    el.classList.add("is-beaming");
+    if (special) {
+      // 金 / 彩：翻面后展示角色介绍（不显示名字）
+      el.classList.add("is-intro");
+      await sleep(1000);
+      if (s.destroyed) return;
+      // 4) 恢复原图 + 扩散金色光环 + 显示角色名
+      el.classList.remove("is-silhouette");
+      el.classList.add("is-revealed");
+      await sleep(1000);
+      if (s.destroyed) return;
+    } else {
+      await sleep(420);
+    }
+
+    // 5) 飞进手牌按钮
     const btn = side === "ally" ? refs.redHand : refs.blueHand;
     if (btn) {
       const sp = s.stage.getBoundingClientRect();
@@ -990,6 +1099,11 @@ export function openLocalBattle({ registry, config, onExit }) {
 
   async function playEvents(events) {
     if (!events || !events.length) return;
+    // 引擎已经同步结算完，但 UI 还没播到退场事件：先别在刷新时把卡删掉，
+    // 否则附加伤害（DOT）击杀会看起来「角色莫名其妙地消失」，跳字也无处可落。
+    for (const ev of events) {
+      if (ev && ev.type === "death" && ev.unit) s.deathPending.add(ev.unit);
+    }
     const attackGroups = new Map();
     for (let i = 0; i < events.length; i += 1) {
       const ev = events[i];
@@ -1103,6 +1217,7 @@ export function openLocalBattle({ registry, config, onExit }) {
           break;
         }
         case "death": {
+          s.deathPending.delete(ev.unit);
           const unit = unitOf(ev.unit);
           const wrap = s.cardEls.get(ev.unit);
           if (wrap) {
@@ -1341,6 +1456,7 @@ export function openLocalBattle({ registry, config, onExit }) {
   function showResult() {
     if (s.resultShown || s.destroyed || !refs.result) return;
     s.resultShown = true;
+    detail.close();
     closeForced();
     const pb = s.battle.publicBattle();
     const title = pb.winner === "ally" ? "红方胜利" : pb.winner === "enemy" ? "蓝方胜利" : "平局";
@@ -1370,6 +1486,7 @@ export function openLocalBattle({ registry, config, onExit }) {
         </div>
       </div>`;
     refs.result.hidden = false;
+    updateHandButtonsVisible();
     refs.result.querySelector("[data-again]")?.addEventListener("click", restart);
     refs.result.querySelector("[data-back-config]")?.addEventListener("click", closeToConfig);
   }
@@ -1384,15 +1501,22 @@ export function openLocalBattle({ registry, config, onExit }) {
     if (!uid) return;
     const pb = s.battle.publicBattle();
     const pub = pb.units.find((u) => u.uid === uid);
-    if (s.pending) {
+    if (s.pending && !s.busy) {
       const active = activeUnit();
       if (pub && active && pub.side !== active.side && pub.state === "alive") {
         executeSkill(s.pending.index, uid);
+      } else {
+        // 不在本次行动可选范围（例如友方 / 已行动）→ 点开详情
+        detail.openUnit(uid);
       }
       return;
     }
-    if (s.busy) return;
-    if (canPickUnit(pub || {})) pickUnit(uid);
+    if (canPickUnit(pub || {})) {
+      pickUnit(uid);
+      return;
+    }
+    // 不是当前可选单位也能查看详情（只读，不打断行动）
+    detail.openUnit(uid);
   };
   if (refs.redGrid) refs.redGrid.onclick = onBoardClick;
   if (refs.blueGrid) refs.blueGrid.onclick = onBoardClick;
@@ -1411,9 +1535,15 @@ export function openLocalBattle({ registry, config, onExit }) {
         refreshAll();
         return;
       }
+      const info = event.target.closest("[data-info]");
+      if (info) return detail.openUnit(info.dataset.info);
       const open = event.target.closest("[data-open-hand]");
       if (open) openHand(open.dataset.openHand, { required: true });
     };
+  }
+
+  if (refs.detail) {
+    refs.detail.onclick = (event) => detail.handleClick(event);
   }
 
   function chooseSkill(index) {
@@ -1459,6 +1589,19 @@ export function openLocalBattle({ registry, config, onExit }) {
     };
     if (refs.handCards) {
       refs.handCards.onclick = (event) => {
+        const mag = event.target.closest("[data-mag-index]");
+        if (mag) {
+          event.preventDefault();
+          event.stopPropagation();
+          const side = s.handSide;
+          if (!side) return;
+          const index = Number(mag.dataset.magIndex);
+          const pb = s.battle.publicBattle();
+          const cardId = pb.hand?.[side]?.[index];
+          const card = cardId ? s.registry.getUnit(cardId) : null;
+          if (card) detail.openCard(card, { sideText: sideName(side), subtitle: "手牌" });
+          return;
+        }
         const card = event.target.closest("[data-hand-index]");
         if (!card || card.disabled) return;
         deployHandCard(Number(card.dataset.handIndex));
@@ -1488,6 +1631,7 @@ export function openLocalBattle({ registry, config, onExit }) {
   renderActions();
   updateHeader();
   renderHandButtons();
+  updateHandButtonsVisible();
   s.busy = true;
   (async () => {
     await sleep(120);
