@@ -5,6 +5,8 @@
  *   · 解析技能流程里的「攻击」积木与目标集；
  *   · 用引擎伤害公式估算每个目标实际吃到的伤害（超过目标当前生命的溢出不计）；
  *   · 总伤 = 对敌方的不溢出伤害 − 对友方造成的伤害；
+ *   · 击杀额外加权，但按溢出比例衰减（高额溢出不会比有效伤害更划算）；
+ *   · 持续伤害效果（如数论）按攻击力 / 层数估算真实伤害，不再当成控制；
  *   · 没有伤害时，优先选择能施加效果 / 召唤 / 回复的技能；
  *   · 单体技能会逐个敌人试算，选出实际收益最高的目标。
  *
@@ -43,46 +45,57 @@ export function chooseAISkill(battle, active, registry = null) {
     .filter((x) => x.skill.type === "active");
   if (!skills.length) return null;
 
-  let bestControl = null;
-  let bestDamage = null;
-  let bestEffect = null;
+  // 控制、伤害、效果放到同一把尺子上比较：
+  // 1 点控制 ≈ CONTROL_WEIGHT 点伤害，避免「有控制就永远无视击杀」。
+  const CONTROL_WEIGHT = 120;
+  const EFFECT_WEIGHT = 24;
+  let best = null;
   let fallback = null;
 
   for (const { skill, index } of skills) {
     const profile = profileSkill(battle, active, skill, units, enemies, registry);
-    const candidate = { index, ...profile };
+    const score =
+      profile.controlValue * CONTROL_WEIGHT + profile.damage + profile.effectScore * EFFECT_WEIGHT;
+    const candidate = { index, ...profile, score };
     if (!fallback) fallback = candidate;
-    if (profile.controlValue > 0) {
-      if (
-        !bestControl ||
-        profile.controlValue > bestControl.controlValue + 1e-9 ||
-        (Math.abs(profile.controlValue - bestControl.controlValue) <= 1e-9 && profile.damage > bestControl.damage)
-      ) {
-        bestControl = candidate;
-      }
-    } else if (profile.damage > 0) {
-      if (
-        !bestDamage ||
-        profile.damage > bestDamage.damage + 1e-9 ||
-        (Math.abs(profile.damage - bestDamage.damage) <= 1e-9 && profile.targetHp < bestDamage.targetHp)
-      ) {
-        bestDamage = candidate;
-      }
-    } else if (profile.effectScore > 0) {
-      if (
-        !bestEffect ||
-        profile.effectScore > bestEffect.effectScore ||
-        (profile.effectScore === bestEffect.effectScore && profile.targetHp < bestEffect.targetHp)
-      ) {
-        bestEffect = candidate;
-      }
+    if (
+      !best ||
+      score > best.score + 1e-9 ||
+      (Math.abs(score - best.score) <= 1e-9 && candidate.damage > best.damage + 1e-9) ||
+      (Math.abs(score - best.score) <= 1e-9 &&
+        Math.abs(candidate.damage - best.damage) <= 1e-9 &&
+        candidate.controlValue > best.controlValue + 1e-9) ||
+      (Math.abs(score - best.score) <= 1e-9 &&
+        Math.abs(candidate.damage - best.damage) <= 1e-9 &&
+        Math.abs(candidate.controlValue - best.controlValue) <= 1e-9 &&
+        candidate.targetHp < best.targetHp)
+    ) {
+      best = candidate;
     }
   }
 
-  return bestControl || bestDamage || bestEffect || fallback;
+  return best || fallback;
 }
 
 const QUALITY_SCORE = { white: 0, blue: 50, gold: 140, rainbow: 240 };
+
+/**
+ * 击败加权：单纯按「不溢出伤害」算，100 点伤害打死 100 血敌人只值 100，
+ * 而 900 点伤害打 1000 血敌人值 900，人机会因此回避击杀。
+ * 这里给击杀额外加权，同时用「有效伤害 / 总伤害」的比例衰减：
+ * 同为击杀时，溢出越高加权越低，避免为了 1 个残血单位砸出十倍溢出。
+ */
+const KILL_BONUS = 2400;
+const KILL_MIN_WEIGHT = 0.25;
+
+function scoreEnemyHit(raw, hp) {
+  const damage = Math.max(0, Number(raw) || 0);
+  const life = Math.max(0, Number(hp) || 0);
+  if (!damage || !life) return 0;
+  if (damage <= life) return damage;
+  const efficiency = life / damage; // 1 = 刚好击杀，趋近 0 = 高额溢出
+  return life + KILL_BONUS * (KILL_MIN_WEIGHT + (1 - KILL_MIN_WEIGHT) * efficiency);
+}
 const FLOW_ACTION_NODES = new Set([
   "attack",
   "heal",
@@ -183,17 +196,30 @@ function profileFlowSkill(battle, active, skill, units, registry) {
 
   for (const candidate of candidates) {
     const scan = scanFlow(battle, active, graph, candidate, units);
-    const damage = totalDamage(battle, graph, active, scan.attacks, candidate, units);
-    const metrics = effectMetrics(battle, graph, active, scan.effects, candidate, units, registry);
+    const direct = totalDamage(battle, graph, active, scan.attacks, candidate, units);
+    const metrics = effectMetrics(
+      battle,
+      graph,
+      active,
+      scan.effects,
+      candidate,
+      units,
+      registry,
+      direct.perTarget
+    );
+    const damage = direct.total + metrics.damage;
     const targetHp = candidate ? candidate.hp : 0;
     const priority = candidate ? unitThreat(battle, candidate) : 0;
 
     if (
       !bestControl ||
       metrics.control > bestControl.control + 1e-9 ||
-      (Math.abs(metrics.control - bestControl.control) <= 1e-9 && priority > bestControl.priority)
+      (Math.abs(metrics.control - bestControl.control) <= 1e-9 && damage > bestControl.damage + 1e-9) ||
+      (Math.abs(metrics.control - bestControl.control) <= 1e-9 &&
+        Math.abs(damage - bestControl.damage) <= 1e-9 &&
+        priority > bestControl.priority)
     ) {
-      bestControl = { control: metrics.control, effect: metrics.effect, priority, candidate };
+      bestControl = { control: metrics.control, effect: metrics.effect, priority, damage, candidate };
     }
     if (
       !bestDamage ||
@@ -214,7 +240,7 @@ function profileFlowSkill(battle, active, skill, units, registry) {
   if (bestControl && bestControl.control > 0) {
     result.controlValue = bestControl.control;
     result.effectScore = bestControl.effect;
-    result.damage = bestDamage ? bestDamage.damage : 0;
+    result.damage = bestControl.damage;
     result.targetHp = bestControl.candidate ? bestControl.candidate.hp : 0;
     result.targetUid = result.multi ? null : bestControl.candidate ? bestControl.candidate.uid : null;
   } else if (bestDamage && bestDamage.damage > 0) {
@@ -229,14 +255,18 @@ function profileFlowSkill(battle, active, skill, units, registry) {
   return result;
 }
 
-/** 特殊效果评分：行动开始时跳过行动 / 造成伤害的负面效果优先级最高。 */
+/**
+ * 特殊效果评分。
+ * 只有真正让目标「少行动 / 不能行动」的流程才算控制；
+ * 行动开始时造成伤害的持续伤害（例如数论）不再固定算 5 点控制，
+ * 它的实际伤害由 estimateAttachedEffectDamage() 按攻击力 / 层数估算。
+ */
 function effectCardValue(def) {
   if (!def) return { control: 0, effect: 0.5 };
   let control = 0;
   let effect = 1;
   if (def.polarity === "negative") {
-    // 负面效果本身就是「特殊效果」：即使不是行动触发，也优先于纯伤害
-    control += 2;
+    // 负面效果本身就是「特殊效果」，但不等于控制
     effect += 1;
   }
   if (def.autoConsume) effect += 0.2;
@@ -246,9 +276,10 @@ function effectCardValue(def) {
       const flow = def.flows?.[trigger.id];
       const nodes = flow?.nodes || [];
       if (nodes.some((n) => n.type === "skipTurn")) control += 10;
-      else if (nodes.some((n) => n.type === "attack")) control += 5;
-      else control += 3;
-      effect += 2;
+      else if (nodes.some((n) => n.type === "forceExit")) control += 8;
+      else if (nodes.some((n) => n.type === "attack")) effect += 1;
+      else control += 1;
+      effect += 1;
     } else {
       effect += 1;
     }
@@ -256,10 +287,25 @@ function effectCardValue(def) {
   return { control, effect };
 }
 
-function effectMetrics(battle, graph, active, effects, candidate, units, registry) {
+function effectMetrics(
+  battle,
+  graph,
+  active,
+  effects,
+  candidate,
+  units,
+  registry,
+  directByTarget = new Map()
+) {
   let control = 0;
   let effect = 0;
   let priority = 0;
+  let damage = 0;
+  /** 同一效果对同一目标的多次附加先合并层数，再估算一次持续伤害 */
+  const attached = new Map();
+  const remainingHp = (target) =>
+    Math.max(0, (Number(target?.hp) || 0) - (Number(directByTarget.get(target?.uid)) || 0));
+
   for (const { node, mult } of effects) {
     const targetSource = graph.inSource.get(`${node.id}.targets`);
     const targets = targetSource ? resolveTargets(graph, active, targetSource, candidate, units) : [];
@@ -268,7 +314,10 @@ function effectMetrics(battle, graph, active, effects, candidate, units, registr
       const effectSource = graph.inSource.get(`${node.id}.effectId`);
       const effectId = effectSource ? evalString(graph, active, effectSource, candidate) : node.options?.effectId || "";
       const valueSource = graph.inSource.get(`${node.id}.value`);
-      const layers = Math.max(1, Math.floor(valueSource ? evalNumber(battle, graph, active, valueSource, candidate, units) : 1));
+      const layers = Math.max(
+        1,
+        Math.floor(valueSource ? evalNumber(battle, graph, active, valueSource, candidate, units) : 1)
+      );
       const def = registry?.getEffect(effectId);
       const info = effectCardValue(def);
       // 不可叠层的效果如果目标身上已经有了，再挂一次没有收益；
@@ -277,12 +326,28 @@ function effectMetrics(battle, graph, active, effects, candidate, units, registr
         ? targets.filter((t) => !(t.effects || []).some((e) => e.id === effectId))
         : targets;
       if (def?.polarity === "negative") validTargets = validTargets.filter((t) => t.side !== active.side);
+      // 同一次技能里已经会被直接伤害打死的目标，挂效果没有收益
+      validTargets = validTargets.filter((t) => remainingHp(t) > 0);
       if (!validTargets.length) continue;
-      const count = Math.max(1, validTargets.length);
-      control += info.control * layers * mult * count;
-      effect += info.effect * layers * mult * count;
-      if (info.control > 0) {
-        for (const t of validTargets) priority += unitThreat(battle, t);
+      const stacks = layers * mult;
+      for (const target of validTargets) {
+        control += info.control * stacks;
+        effect += info.effect * stacks;
+        if (info.control > 0) priority += unitThreat(battle, target);
+        if (def && stacks > 0) {
+          const key = `${effectId}\u0000${target.uid}`;
+          const prev = attached.get(key);
+          if (prev) prev.layers += stacks;
+          else {
+            const existing = (target.effects || []).find((e) => e.id === effectId);
+            attached.set(key, {
+              def,
+              target,
+              layers: stacks,
+              existingStacks: Math.max(0, Number(existing?.stacks) || 0),
+            });
+          }
+        }
       }
     } else if (node.type === "summon" || node.type === "summonChild") {
       effect += 2 * mult;
@@ -290,14 +355,333 @@ function effectMetrics(battle, graph, active, effects, candidate, units, registr
       effect += 3 * mult;
     } else if (node.type === "heal") {
       effect += 1 * mult;
-    } else if (node.type === "removeEffect" || node.type === "forceExit" || node.type === "skipTurn" || node.type === "immuneDamage") {
+    } else if (
+      node.type === "removeEffect" ||
+      node.type === "forceExit" ||
+      node.type === "skipTurn" ||
+      node.type === "immuneDamage"
+    ) {
       control += 2 * mult;
       effect += 1 * mult;
     } else {
       effect += 0.5 * mult;
     }
   }
-  return { control, effect, priority };
+
+  for (const { def, target, layers, existingStacks } of attached.values()) {
+    const hp = remainingHp(target);
+    if (hp <= 0) continue;
+    const before = existingStacks > 0
+      ? estimateAttachedEffectDamage(battle, def, active, target, existingStacks, units, hp)
+      : 0;
+    const after = estimateAttachedEffectDamage(
+      battle,
+      def,
+      active,
+      target,
+      existingStacks + layers,
+      units,
+      hp
+    );
+    // 只计算「这次新加的层」带来的增量伤害；已有层数本来就会继续掉血
+    damage += Math.max(0, after - before);
+  }
+  return { control, effect, priority, damage };
+}
+
+/* ------------------------------------------------------------------ */
+/* 持续效果（数论等）的伤害估算                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 估算「挂上某个效果后，它自己会在目标行动开始时造成多少伤害」。
+ * 只处理 unitTurnStart 触发里的攻击积木；层数会按效果流程里的
+ * removeEffect（每次消耗 1 层）逐回合递减，因此总伤害是三角和。
+ *
+ * 例：数论 = 施加者阵营全体攻击力之和 × 层数 × 0.08，行动开始扣 1 层。
+ * 3 层、友方攻击力和 2800 时，实际是 672 + 448 + 224 = 1344，
+ * 旧代码却只把它当成固定的 5 点「控制」，完全没算这笔伤害。
+ */
+function estimateAttachedEffectDamage(battle, def, caster, holder, layers, units, hpOverride = null) {
+  if (!def || !caster || !holder) return 0;
+  const hp = hpOverride == null ? Number(holder.hp) || 0 : Number(hpOverride) || 0;
+  if (hp <= 0) return 0;
+  const rawByTarget = new Map();
+  for (const trigger of def.triggers || []) {
+    if (!trigger || trigger.event !== "unitTurnStart") continue;
+    const flow = def.flows?.[trigger.id];
+    if (!flow) continue;
+    const removesStack = (flow.nodes || []).some((n) => n && n.type === "removeEffect");
+    const maxTicks = removesStack ? Math.max(1, Math.min(20, Math.floor(layers) || 1)) : 1;
+    for (let i = 0; i < maxTicks; i += 1) {
+      const stacks = removesStack ? Math.max(1, (Math.floor(layers) || 1) - i) : Math.max(1, Math.floor(layers) || 1);
+      const tick = runEffectFlowRaw(battle, flow, caster, holder, stacks, units, def.id);
+      for (const [uid, raw] of tick) rawByTarget.set(uid, (rawByTarget.get(uid) || 0) + raw);
+    }
+  }
+  let score = 0;
+  for (const [uid, raw] of rawByTarget) {
+    const target = units.find((u) => u.uid === uid) || (uid === holder.uid ? holder : null);
+    if (!target || target.side === caster.side) continue;
+    const targetHp = uid === holder.uid ? hp : Number(target.hp) || 0;
+    score += scoreEnemyHit(raw, targetHp);
+  }
+  return score;
+}
+
+/** 执行一遍效果的单回合流程，返回每个目标吃到的原始伤害 */
+function runEffectFlowRaw(battle, flow, caster, holder, stacks, units, effectId = "") {
+  const rawByTarget = new Map();
+  const graph = buildGraph(flow);
+  const vars = new Map();
+  const ctx = { caster, holder, stacks, vars, contextUnit: null, units, effectId };
+  const triggers = [...graph.nodes.values()].filter(
+    (n) => n && n.type === "trigger" && n.options?.event === "unitTurnStart"
+  );
+  const start = triggers[0] || [...graph.nodes.values()].find((n) => n && n.type === "trigger");
+  if (!start) return rawByTarget;
+
+  const follow = (nodeId, depth) => {
+    if (!nodeId || depth > 30) return;
+    const node = graph.nodes.get(nodeId);
+    if (!node) return;
+    const next = (port = "next") =>
+      (graph.out.get(node.id) || []).find((link) => link.port === port);
+    const walkNext = (port = "next") => {
+      const link = next(port);
+      if (link) follow(link.to, depth + 1);
+    };
+
+    switch (node.type) {
+      case "declareVariable": {
+        const name = String(node.options?.name || "");
+        if (name) {
+          const type = node.options?.type;
+          vars.set(name, type === "string" ? "" : type === "boolean" ? false : 0);
+        }
+        walkNext();
+        return;
+      }
+      case "setVariable":
+      case "addVariable": {
+        const name = String(node.options?.name || "");
+        const value = evalEffectNumber(battle, graph, ctx, graph.inSource.get(`${node.id}.value`), 0);
+        if (name) {
+          if (node.type === "addVariable") vars.set(name, (Number(vars.get(name)) || 0) + value);
+          else vars.set(name, value);
+        }
+        walkNext();
+        return;
+      }
+      case "forEach": {
+        const list = resolveEffectTargets(
+          graph,
+          ctx,
+          graph.inSource.get(`${node.id}.targets`),
+          0
+        ).slice(0, 20);
+        for (const unit of list) {
+          ctx.contextUnit = unit;
+          const body = next("body");
+          if (body) follow(body.to, depth + 1);
+        }
+        ctx.contextUnit = null;
+        walkNext("end");
+        return;
+      }
+      case "repeatLoop": {
+        const source = graph.inSource.get(`${node.id}.count`);
+        const count = source
+          ? evalEffectNumber(battle, graph, ctx, source, 0)
+          : Number(node.options?.count) || 0;
+        const loops = Math.max(1, Math.min(20, Math.round(count) || 1));
+        for (let i = 0; i < loops; i += 1) {
+          const body = next("body");
+          if (body) follow(body.to, depth + 1);
+        }
+        walkNext("end");
+        return;
+      }
+      case "attack": {
+        const value = evalEffectNumber(
+          battle,
+          graph,
+          ctx,
+          graph.inSource.get(`${node.id}.value`),
+          0
+        );
+        const attrSource = graph.inSource.get(`${node.id}.attribute`);
+        const attribute =
+          (attrSource ? evalEffectString(graph, ctx, attrSource) : "") ||
+          node.options?.attribute ||
+          "physical";
+        const targets = resolveEffectTargets(
+          graph,
+          ctx,
+          graph.inSource.get(`${node.id}.targets`),
+          0
+        );
+        const sourceUnit = resolveEffectTargets(
+          graph,
+          ctx,
+          graph.inSource.get(`${node.id}.source`),
+          0
+        )[0];
+        const attacker = battle.getUnit(sourceUnit?.uid) || battle.getUnit(holder.uid) || caster;
+        for (const target of targets) {
+          const raw = estimateHit(
+            battle,
+            attacker,
+            target,
+            value,
+            attribute,
+            Boolean(node.options?.ignoreReduction),
+            Boolean(node.options?.additional)
+          );
+          rawByTarget.set(target.uid, (rawByTarget.get(target.uid) || 0) + raw);
+        }
+        walkNext();
+        return;
+      }
+      default:
+        // removeEffect / skipTurn / 数据积木等：不影响本次伤害，继续执行链
+        walkNext();
+    }
+  };
+
+  const first = (graph.out.get(start.id) || []).find((link) => link.port === "next");
+  if (first) follow(first.to, 0);
+  return rawByTarget;
+}
+
+/** 效果流程里的数值积木（支持变量、遍历上下文、效果层数） */
+function evalEffectNumber(battle, graph, ctx, nodeId, depth) {
+  if (!nodeId || depth > 20) return 0;
+  const node = graph.nodes.get(nodeId);
+  if (!node) return 0;
+  const source = (port) => graph.inSource.get(`${node.id}.${port}`);
+  const sub = (id) => evalEffectNumber(battle, graph, ctx, id, depth + 1);
+  switch (node.type) {
+    case "number": {
+      if (node.options?.mode === "pi") return Math.PI;
+      if (node.options?.mode === "e") return Math.E;
+      if (node.options?.mode === "range") {
+        const lo = Math.ceil(Number(node.options.min) || 0);
+        const hi = Math.floor(Number(node.options.max) || 0);
+        return hi < lo ? lo : (lo + hi) / 2;
+      }
+      return Number(node.options?.value) || 0;
+    }
+    case "math": {
+      const a = sub(source("a"));
+      const b = sub(source("b"));
+      switch (node.options?.operator) {
+        case "add": return a + b;
+        case "sub": return a - b;
+        case "mul": return a * b;
+        case "div": return b === 0 ? 0 : a / b;
+        case "mod": return b === 0 ? 0 : a % b;
+        case "pos": return Number.isFinite(a ** b) ? a ** b : 0;
+        case "log": return a <= 0 || b <= 0 || a === 1 ? 0 : Math.log(b) / Math.log(a);
+        case "round": return Math.round(a);
+        case "abs": return Math.abs(a);
+        case "ceil": return Math.ceil(a);
+        case "floor": return Math.floor(a);
+        case "max":
+        case "min": {
+          const vals = [a, b];
+          for (let i = 1; i <= 12; i += 1) {
+            const sid = source(`in${i}`);
+            if (sid) vals.push(sub(sid));
+          }
+          return node.options?.operator === "max" ? Math.max(...vals) : Math.min(...vals);
+        }
+        default:
+          return 0;
+      }
+    }
+    case "selfData": {
+      const field = node.options?.field;
+      if (field === "effectStacks") return Math.max(1, Math.floor(ctx.stacks) || 1);
+      return unitStatValue(battle, ctx.holder, field);
+    }
+    case "unitData": {
+      let unit = ctx.contextUnit || ctx.holder;
+      const targetSource = source("unit");
+      if (targetSource) {
+        const list = resolveEffectTargets(graph, ctx, targetSource, depth + 1);
+        if (list[0]) unit = list[0];
+      }
+      return unitStatValue(battle, unit, node.options?.field);
+    }
+    case "readVariable":
+      return Number(ctx.vars.get(String(node.options?.name || ""))) || 0;
+    default:
+      return 0;
+  }
+}
+
+function evalEffectString(graph, ctx, nodeId) {
+  const node = graph.nodes.get(nodeId);
+  if (!node) return "";
+  if (node.type === "string") return String(node.options?.value ?? "");
+  if (node.type === "number") return String(Number(node.options?.value) || 0);
+  if (node.type === "currentEffect") return String(ctx?.effectId || "");
+  return "";
+}
+
+/** 效果流程里的目标集（支持施加者阵营 / 遍历上下文 / 自身） */
+function resolveEffectTargets(graph, ctx, nodeId, depth) {
+  if (!nodeId || depth > 20) return [];
+  const node = graph.nodes.get(nodeId);
+  if (!node) return [];
+  const source = (port) => graph.inSource.get(`${node.id}.${port}`);
+  const units = ctx.units || [];
+  const sideUnits = (side) => units.filter((u) => u.side === side);
+  switch (node.type) {
+    case "targetSide":
+      return sideUnits(node.options?.side === "ally" ? ctx.caster.side : other(ctx.caster.side));
+    case "effectSourceSide": {
+      const includeUncounted = Boolean(node.options?.includeUncounted);
+      return units.filter(
+        (u) => u.side === ctx.caster.side && (includeUncounted || u.countsAsUnit)
+      );
+    }
+    case "effectSource":
+      return ctx.caster ? [ctx.caster] : [];
+    case "selfUnit":
+    case "triggerUnit":
+      return [ctx.holder];
+    case "contextUnit":
+      return ctx.contextUnit ? [ctx.contextUnit] : [];
+    case "currentTarget":
+      return [ctx.holder];
+    case "chooseUnit": {
+      const range = resolveEffectTargets(graph, ctx, source("targets"), depth + 1);
+      if (!range.length) return [];
+      if (node.options?.multiple === false) return [range[0]];
+      return range;
+    }
+    case "setOp": {
+      const a = resolveEffectTargets(graph, ctx, source("a"), depth + 1);
+      const b = resolveEffectTargets(graph, ctx, source("b"), depth + 1);
+      if (node.options?.operator === "union") {
+        const out = a.slice();
+        for (const u of b) if (!out.some((x) => x.uid === u.uid)) out.push(u);
+        return out;
+      }
+      if (node.options?.operator === "diff") return a.filter((u) => !b.some((x) => x.uid === u.uid));
+      return a.filter((u) => b.some((x) => x.uid === u.uid));
+    }
+    case "filterSet":
+      return resolveEffectTargets(graph, ctx, source("targets"), depth + 1);
+    case "getUnit": {
+      const list = resolveEffectTargets(graph, ctx, source("targets"), depth + 1);
+      return list[0] ? [list[0]] : [];
+    }
+    default:
+      return [];
+  }
 }
 
 /** 敌方威胁：未行动优先，其次攻击 / 生命 / 速度 / 主动技能数。 */
@@ -327,18 +711,24 @@ function profileDataSkill(battle, active, skill, units, enemies) {
   let bestEffect = null;
 
   for (const candidate of candidates) {
-    let damage = 0;
+    const perTarget = new Map();
     let effectScore = 0;
     for (const eff of effects) {
       if (eff.kind === "damage") {
         const target = eff.target === "enemy" ? candidate : active;
         if (!target) continue;
         const raw = estimateHit(battle, active, target, value, eff.attribute || "physical", false, false);
-        const capped = Math.min(raw, target.hp);
-        damage += target.side === active.side ? -capped : capped;
+        perTarget.set(target.uid, (perTarget.get(target.uid) || 0) + raw);
       } else {
         effectScore += 1;
       }
+    }
+    let damage = 0;
+    for (const [uid, raw] of perTarget) {
+      const target = units.find((u) => u.uid === uid);
+      if (!target) continue;
+      if (target.side === active.side) damage -= Math.min(raw, target.hp);
+      else damage += scoreEnemyHit(raw, target.hp);
     }
     const targetHp = candidate ? candidate.hp : 0;
     if (
@@ -468,10 +858,10 @@ function totalDamage(battle, graph, active, attacks, candidate, units) {
   for (const [uid, raw] of perTarget) {
     const target = units.find((u) => u.uid === uid);
     if (!target) continue;
-    const capped = Math.min(raw, target.hp);
-    total += target.side === active.side ? -capped : capped;
+    if (target.side === active.side) total -= Math.min(raw, target.hp);
+    else total += scoreEnemyHit(raw, target.hp);
   }
-  return total;
+  return { total, perTarget };
 }
 
 function estimateHit(battle, active, targetPub, value, attribute, ignoreReduction, additional) {
@@ -616,8 +1006,9 @@ function evalNumber(battle, graph, active, nodeId, scopeUnit, units, depth = 0, 
 
 function unitStatValue(battle, unit, field) {
   if (!unit) return 0;
-  if (field === "hp") return Number(unit.hp) || 0;
-  const stats = battle.statsOf(unit);
+  const internal = battle.getUnit(unit.uid) || unit;
+  if (field === "hp") return Number(internal.hp) || 0;
+  const stats = battle.statsOf(internal);
   switch (field) {
     case "atk": return Number(stats.atk) || 0;
     case "def": return Number(stats.def) || 0;
