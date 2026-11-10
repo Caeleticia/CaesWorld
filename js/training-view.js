@@ -20,6 +20,7 @@ import {
 } from "../engine/index.js";
 import { loadContentPacks } from "./mods.js";
 import { createStageScaler } from "./training-stage.js";
+import { onDataCleared } from "./data-events.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -35,10 +36,16 @@ const SIDES = ["red", "blue"];
 const SIDE_LABEL = { red: "红方", blue: "蓝方" };
 const LIB_LABEL = { red: "牌库 1", blue: "牌库 2" };
 
-const PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
+let PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
 const STORAGE_KEY = "caeworld:training:v1";
 const MAX_DECK = 20;
 const MAX_FIELD = 8;
+
+/** 「当前卡组」也存在浏览器里；设置里清掉后要跟着换回默认卡组 */
+function refreshPackContext() {
+  PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
+  if (refs.pack) refs.pack.textContent = `卡组：${PACK}`;
+}
 
 /* ------------------------------------------------------------------ */
 /* 状态                                                                */
@@ -150,6 +157,32 @@ function saveConfig() {
   }
 }
 
+/**
+ * 设置页清掉「卡组 / 阵容」后，内存里的 config 还在，
+ * 不重新读存储的话旧卡组会继续显示，并在下一次改动时被原样写回去。
+ */
+function reloadConfigFromStorage() {
+  const loaded = loadConfig();
+  config = loaded.config;
+  hadStoredConfig = loaded.stored;
+  firstLoad = true;
+  activeSide = config.activeSide === "blue" ? "blue" : "red";
+  syncSettings();
+}
+
+/** 设置页清除数据后的即时同步：卡组配置 / 牌库内容都可能变了 */
+async function applyDataCleared(kind) {
+  if (!page) return;
+  // 「清除全部」会立即重新载入页面；这里不要再回写任何配置
+  if (kind === "all") return;
+  refreshPackContext();
+  if (kind === "decks") reloadConfigFromStorage();
+  // 清掉卡包 / 编辑器草稿后强制重读一次，确保拿到的是更新后的本地版本
+  const force = kind === "editor" || kind === "packs";
+  await refreshLibrary({ force });
+  renderAll();
+}
+
 function makeDeckId() {
   return `deck_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 }
@@ -157,11 +190,11 @@ function makeDeckId() {
 /* ------------------------------------------------------------------ */
 /* 牌库：内容包 + 编辑器本地工程                                        */
 /* ------------------------------------------------------------------ */
-async function loadLibrary() {
+async function loadLibrary({ force = false } = {}) {
   const errors = [];
   let content = null;
   try {
-    content = await loadContentPacks({ includeEditor: true });
+    content = await loadContentPacks({ includeEditor: true, force });
     errors.push(...(content.errors || []));
   } catch (err) {
     errors.push(`牌库读取失败：${String((err && err.message) || err)}`);
@@ -250,6 +283,11 @@ export function initTraining() {
     buildPanels();
     cacheRefs(); // 面板是刚生成的，重新取一次面板内的节点
     bindEvents();
+    onDataCleared((kind) => {
+      applyDataCleared(kind).catch((err) =>
+        console.warn("[训练场] 清除本地数据后同步失败", err)
+      );
+    });
     syncSettings();
     scaler = createStageScaler(page, stage, () => refreshAdaptive());
     page.hidden = false;
@@ -261,10 +299,10 @@ export function initTraining() {
   return initPromise;
 }
 
-async function refreshLibrary() {
+async function refreshLibrary({ force = false } = {}) {
   const hint = $("#training-hint");
   if (hint) hint.textContent = "正在载入牌库…";
-  await loadLibrary();
+  await loadLibrary({ force });
   sanitizeDecks();
   if (firstLoad && !hadStoredConfig) seedDecksIfEmpty();
   firstLoad = false;

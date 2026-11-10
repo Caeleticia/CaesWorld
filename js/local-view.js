@@ -17,6 +17,7 @@ import {
 } from "../engine/index.js";
 import { loadContentPacks } from "./mods.js";
 import { createStageScaler } from "./training-stage.js";
+import { onDataCleared } from "./data-events.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -29,12 +30,18 @@ const fmt = (n) => {
 };
 
 const TABS = ["ban", "settings"];
-const PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
+let PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
 const STORAGE_KEY = "caeworld:local:v2";
 const LEGACY_KEY = "caeworld:local:v1";
 const MAX_FIELD = 8;
 const MAX_HAND = 20;
 const MAX_REFILL = 20;
+
+/** 「当前卡组」也存在浏览器里；设置里清掉后要跟着换回默认卡组 */
+function refreshPackContext() {
+  PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
+  if ($("#play-pack")) $("#play-pack").textContent = `牌库：${PACK}`;
+}
 
 let initPromise = null;
 let scaler = null;
@@ -164,14 +171,40 @@ function saveConfig() {
   }
 }
 
+/**
+ * 设置页清掉「卡组 / 阵容」后，内存里的 config 还在，
+ * 不重新读存储的话旧 ban 卡组会继续显示，并在下一次改动时被原样写回去。
+ */
+function reloadConfigFromStorage() {
+  const loaded = loadConfig();
+  config = loaded.config;
+  hadStoredConfig = loaded.stored;
+  firstLoad = true;
+  activeTab = config.activeSide === "settings" ? "settings" : "ban";
+  syncSettings();
+}
+
+/** 设置页清除数据后的即时同步：ban 卡配置 / 牌库内容都可能变了 */
+async function applyDataCleared(kind) {
+  if (!page) return;
+  // 「清除全部」会立即重新载入页面；这里不要再回写任何配置
+  if (kind === "all") return;
+  refreshPackContext();
+  if (kind === "decks") reloadConfigFromStorage();
+  // 清掉卡包 / 编辑器草稿后强制重读一次，确保拿到的是更新后的本地版本
+  const force = kind === "editor" || kind === "packs";
+  await refreshLibrary({ force });
+  renderAll();
+}
+
 /* ------------------------------------------------------------------ */
 /* 牌库                                                                */
 /* ------------------------------------------------------------------ */
-async function loadLibrary() {
+async function loadLibrary({ force = false } = {}) {
   const errors = [];
   let content = null;
   try {
-    content = await loadContentPacks({ includeEditor: true });
+    content = await loadContentPacks({ includeEditor: true, force });
     errors.push(...(content.errors || []));
   } catch (err) {
     errors.push(`牌库读取失败：${String((err && err.message) || err)}`);
@@ -275,6 +308,11 @@ export function initLocal() {
 
     cacheRefs();
     bindEvents();
+    onDataCleared((kind) => {
+      applyDataCleared(kind).catch((err) =>
+        console.warn("[同屏] 清除本地数据后同步失败", err)
+      );
+    });
     syncSettings();
     scaler = createStageScaler(page, stage, () => {
       refreshAdaptive();
@@ -289,10 +327,10 @@ export function initLocal() {
   return initPromise;
 }
 
-async function refreshLibrary() {
+async function refreshLibrary({ force = false } = {}) {
   const hint = $("#play-hint");
   if (hint) hint.textContent = "正在载入牌库…";
-  await loadLibrary();
+  await loadLibrary({ force });
   sanitizeConfig();
   seedUnavailableBans();
   firstLoad = false;

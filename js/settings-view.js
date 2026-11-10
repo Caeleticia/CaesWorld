@@ -5,7 +5,7 @@
  *   缓存图片 / 卡组阵容 / 加载的卡包 / 本地导入模组 / 编辑器草稿 / 全部。
  *
  * 注意：这里不会、也无法删除服务器上的 mods/、data/、assets/ 文件；
- * 清除后重新载入页面会重新从服务器读取默认内容。
+ * 清除后会通知已经载入的页面丢掉内存副本，重新载入页面则重新从服务器读取。
  */
 import {
   clearImageCache,
@@ -14,6 +14,7 @@ import {
   getCacheStats,
 } from "./browser-cache.js";
 import { clearModCache, restoreServerMods } from "./mods.js";
+import { notifyDataCleared } from "./data-events.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -35,7 +36,7 @@ const ACTIONS = {
   },
   packs: {
     title: "清除加载的卡包",
-    desc: "删除从服务器下载并解析过的模组缓存。下次打开会重新下载并解压；本地导入的模组不受影响。",
+    desc: "删除从服务器下载并解析过的模组缓存。已打开的牌库会立即重新下载并解压；本地导入的模组不受影响。",
     ok: "清除卡包缓存",
   },
   localmods: {
@@ -200,7 +201,7 @@ async function refreshUsage() {
     const count = localStorage.length;
     setUsage(
       "#settings-usage",
-      `本地存储：${count} 项，约 ${formatBytes(usedLocalStorageBytes())}。各项可单独清除；清除后刷新页面生效。`
+      `本地存储：${count} 项，约 ${formatBytes(usedLocalStorageBytes())}。各项可单独清除；清除后已打开的页面会同步重置。`
     );
   } catch (err) {
     setUsage("本地存储：当前浏览器不允许读取（" + String((err && err.message) || err) + "）");
@@ -309,6 +310,9 @@ async function clearAllBrowserData() {
     result.errors.push("IndexedDB: " + String((err && err.message) || err));
   }
 
+  // 通知已载入页面取消待写入的自动保存，避免 beforeunload 把旧数据写回来
+  notifyDataCleared("all");
+
   if (result.errors.length) {
     setStatus("部分数据清除失败：" + result.errors[0], "bad");
   } else {
@@ -334,23 +338,23 @@ async function clearCategory(kind) {
     }
     case "decks": {
       const n = removeLocalKeys(DECK_KEYS);
-      return { text: `已清除卡组 / 阵容（${n} 项），刷新页面后生效。` };
+      return { text: `已清除卡组 / 阵容（${n} 项），训练场 / 同屏已重置。` };
     }
     case "packs": {
       const n = await clearPackCache();
       clearModCache();
       restoreServerMods();
-      return { text: `已清除加载的卡包缓存（${n} 条），下次打开会重新下载。` };
+      return { text: `已清除加载的卡包缓存（${n} 条），牌库会重新下载。` };
     }
     case "localmods": {
       const n = removeLocalKeys(LOCAL_MOD_KEYS);
       const nZip = await clearLocalZipCache();
       clearModCache();
-      return { text: `已清除本地导入的模组（ZIP ${nZip} 个 · 设置 ${n} 项）。` };
+      return { text: `已清除本地导入的模组（ZIP ${nZip} 个 · 设置 ${n} 项），牌库已重新读取。` };
     }
     case "editor": {
       const n = removeLocalKeys(EDITOR_KEYS, EDITOR_PREFIXES);
-      return { text: `已清除编辑器草稿（${n} 项），刷新页面后生效。` };
+      return { text: `已清除编辑器草稿（${n} 项），编辑器工程已重置。` };
     }
     default:
       return { text: "没有可清除的数据。" };
@@ -368,6 +372,10 @@ async function runClear(kind) {
   setStatus("正在清除…");
   try {
     const { text } = await clearCategory(kind);
+    // 清完持久化数据后，通知已经载入的页面丢掉内存里的旧副本；
+    // 否则编辑器 / 训练场会在自动保存或切页时把旧数据写回去。
+    // 图片缓存不影响内存里的卡组 / 工程数据，不需要触发重载。
+    if (kind !== "images") notifyDataCleared(kind);
     setStatus(text, "ok");
     await refreshUsage();
   } finally {

@@ -49,10 +49,18 @@ import {
 import { loadContentPacks, DEFAULT_PACK_ID, DEFAULT_PACK_NAME, EDITOR_PACK_ID, EDITOR_PACK_NAME } from "./mods.js";
 import { isZipBytes, unpackModZip } from "./mod-zip.js";
 import { applyPackImagesToCards, applyPackImagesToUnits, makePackZip } from "./pack-export.js";
+import { onDataCleared } from "./data-events.js";
 
 /** 卡组：编辑器工程按卡组存 localStorage；内容来自单文件模组（mods/） */
-const PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
-const STORAGE_KEY = `caeworld:editor-project:${PACK}`;
+let PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
+let STORAGE_KEY = `caeworld:editor-project:${PACK}`;
+
+/** 「当前卡组」也存在浏览器里；设置里清掉后要跟着换回默认卡组 */
+function refreshPackContext() {
+  PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
+  STORAGE_KEY = `caeworld:editor-project:${PACK}`;
+}
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
@@ -92,6 +100,9 @@ function setProject(p) {
   switchTab("character");
 }
 let dirty = false;
+let initialized = false;
+/** 「清除所有浏览器数据」后页面马上重载：这段时间禁止任何自动保存把旧工程写回 */
+let savesSuppressed = false;
 let saveTimer = 0;
 const catalog = buildFlowCatalog();
 
@@ -139,9 +150,10 @@ function loadProject() {
  * 把「默认包 + 已启用的模组」里的卡补进工程（按 id 去重，已有编辑不会被覆盖）。
  * 新模组启用后重新打开编辑器就能看到；删除过的卡记在 removed*Ids 里，不会被补回。
  */
-async function hydrateFromPacks() {
+async function hydrateFromPacks({ force = false } = {}) {
+  const before = JSON.stringify(project);
   try {
-    const res = await loadContentPacks({ includeEditor: false });
+    const res = await loadContentPacks({ includeEditor: false, force });
     // 停用模组后，工程里属于该模组的卡也移除
     const disabledPacks = new Set(res.disabledPackIds || []);
     if (disabledPacks.size) {
@@ -229,14 +241,59 @@ async function hydrateFromPacks() {
       `卡包：${defaultLoaded ? "默认包 + " : ""}${modCount} 个模组 · 角色 ${project.characters.length} · 技能 ${project.skills.length} · 效果 ${project.effects.length}`,
       "ok"
     );
-    return true;
+    return { ok: true, changed: JSON.stringify(project) !== before };
   } catch (err) {
     setStatus("卡包读取失败：" + err.message, "bad");
-    return false;
+    return { ok: false, changed: false };
+  }
+}
+
+/** 丢弃还没落盘的自动保存，避免清除后又被定时器写回旧工程 */
+function cancelPendingSave() {
+  clearTimeout(saveTimer);
+  saveTimer = 0;
+  dirty = false;
+}
+
+/** 「清除全部」后页面即将重载：连之后的自动保存 / beforeunload 也一并禁止 */
+function suppressPendingSaves() {
+  savesSuppressed = true;
+  cancelPendingSave();
+}
+
+/**
+ * 设置页清掉当前卡组（编辑器工程）后，重新从存储载入。
+ * 关键点：先取消待写入的自动保存，否则旧工程会在 400ms 后又被写回 localStorage。
+ */
+async function reloadEditorFromStorage() {
+  cancelPendingSave();
+  refreshPackContext();
+  project = loadProject();
+  normalizeProject(project);
+  project.pack = PACK;
+  if (!project.characters.length) project.characters.push(createCharacter());
+  active = {
+    tab: "character",
+    character: project.characters[0] || null,
+    skill: (project.skills || [])[0] || null,
+    effect: (project.effects || [])[0] || null,
+    triggerId: null,
+    editPack: "all",
+    packId: null,
+  };
+  if (!initialized) return;
+  switchTab("character");
+  renderAll();
+  // 工程刚被清空：强制重新下载卡包再补回，确保读到的是本地更新版而不是旧缓存
+  const res = await hydrateFromPacks({ force: true });
+  if (res.ok) {
+    renderAll();
+    if (res.changed) flushSave();
   }
 }
 
 function markDirty() {
+  if (savesSuppressed) return;
   dirty = true;
   setStatus("编辑中…", "");
   clearTimeout(saveTimer);
@@ -244,6 +301,7 @@ function markDirty() {
 }
 
 function flushSave() {
+  if (savesSuppressed) return false;
   project.updatedAt = new Date().toISOString();
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(project));
@@ -3495,12 +3553,13 @@ function exportSnapshot() {
 export { setProject, projectToContent, edit, importContent, flowFromContent, unitCardToCharacter };
 
 /** 模组启用 / 停用后重新汇总卡包（编辑器已经初始化过时用） */
-export async function refreshEditorPacks() {
+export async function refreshEditorPacks({ force = false } = {}) {
   normalizeProject(project);
-  const ok = await hydrateFromPacks();
-  if (ok) {
+  const res = await hydrateFromPacks({ force });
+  if (res.ok) {
     renderAll();
-    markDirty();
+    // 只有真的补进了卡才写盘；否则每次打开编辑器都会把旧工程再保存一遍
+    if (res.changed) markDirty();
   }
 }
 
@@ -3508,22 +3567,44 @@ export async function initEditor() {
   normalizeProject(project);
   if (!project.characters.length) project.characters.push(createCharacter());
   if (!project.pack) project.pack = PACK;
+  // 刚被清空 / 第一次打开的工程：强制重读一次卡包，避免直接从旧缓存补回旧版卡
+  const freshProject =
+    !project.updatedAt && !(project.skills || []).length && !(project.effects || []).length;
   if (!currentCharacter()) active.character = project.characters[0] || null;
   if (!currentSkill()) active.skill = (project.skills || [])[0] || null;
   if (!currentEffect()) active.effect = (project.effects || [])[0] || null;
   setupForms();
   setupCanvas();
+  // 设置页清除本地数据后：立即丢弃内存里的旧工程 / 旧卡组，重新从存储和卡包同步
+  onDataCleared((kind) => {
+    if (kind === "editor") {
+      reloadEditorFromStorage().catch((err) =>
+        setStatus("重新同步编辑器失败：" + String((err && err.message) || err), "bad")
+      );
+    } else if (kind === "packs") {
+      refreshEditorPacks({ force: true }).catch((err) =>
+        setStatus("重新读取卡包失败：" + String((err && err.message) || err), "bad")
+      );
+    } else if (kind === "localmods") {
+      refreshEditorPacks().catch((err) =>
+        setStatus("重新读取模组失败：" + String((err && err.message) || err), "bad")
+      );
+    } else if (kind === "all") {
+      suppressPendingSaves();
+    }
+  });
   document.querySelector("#btn-back")?.addEventListener("click", () => {
     if (!dirty) return;
     flushSaveSync();
   });
   switchTab("character");
   renderCharacter();
+  initialized = true;
   // 把默认包 + 已启用模组里的卡补进工程；已有编辑按 id 保留
-  const ok = await hydrateFromPacks();
-  if (ok) {
+  const res = await hydrateFromPacks({ force: freshProject });
+  if (res.ok) {
     renderAll();
-    markDirty();
+    if (res.changed) markDirty();
   }
 }
 
@@ -3938,6 +4019,7 @@ function renderJson() {
 /* 表单事件（角色 / 挂载 / 技能 / 效果 / 导入导出）                       */
 /* ================================================================== */
 function flushSaveSync() {
+  if (savesSuppressed) return;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(project));
   } catch {

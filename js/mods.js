@@ -43,7 +43,6 @@ import { makePackZip } from "./pack-export.js";
 import {
   MOD_STORES,
   artKeyOf,
-  clearPackCache as clearPackCacheDb,
   readArtForPack,
   readParsedPack,
   readAll,
@@ -330,13 +329,19 @@ async function headServerFile(url) {
   }
 }
 
-/** 缓存的校验信息是否仍和服务器一致（没有可比较的校验信息时倾向用缓存） */
+/**
+ * 缓存的校验信息是否仍和服务器一致。
+ * 所有拿得到的校验信息都必须一致才算命中 —— 不能只看第一个：
+ * Android 的 /storage/emulated/0 是 FUSE 挂载，文件内容改了 mtime 也可能不变，
+ * 只看 Last-Modified 会把「大小已经变了」的新包误判成旧缓存。
+ * 没有可比较的校验信息时倾向用缓存（离线 / 不支持 HEAD 的服务器）。
+ */
 function cacheMatches(record, info) {
   if (!info) return true;
   if (info.missing) return false;
-  if (info.etag && record.etag) return info.etag === record.etag;
-  if (info.lastModified && record.lastModified) return info.lastModified === record.lastModified;
-  if (info.size != null && record.size != null) return Number(info.size) === Number(record.size);
+  if (info.etag && record.etag && info.etag !== record.etag) return false;
+  if (info.lastModified && record.lastModified && info.lastModified !== record.lastModified) return false;
+  if (info.size != null && record.size != null && Number(info.size) !== Number(record.size)) return false;
   return true;
 }
 
@@ -846,11 +851,11 @@ function repairDefaultContent(units, skills) {
  * 汇总内容：启用的模组（默认包也是模组）+ 编辑器工程。
  * 同一 id 后面的来源覆盖前面的来源（编辑器优先、本地模组优先于服务器模组）。
  */
-export async function loadContentPacks({ includeEditor = true } = {}) {
+export async function loadContentPacks({ includeEditor = true, force = false } = {}) {
   const errors = [];
   const packs = [];
 
-  const modsRes = await loadAllMods({ includeDisabled: true });
+  const modsRes = await loadAllMods({ includeDisabled: true, force });
   errors.push(...modsRes.errors);
   const disabledMods = modsRes.mods.filter((m) => !m.enabled);
   const disabledModIds = disabledMods.map((m) => m.id);
