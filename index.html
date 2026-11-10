@@ -104,16 +104,16 @@
       <button class="ed-tab" data-tab="packs" type="button">卡包</button>
     </nav>
 
-    <!-- 角色 -->
+    <!-- 角色：桌面/横屏左数据、中挂载、右卡面；移动/竖屏按 1→2→3 纵向堆叠 -->
     <section class="ed-panel" data-panel="character">
-      <div class="ed-columns">
-        <div class="ed-col ed-col-form">
+      <div class="ed-columns ed-columns-character">
+        <div class="ed-col ed-col-identity">
           <div class="list-head">
             <select id="ed-character-list" class="grow" title="选择要编辑的角色"></select>
             <button class="btn small" id="btn-new-character" type="button">新建角色</button>
             <button class="btn small danger" id="btn-delete-character" type="button" data-action="delete-character" disabled>删除角色</button>
           </div>
-          <h2>角色数据</h2>
+          <h2>① 角色名及基础数据</h2>
           <div class="form-grid">
             <label class="form-field"><span>名字</span><input id="f-name" /></label>
             <label class="form-field"><span>id</span><input id="f-id" placeholder="draft_unit_xxx" /><em>扩展包_类型_标识</em></label>
@@ -132,7 +132,6 @@
             <label class="form-field"><span>速度</span><input id="f-speed" type="number" /></label>
             <label class="form-field"><span>标签</span><input id="f-label" placeholder="可选，一个单位一个标签" /></label>
             <label class="form-field form-field-wide"><span>角色介绍</span><textarea id="f-intro" rows="3" placeholder="角色背景 / 设定介绍，会显示在卡牌库的卡牌详情里"></textarea></label>
-            <label class="form-field"><span>卡面图片路径</span><input id="f-image" placeholder="slime.png 或 assets/banner/xxx.png" /><em>默认填卡牌短 id.png（如 slime.png）：先取所属模组 zip 的 images/，找不到再从 assets/picture/cards/ 读；也可填完整路径 / URL</em></label>
           </div>
           <div class="form-row">
             <label class="form-check"><input id="f-occupy" type="checkbox" /> 占位</label>
@@ -147,19 +146,25 @@
             <label>魔法 <input id="f-res-magic" type="number" step="0.01" /></label>
             <label>精神 <input id="f-res-spirit" type="number" step="0.01" /></label>
           </fieldset>
+        </div>
+
+        <div class="ed-col ed-col-mount">
+          <h2>② 挂载技能</h2>
+          <p class="muted">技能由角色为主体执行。不同卡包的技能分栏显示，当前编辑卡包始终在最前；支持搜索、时间 / 名称排序与正倒序切换。</p>
+          <div id="ed-mount-skills"></div>
+        </div>
+
+        <div class="ed-col ed-col-card">
+          <h2>③ 卡面预览、编辑与上传</h2>
+          <div class="card-preview" id="ed-card-preview"></div>
+          <p class="muted" id="ed-unit-stats"></p>
+          <h2>编辑与上传</h2>
+          <label class="form-field"><span>卡面图片路径</span><input id="f-image" placeholder="slime.png 或 assets/banner/xxx.png" /><em>默认填卡牌短 id.png（如 slime.png）：先取所属模组 zip 的 images/，找不到再从 assets/picture/cards/ 读；也可填完整路径 / URL</em></label>
           <div class="form-row">
             <label class="btn small">选择图片<input id="f-image-file" type="file" accept="image/*" hidden /></label>
             <button class="btn small" id="btn-placeholder" type="button">用占位图</button>
           </div>
-        </div>
-
-        <div class="ed-col ed-col-preview">
-          <h2>卡面预览</h2>
           <p class="muted">把模组 zip（modname/modname.json + images/）、卡包 JSON、单张卡或编辑器工程 JSON 拖到这里即可导入继续改。</p>
-          <div class="card-preview" id="ed-card-preview"></div>
-          <p class="muted" id="ed-unit-stats"></p>
-          <h2>挂载技能</h2>
-          <div class="mount-list" id="ed-mount-skills"></div>
         </div>
       </div>
     </section>
@@ -189,9 +194,11 @@
           <div class="flow-head">
             <strong id="flow-title">流程</strong>
             <div class="flow-tools">
-              <button class="btn tiny" id="btn-zoom-out" type="button">－</button>
-              <span id="zoom-label">100%</span>
-              <button class="btn tiny" id="btn-zoom-in" type="button">＋</button>
+              <button class="btn tiny" id="btn-zoom-out" type="button" title="缩小（最小 1%）">－</button>
+              <input class="zoom-input" id="zoom-label" type="number" min="1" max="200" step="1" value="100"
+                     aria-label="画布缩放百分比（1%–200%）" title="缩放百分比：1%–200%（旧版 66% 现在记为 100%）" />
+              <span class="zoom-unit">%</span>
+              <button class="btn tiny" id="btn-zoom-in" type="button" title="放大（最大 200%）">＋</button>
               <button class="btn tiny" id="btn-fit" type="button">适应</button>
               <button class="btn tiny" id="btn-locate" type="button" title="把视角移动到离视口中心最近的积木">定位</button>
               <button class="btn tiny" id="btn-tidy" type="button" title="自动整理积木位置">整理</button>
