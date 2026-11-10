@@ -119,14 +119,19 @@ export function createBattleDetail({ container, battle, registry, onOpenChange }
     const effects = [];
     for (const layer of unit.effects || []) {
       const def = registry.getEffect(layer.id);
+      // 效果层记录了施加者：详情里标出来，方便核对「施加者阵营」类效果按谁结算
+      const srcUnit = layer.sourceId ? unitOf(layer.sourceId) : null;
+      const srcTag = layer.sourceId ? `施加者：${srcUnit ? srcUnit.name : "已离场"}` : "";
       effects.push({
         key: `e:${layer.id}`,
         name: def?.name || layer.id,
         stacks: def?.stackable ? layer.stacks : null,
-        desc: effectDesc(def),
+        desc: srcTag ? `${effectDesc(def)} · ${srcTag}` : effectDesc(def),
         icon: resolveCardIcon(def),
         polarity: effectPolarityOf(def),
         tag: layer.inheritedFrom ? "继承" : "",
+        /** 效果挂载的技能：效果移除后会自动消失 */
+        skillIds: Array.isArray(def?.skillIds) ? def.skillIds.slice() : [],
       });
     }
     for (const buff of unit.buffs || []) {
@@ -381,7 +386,26 @@ export function createBattleDetail({ container, battle, registry, onOpenChange }
       body: `<section class="tbd-section">
         <h4>效果介绍</h4>
         <p class="tbd-entry-desc">${escapeHtml(eff.desc)}</p>
-      </section>`,
+      </section>
+      ${(() => {
+        const mounted = (eff.skillIds || []).map((id) => registry.getSkill(id)).filter(Boolean);
+        if (!mounted.length) return "";
+        return `<section class="tbd-section">
+          <h4>效果挂载技能</h4>
+          <p class="tbd-entry-desc">持有该效果期间临时获得；效果移除后失去。</p>
+          <div class="tbd-skills">${mounted
+            .map(
+              (sk) =>
+                `<button type="button" class="tbd-skill" data-skill-id="${escapeHtml(sk.id)}"
+                  aria-label="查看技能 ${escapeHtml(sk.name)} 的介绍">${
+                    resolveCardIcon(sk)
+                      ? `<img class="tbd-skill-icon" src="${escapeHtml(resolveCardIcon(sk))}" alt="" draggable="false" />`
+                      : ""
+                  }${escapeHtml(sk.name)}<em>${sk.type === "active" ? "主动" : "被动"}</em><span class="tbd-entry-more" aria-hidden="true">介绍 ›</span></button>`
+            )
+            .join("")}</div>
+        </section>`;
+      })()}`,
     });
   }
 

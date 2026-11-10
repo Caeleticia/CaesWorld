@@ -1207,12 +1207,16 @@ export function openBattle({ registry, config, onExit }) {
             addLog(def?.stackable ? `${unit.name} 叠加「${label}」×${ev.stacks}` : `${unit.name} 获得「${label}」`, "is-sys");
           }
           syncUnits();
+          // 效果可能挂载了技能：持有者若正在行动，行动栏的技能列表要立刻跟着变
+          renderActions();
           await sleep(120);
           break;
         }
         case "effect:removed": {
-          // 层数变化 / 移除后立刻刷新进度条，避免已失效的效果还挂在血条上方
+          // 层数变化 / 移除后立刻刷新进度条，避免已失效的效果还挂在血条上方；
+          // 效果挂载的技能也会随效果消失，行动栏一起刷新
           syncUnits();
+          renderActions();
           await sleep(80);
           break;
         }
@@ -1268,8 +1272,13 @@ export function openBattle({ registry, config, onExit }) {
         case "buff:removed":
         case "action:start":
         case "action:skip":
-        case "skill:granted":
           break;
+        case "skill:granted": {
+          // 通过积木「给予技能」临时获得的技能：立刻出现在行动栏里
+          syncUnits();
+          renderActions();
+          break;
+        }
         default:
           break;
       }

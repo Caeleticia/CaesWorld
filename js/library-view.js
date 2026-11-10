@@ -518,6 +518,7 @@ function skillDetail(card) {
   const summary = flowSummary(card.flow);
   const hasActionBlock = nodes.some((n) => n && n.type !== "trigger");
   const related = (data?.units || []).filter((u) => (u.skills || []).includes(card.id));
+  const relatedEffects = (data?.effects || []).filter((e) => (e.skillIds || []).includes(card.id));
   return `${detailHead(
     `技能 · ${type}`,
     card,
@@ -555,6 +556,22 @@ function skillDetail(card) {
           : `<p class="lib-detail-empty">还没有角色挂载这个技能。</p>`
       }
     </section>
+    <section class="lib-detail-section">
+      <h3>关联效果</h3>
+      ${
+        relatedEffects.length
+          ? `<p class="lib-detail-empty">持有这些效果期间会临时获得该技能，效果移除后失去。</p>
+             <div class="lib-detail-chips">${relatedEffects
+               .map(
+                 (eff) =>
+                   `<button type="button" class="lib-detail-linkbtn" data-open-kind="effects" data-open-id="${escapeHtml(
+                     eff.id
+                   )}">${escapeHtml(eff.name || eff.id)}</button>`
+               )
+               .join("")}</div>`
+          : `<p class="lib-detail-empty">还没有效果挂载这个技能。</p>`
+      }
+    </section>
   </div>`;
 }
 
@@ -581,6 +598,9 @@ function effectDetail(card) {
   const color = card.color ? card.color : `自动（${effectColorOf(card)}）`;
   const attrBonus = normalizeEffectAttrBonus(card.attrBonus);
   const triggers = (card.triggers || []).map((t) => TRIGGER_LABEL[t.event] || t.event || "未选择触发");
+  const mountedSkillIds = Array.isArray(card.skillIds) ? card.skillIds : [];
+  const mountedSkills = mountedSkillIds.map((id) => findCard("skills", id)).filter(Boolean);
+  const missingSkills = mountedSkillIds.length - mountedSkills.length;
   return `${detailHead(
     `效果 · ${polarity}`,
     card,
@@ -606,6 +626,18 @@ function effectDetail(card) {
         ${statItem("颜色", color)}
         ${statItem("自动消耗", consume, true)}
       </ul>
+    </section>
+    <section class="lib-detail-section">
+      <h3>挂载技能${mountedSkillIds.length ? `（${mountedSkillIds.length}）` : ""}</h3>
+      ${
+        mountedSkills.length
+          ? `<p class="lib-detail-empty">持有该效果时临时获得；效果移除后失去。</p>
+             <div class="lib-detail-skill-list">${mountedSkills.map(skillDetailItem).join("")}</div>`
+          : missingSkills > 0
+            ? ""
+            : `<p class="lib-detail-empty">没有挂载技能。</p>`
+      }
+      ${missingSkills > 0 ? `<p class="lib-detail-empty">另有 ${missingSkills} 个技能未在当前卡牌库中找到。</p>` : ""}
     </section>
     <section class="lib-detail-section">
       <h3>属性修正</h3>

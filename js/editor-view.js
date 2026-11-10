@@ -95,6 +95,15 @@ let dirty = false;
 let saveTimer = 0;
 const catalog = buildFlowCatalog();
 
+/**
+ * 挂载技能区的界面状态：角色 / 效果各自记住搜索词、排序与正倒序。
+ * 只影响编辑器展示，不写进卡包。
+ */
+const mountUi = {
+  character: { query: "", sort: "time", order: "asc" },
+  effect: { query: "", sort: "time", order: "asc" },
+};
+
 /** 旧工程兼容：技能卡曾带 attribute / multiplier；本源曾带抗性字段。读入时清掉。 */
 function stripLegacyFields(p) {
   for (const s of (p && p.skills) || []) {
@@ -142,6 +151,9 @@ async function hydrateFromPacks() {
       for (const ch of project.characters) {
         ch.skillIds = (ch.skillIds || []).filter((id) => project.skills.some((s) => s.id === id));
       }
+      for (const effect of project.effects) {
+        effect.skillIds = (effect.skillIds || []).filter((id) => project.skills.some((s) => s.id === id));
+      }
     }
     // 空工程只有一个未命名的占位角色，先把占位角色去掉，换成内容包里的角色
     const onlyBlank =
@@ -186,6 +198,7 @@ async function hydrateFromPacks() {
       e.packName = card.packName || (card.pack === DEFAULT_PACK_ID ? DEFAULT_PACK_NAME : card.pack);
       e.attrBonus = normalizeEffectAttrBonus(card.attrBonus);
       e.autoConsume = Boolean(card.autoConsume);
+      e.skillIds = Array.isArray(card.skillIds) ? [...new Set(card.skillIds.filter((x) => typeof x === "string" && x))] : [];
       if (card.ui) e.ui = clone(card.ui);
       e.triggers = (card.triggers || []).map((t) => ({
         block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" },
@@ -196,8 +209,12 @@ async function hydrateFromPacks() {
     }
 
     if (!project.characters.length) project.characters.push(createCharacter());
+    const knownSkillIds = new Set((project.skills || []).map((s) => s.id));
     for (const ch of project.characters) {
-      ch.skillIds = (ch.skillIds || []).filter((id) => project.skills.some((s) => s.id === id));
+      ch.skillIds = (ch.skillIds || []).filter((id) => knownSkillIds.has(id));
+    }
+    for (const effect of project.effects || []) {
+      effect.skillIds = (effect.skillIds || []).filter((id) => knownSkillIds.has(id));
     }
     // 把内容包里的卡包登记进工程清单（否则卡包页 / 筛选看不到）
     normalizeProject(project);
@@ -382,6 +399,243 @@ function packNameById(id) {
 
 function packNameOf(card) {
   return packNameById(packOf(card));
+}
+
+/* ---------------------------- 挂载技能区 ---------------------------- */
+/** 挂载技能区当前优先展示的卡包：编辑中卡包优先，选「全部」时用当前卡所在的包 */
+function mountUsedPack(scope) {
+  const editPack = normalizeEditPack();
+  if (editPack !== PACK_ALL) return editPack;
+  const card = scope === "effect" ? currentEffect() : currentCharacter();
+  return card && card.pack ? card.pack : null;
+}
+
+/** 挂载技能区里技能排序：时间按加入工程的先后（新加入的靠后），名称按中文排序 */
+function sortSkillsForMount(list, scope) {
+  const ui = mountUi[scope] || mountUi.character;
+  const all = project.skills || [];
+  const orderOf = (s) => {
+    const i = all.indexOf(s);
+    return i < 0 ? all.length : i;
+  };
+  const dir = ui.order === "desc" ? -1 : 1;
+  return list.slice().sort((a, b) => {
+    if (ui.sort === "name") {
+      const byName = String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-CN");
+      return dir * (byName || orderOf(a) - orderOf(b));
+    }
+    return dir * (orderOf(a) - orderOf(b));
+  });
+}
+
+/** 挂载区按卡包分组后的列表（当前编辑卡包永远排第一） */
+function mountGroupList(scope, selected) {
+  const selectedSet = new Set(selected || []);
+  const currentPack = mountUsedPack(scope);
+  const groups = new Map();
+  for (const s of project.skills || []) {
+    const pack = packOf(s);
+    if (!groups.has(pack)) groups.set(pack, []);
+    groups.get(pack).push(s);
+  }
+  return {
+    currentPack,
+    selectedSet,
+    list: [...groups.entries()]
+      .map(([pack, cards]) => ({
+        pack,
+        name: packNameById(pack),
+        cards: sortSkillsForMount(cards, scope),
+        mounted: cards.filter((c) => selectedSet.has(c.id)).length,
+      }))
+      .sort((a, b) => {
+        if (a.pack === currentPack && b.pack !== currentPack) return -1;
+        if (b.pack === currentPack && a.pack !== currentPack) return 1;
+        return String(a.name).localeCompare(String(b.name), "zh-CN");
+      }),
+  };
+}
+
+/** 挂载区「列表本体」：只重绘这里，保留工具栏按钮节点，避免点一次就换掉按钮 */
+function renderMountBodyHtml(scope, selected) {
+  const skills = project.skills || [];
+  if (!skills.length) return `<p class="hint">还没有技能，去「设计技能」里新建一个。</p>`;
+  const { currentPack, selectedSet, list } = mountGroupList(scope, selected);
+  if (!list.length) return `<p class="hint">没有可挂载的技能。</p>`;
+  const groupsHtml = list
+    .map((group) => {
+      const rows = group.cards
+        .map((s) => {
+          const checked = selectedSet.has(s.id);
+          const searchText = `${s.name || ""} ${s.id || ""} ${group.name || ""} ${group.pack || ""}`.toLowerCase();
+          return `<label class="mount-row ${checked ? "is-checked" : ""}" data-search="${escapeHtml(searchText)}">
+            <input type="checkbox" data-mount-skill data-skill-id="${escapeHtml(s.id)}" ${checked ? "checked" : ""} />
+            <span class="mount-name">${escapeHtml(s.name || s.id)}</span>
+            <code>${escapeHtml(s.id)}</code>
+          </label>`;
+        })
+        .join("");
+      return `<section class="mount-pack" data-pack="${escapeHtml(group.pack)}">
+        <h3>
+          <span class="mount-pack-name">${escapeHtml(group.name)}</span>
+          ${group.pack === currentPack ? `<em class="mount-pack-now">当前编辑卡包</em>` : ""}
+          <b class="mount-pack-count" title="已挂载 / 本栏技能">${group.mounted}/${group.cards.length}</b>
+        </h3>
+        <div class="mount-rows">${rows}</div>
+      </section>`;
+    })
+    .join("");
+  return `<div class="mount-groups">${groupsHtml}</div>
+    <p class="mount-empty" hidden>没有匹配的技能。</p>`;
+}
+
+/** 渲染挂载技能区的完整 HTML：工具栏 + 统计 + 列表 */
+function renderMountPanelHtml(scope, selected) {
+  const ui = mountUi[scope] || (mountUi[scope] = { query: "", sort: "time", order: "asc" });
+  const skills = project.skills || [];
+  const selectedSet = new Set(selected || []);
+  const totalMounted = skills.filter((s) => selectedSet.has(s.id)).length;
+  return `<div class="mount-toolbar">
+    <input class="mount-search" data-mount-search type="search" autocomplete="off"
+      placeholder="搜索技能名 / id / 卡包" value="${escapeHtml(ui.query)}" aria-label="搜索技能" />
+    <select class="mount-sort" data-mount-sort aria-label="技能排序">
+      <option value="time" ${ui.sort === "time" ? "selected" : ""}>时间</option>
+      <option value="name" ${ui.sort === "name" ? "selected" : ""}>名称</option>
+    </select>
+    <button class="btn tiny mount-order" type="button" data-action="mount-order"
+      data-order="${ui.order === "asc" ? "desc" : "asc"}"
+      title="切换为${ui.order === "asc" ? "倒序" : "正序"}">${ui.order === "asc" ? "正序 ↑" : "倒序 ↓"}</button>
+  </div>
+  <div class="mount-summary">
+    <span>共 ${skills.length} 个技能</span>
+    <span data-mount-total>已挂载 ${totalMounted}</span>
+  </div>
+  <div class="mount-body">${renderMountBodyHtml(scope, selected)}</div>`;
+}
+
+/** 只更新按钮上的「下一次顺序」，不替换按钮本身 */
+function syncMountOrderButton(box, ui) {
+  const btn = box && box.querySelector('[data-action="mount-order"]');
+  if (!btn) return;
+  btn.dataset.order = ui.order === "asc" ? "desc" : "asc";
+  btn.textContent = ui.order === "asc" ? "正序 ↑" : "倒序 ↓";
+  btn.title = `切换为${ui.order === "asc" ? "倒序" : "正序"}`;
+}
+
+/**
+ * 刷新一个挂载技能区（排序 / 正倒序切换后）。
+ * 只重绘列表本体并原地更新按钮文案，工具栏节点不变——
+ * 这样一次点击不会把按钮换成新节点，下一次点击一定还能命中原按钮。
+ */
+function refreshMountPanel(scope) {
+  const box = scope === "effect" ? $("#ed-effect-mount") : $("#ed-mount-skills");
+  if (!box) return;
+  const card = scope === "effect" ? currentEffect() : currentCharacter();
+  const selected = card ? card.skillIds || [] : [];
+  const body = box.querySelector(".mount-body");
+  if (body) body.innerHTML = renderMountBodyHtml(scope, selected);
+  const sortSel = box.querySelector("[data-mount-sort]");
+  if (sortSel) sortSel.value = mountUi[scope].sort;
+  syncMountOrderButton(box, mountUi[scope]);
+  applyMountSearch(box, mountUi[scope].query);
+}
+
+/** 搜索过滤：只改 DOM 的显隐，不重建列表，输入框不会因此失焦 */
+function applyMountSearch(panel, query) {
+  if (!panel) return;
+  const q = String(query || "").trim().toLowerCase();
+  let any = false;
+  for (const group of panel.querySelectorAll(".mount-pack")) {
+    let visible = 0;
+    for (const row of group.querySelectorAll(".mount-row")) {
+      const hit = !q || String(row.dataset.search || "").includes(q);
+      row.hidden = !hit;
+      if (hit) visible += 1;
+    }
+    group.hidden = visible === 0;
+    if (visible) any = true;
+  }
+  updateMountCounts(panel);
+  const empty = panel.querySelector(".mount-empty");
+  if (empty) empty.hidden = any || !panel.querySelector(".mount-pack");
+}
+
+/** 更新每栏「已挂载 / 可见」与总挂载数 */
+function updateMountCounts(panel) {
+  if (!panel) return;
+  let mountedTotal = 0;
+  for (const group of panel.querySelectorAll(".mount-pack")) {
+    const rows = [...group.querySelectorAll(".mount-row")];
+    const visible = rows.filter((row) => !row.hidden);
+    const mounted = visible.filter((row) => row.querySelector("input")?.checked).length;
+    const allMounted = rows.filter((row) => row.querySelector("input")?.checked).length;
+    mountedTotal += allMounted;
+    const count = group.querySelector(".mount-pack-count");
+    if (count) count.textContent = `${mounted}/${visible.length}`;
+  }
+  const total = panel.querySelector("[data-mount-total]");
+  if (total) total.textContent = `已挂载 ${mountedTotal}`;
+}
+
+/**
+ * 挂载技能区的交互（角色 / 效果共用）：
+ * 搜索、排序、正倒序、勾选挂载。返回 true 表示事件已被处理。
+ */
+function handleMountEvent(scope, e) {
+  const panel = e.target.closest && e.target.closest(".mount-panel");
+  if (!panel) return false;
+  const ui = mountUi[scope] || (mountUi[scope] = { query: "", sort: "time", order: "asc" });
+  const target = e.target;
+  if (e.type === "input" && target.matches("[data-mount-search]")) {
+    ui.query = target.value;
+    applyMountSearch(panel, ui.query);
+    return true;
+  }
+  if (e.type === "change" && target.matches("[data-mount-sort]")) {
+    ui.sort = target.value === "name" ? "name" : "time";
+    refreshMountPanel(scope);
+    return true;
+  }
+  if (e.type === "click") {
+    const orderBtn = target.closest('[data-action="mount-order"]');
+    if (orderBtn) {
+      // 用按钮上渲染时写好的目标顺序，而不是在事件里取反：
+      // 这样即使一次点击被重复派发（触摸合成 / 重复监听），结果也是幂等的，
+      // 不会出现「切到倒序后点不回正序」。
+      const next = orderBtn.dataset.order === "desc" ? "desc" : "asc";
+      if (ui.order !== next) {
+        ui.order = next;
+        refreshMountPanel(scope);
+      }
+      return true;
+    }
+  }
+  if (e.type === "change" && target.matches("[data-mount-skill]")) {
+    const card = scope === "effect" ? currentEffect() : currentCharacter();
+    if (!card) return true;
+    const id = target.dataset.skillId;
+    const list = Array.isArray(card.skillIds) ? card.skillIds : (card.skillIds = []);
+    card.skillIds = target.checked ? [...new Set([...list, id])] : list.filter((x) => x !== id);
+    target.closest(".mount-row")?.classList.toggle("is-checked", target.checked);
+    updateMountCounts(panel);
+    markDirty();
+    renderJson();
+    return true;
+  }
+  return false;
+}
+
+/** 当前卡挂载的技能 id（挂载区渲染用） */
+function mountSelectedIds(scope) {
+  const card = scope === "effect" ? currentEffect() : currentCharacter();
+  return card && Array.isArray(card.skillIds) ? card.skillIds : [];
+}
+
+function mountPanelShell(scope, attrs = "") {
+  return `<div class="mount-panel" data-mount-scope="${scope}" ${attrs}>${renderMountPanelHtml(
+    scope,
+    mountSelectedIds(scope)
+  )}</div>`;
 }
 
 /** 确保卡包存在，返回卡包对象 */
@@ -580,6 +834,8 @@ function rewriteAllRefs(oldId, newId) {
   mapRemovedIds((x) => (x === oldId ? newId : x));
   for (const skill of project.skills || []) rewriteFlowRefs(skill.flow, oldId, newId);
   for (const effect of project.effects || []) {
+    // 效果挂载的技能（效果本身换包 / 换 id 时也要同步）
+    effect.skillIds = (effect.skillIds || []).map((x) => (x === oldId ? newId : x));
     for (const trigger of effect.triggers || []) {
       rewriteFlowRefs((effect.flows || {})[trigger.block.id], oldId, newId);
     }
@@ -713,6 +969,7 @@ function missingPackRefs(file) {
   }
   for (const skill of file.skills || []) scanFlow(skill.flow);
   for (const effect of file.effects || []) {
+    for (const sid of effect.skillIds || []) if (!skillIds.has(sid)) missing.add(sid);
     for (const flow of Object.values(effect.flows || {})) scanFlow(flow);
   }
   return [...missing];
@@ -862,18 +1119,10 @@ function renderCardsList() {
   }
   const skillsBox = $("#ed-mount-skills");
   if (skillsBox) {
-    if (!ch) skillsBox.innerHTML = `<p class="hint">先选择一个角色。</p>`;
-    else
-      skillsBox.innerHTML =
-        skills
-          .map(
-            (s) => `<label class="mount-row"><input type="checkbox" data-mount="skill" value="${escapeHtml(
-              s.id
-            )}" ${(ch.skillIds || []).includes(s.id) ? "checked" : ""} /> <span>${escapeHtml(
-              s.name || s.id
-            )}</span><code>${escapeHtml(s.id)}</code><em>${escapeHtml(packNameOf(s))}</em></label>`
-          )
-          .join("") || `<p class="hint">还没有技能，去「技能」里新建一个。</p>`;
+    skillsBox.innerHTML = ch
+      ? mountPanelShell("character")
+      : `<p class="hint">先选择一个角色。</p>`;
+    if (ch) applyMountSearch(skillsBox, mountUi.character.query);
   }
 }
 
@@ -945,11 +1194,12 @@ function renderSkillPanel() {
     return;
   }
   const mounted = (project.characters || []).some((ch) => (ch.skillIds || []).includes(s.id));
+  const mountedOnEffect = (project.effects || []).some((e) => (e.skillIds || []).includes(s.id));
   box.innerHTML = `
     ${
-      mounted
+      mounted || mountedOnEffect
         ? ""
-        : `<p class="hint">⚠ 这个技能没有挂载到任何角色，战斗中不会生效；请到「设计角色」右侧「挂载技能」勾选。</p>`
+        : `<p class="hint">⚠ 这个技能没有挂载到任何角色或效果，战斗中不会生效；请到「设计角色」中间「挂载技能」或「设计效果」的「挂载技能」里勾选。</p>`
     }
     ${field("技能名", `<input data-skill="name" value="${escapeHtml(s.name)}" />`)}
     ${field("技能 id", `<input data-skill="id" value="${escapeHtml(s.id)}" />`, "扩展包_类型_标识，类型必须是 skill")}
@@ -997,6 +1247,7 @@ function renderEffectPanel() {
   e.bar = Boolean(e.bar);
   e.barInvert = Boolean(e.barInvert) && e.bar;
   e.attrBonus = Array.isArray(e.attrBonus) ? e.attrBonus : [];
+  e.skillIds = Array.isArray(e.skillIds) ? [...new Set(e.skillIds.filter((x) => typeof x === "string" && x))] : [];
   e.triggers = e.triggers || [];
   if (!e.triggers.some((t) => t.block.id === active.triggerId)) {
     active.triggerId = e.triggers[0] ? e.triggers[0].block.id : null;
@@ -1079,6 +1330,12 @@ function renderEffectPanel() {
     }
     ${field("说明", `<textarea data-effect="description" rows="2">${escapeHtml(e.description || "")}</textarea>`)}
     <div class="trigger-head">
+      <span>挂载技能</span>
+      <span class="muted">持有该效果时临时获得</span>
+    </div>
+    <p class="hint">持有该效果的单位会临时获得这里勾选的技能；效果被移除、掉层或自动消耗后立刻失去。按卡包分栏，当前编辑卡包排在最前。</p>
+    <div id="ed-effect-mount" class="effect-mount-box">${mountPanelShell("effect")}</div>
+    <div class="trigger-head">
       <span>属性修正</span>
       <button class="btn small" data-action="add-attrbonus">+ 添加属性修正</button>
     </div>
@@ -1109,6 +1366,8 @@ function renderEffectPanel() {
       }).join("") || `<p class="hint">还没有触发。效果只有存在时才会触发，先加一个触发。</p>`}
     </div>
     ${active.triggerId ? `<button class="btn small danger" data-action="delete-trigger">删除当前触发</button>` : ""}`;
+  // 重建表单后把搜索词重新应用一次，否则输入框里还留着关键词、列表却全部展开
+  applyMountSearch($("#ed-effect-mount"), mountUi.effect.query);
 }
 
 /* ---------------------------- 卡包面板 ---------------------------- */
@@ -1237,8 +1496,19 @@ function select(attrs, options, value) {
 /* ================================================================== */
 /* 画布                                                                */
 /* ================================================================== */
+/**
+ * 画布缩放：旧版的 66% 渲染比例 = 新版 100% 基准。
+ * 界面显示 / 允许输入的倍率是 1% ~ 200%，换算成实际 scale 后再做平移与命中计算。
+ */
+const ZOOM_BASE = 0.66;
+const ZOOM_MIN_PERCENT = 1;
+const ZOOM_MAX_PERCENT = 200;
+const zoomPercentOf = (zoom) => ((Number(zoom) || ZOOM_BASE) / ZOOM_BASE) * 100;
+const zoomOfPercent = (percent) => (Number(percent) / 100) * ZOOM_BASE;
+const clampZoomPercent = (percent) => Math.min(ZOOM_MAX_PERCENT, Math.max(ZOOM_MIN_PERCENT, Number(percent) || 0));
+
 const canvasState = {
-  view: { x: 40, y: 40, zoom: 1 },
+  view: { x: 40, y: 40, zoom: ZOOM_BASE },
   /** 画布交互模式：pan = 拖拽画布，cut = 切割连线（由工具条滑钮切换） */
   mode: "pan",
   drag: null,
@@ -1374,7 +1644,7 @@ function syncWorld() {
   if (!world) return;
   world.style.transform = `translate(${canvasState.view.x}px, ${canvasState.view.y}px) scale(${canvasState.view.zoom})`;
   const label = $("#zoom-label");
-  if (label) label.textContent = `${Math.round(canvasState.view.zoom * 100)}%`;
+  if (label) label.value = String(Math.round(zoomPercentOf(canvasState.view.zoom)));
 }
 
 function blockDef(type) {
@@ -1881,6 +2151,24 @@ function setupCanvas() {
   setCanvasMode(canvasState.mode);
   bind("#btn-zoom-in", () => zoomBy(1.15));
   bind("#btn-zoom-out", () => zoomBy(1 / 1.15));
+  const zoomInput = $("#zoom-label");
+  if (zoomInput) {
+    const apply = () => {
+      const percent = Number(zoomInput.value);
+      if (!Number.isFinite(percent)) {
+        syncWorld();
+        return;
+      }
+      setZoomPercent(percent);
+    };
+    zoomInput.addEventListener("change", apply);
+    zoomInput.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      apply();
+      zoomInput.blur();
+    });
+  }
   bind("#btn-clear-flow", () => {
     const flow = currentFlow();
     if (!flow) return;
@@ -1899,29 +2187,61 @@ function setupCanvas() {
   });
 }
 
-function zoomBy(k) {
+/** 以画布中心（或指定屏幕点）为锚点设置缩放百分比（1% ~ 200%） */
+function setZoomPercent(percent, cx, cy) {
   const box = canvasEl().getBoundingClientRect();
-  const cx = box.width / 2;
-  const cy = box.height / 2;
-  const z = Math.min(1.8, Math.max(0.35, canvasState.view.zoom * k));
-  canvasState.view.x = cx - ((cx - canvasState.view.x) * z) / canvasState.view.zoom;
-  canvasState.view.y = cy - ((cy - canvasState.view.y) * z) / canvasState.view.zoom;
+  const ax = cx === undefined ? box.width / 2 : cx;
+  const ay = cy === undefined ? box.height / 2 : cy;
+  const z = zoomOfPercent(clampZoomPercent(percent));
+  const prev = canvasState.view.zoom || ZOOM_BASE;
+  canvasState.view.x = ax - ((ax - canvasState.view.x) * z) / prev;
+  canvasState.view.y = ay - ((ay - canvasState.view.y) * z) / prev;
   canvasState.view.zoom = z;
   syncWorld();
   redrawLinks();
 }
 
+function zoomBy(k) {
+  setZoomPercent(zoomPercentOf(canvasState.view.zoom) * k);
+}
+
 function fitView() {
   const flow = currentFlow();
+  const box = canvasEl().getBoundingClientRect();
   if (!flow || !flow.nodes.length) {
-    canvasState.view = { x: 40, y: 40, zoom: 1 };
+    canvasState.view = { x: 40, y: 40, zoom: ZOOM_BASE };
     syncWorld();
     redrawLinks();
     return;
   }
-  const xs = flow.nodes.map((n) => (n.pos ? n.pos.x : 0));
-  const ys = flow.nodes.map((n) => (n.pos ? n.pos.y : 0));
-  canvasState.view = { x: 40 - Math.min(...xs), y: 40 - Math.min(...ys), zoom: 0.9 };
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const node of flow.nodes) {
+    const el = canvasState.nodeEls.get(node.id);
+    const w = el?.offsetWidth || 224;
+    const h = el?.offsetHeight || 150;
+    const x = (node.pos && node.pos.x) || 0;
+    const y = (node.pos && node.pos.y) || 0;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + w);
+    maxY = Math.max(maxY, y + h);
+  }
+  const pad = 48;
+  const contentW = Math.max(1, maxX - minX);
+  const contentH = Math.max(1, maxY - minY);
+  // 适应时最多回到 100%，不把小流程放得比基准还大
+  const fitZoom = Math.min(
+    (box.width - pad * 2) / contentW,
+    (box.height - pad * 2) / contentH,
+    zoomOfPercent(100)
+  );
+  const z = zoomOfPercent(clampZoomPercent(zoomPercentOf(fitZoom)));
+  canvasState.view.zoom = z;
+  canvasState.view.x = box.width / 2 - ((minX + maxX) / 2) * z;
+  canvasState.view.y = box.height / 2 - ((minY + maxY) / 2) * z;
   syncWorld();
   redrawLinks();
 }
@@ -2408,6 +2728,10 @@ function applySkillField(card, key, value) {
     for (const ch of project.characters || []) {
       ch.skillIds = (ch.skillIds || []).map((x) => (x === old ? card.id : x));
     }
+    // 效果挂载的技能也按 id 引用，改技能 id 时一起改
+    for (const effect of project.effects || []) {
+      effect.skillIds = (effect.skillIds || []).map((x) => (x === old ? card.id : x));
+    }
     active.skill = card;
   } else if (key === "image") {
     card.image = String(value ?? "").trim();
@@ -2457,6 +2781,8 @@ function onSkillFormInput(e) {
 function onEffectFormInput(e) {
   const card = currentEffect();
   if (!card) return;
+  // 效果表单里嵌了「挂载技能区」：先交给它处理，避免被当成普通效果字段
+  if (handleMountEvent("effect", e)) return;
   if (e.target.dataset.iconFile === "effect") {
     if (e.type !== "change") return;
     const file = e.target.files && e.target.files[0];
@@ -2782,6 +3108,9 @@ function deleteCard(kind, target) {
   if (kind === "skill") {
     for (const ch of project.characters || []) {
       ch.skillIds = (ch.skillIds || []).filter((x) => x !== id);
+    }
+    for (const effect of project.effects || []) {
+      effect.skillIds = (effect.skillIds || []).filter((x) => x !== id);
     }
   }
 
@@ -3397,6 +3726,7 @@ function importPackDoc(doc, file) {
     def.packName = name;
     def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
     def.autoConsume = Boolean(e.autoConsume);
+    def.skillIds = Array.isArray(e.skillIds) ? [...new Set(e.skillIds.filter((x) => typeof x === "string" && x))] : [];
     def.triggers = (e.triggers || [])
       .map((t) => ({
         block: {
@@ -3491,6 +3821,7 @@ function importContent(doc, file) {
     def.packName = packName;
     def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
     def.autoConsume = Boolean(e.autoConsume);
+    def.skillIds = Array.isArray(e.skillIds) ? [...new Set(e.skillIds.filter((x) => typeof x === "string" && x))] : [];
     def.triggers = (e.triggers || []).map((t) => ({ block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" } }));
     def.flows = {};
     for (const t of def.triggers) def.flows[t.block.id] = flowFromContent((e.flows || {})[t.block.id]);
@@ -3701,13 +4032,28 @@ function setupForms() {
     renderJson();
   });
 
-  $("#ed-mount-skills")?.addEventListener("change", (e) => {
-    const id = e.target.value;
-    const list = ch().skillIds || (ch().skillIds = []);
-    ch().skillIds = e.target.checked ? [...new Set([...list, id])] : list.filter((x) => x !== id);
-    markDirty();
-    renderJson();
-  });
+  // 角色挂载技能区：搜索 / 排序 / 正倒序 / 勾选都由同一个委托处理
+  for (const type of ["input", "change", "click"]) {
+    $("#ed-mount-skills")?.addEventListener(type, (e) => {
+      if (handleMountEvent("character", e)) e.stopPropagation();
+    });
+  }
+  // 搜索框：捕获阶段再兜一层。部分浏览器 / 输入法插入文本时 input 不冒泡，
+  // 只挂容器会收不到，表现为「输入了但列表不过滤」。
+  document.addEventListener(
+    "input",
+    (e) => {
+      const search = e.target.closest && e.target.closest("[data-mount-search]");
+      if (!search) return;
+      const panel = search.closest(".mount-panel");
+      if (!panel) return;
+      const scope = panel.dataset.mountScope === "effect" ? "effect" : "character";
+      const ui = mountUi[scope] || (mountUi[scope] = { query: "", sort: "time", order: "asc" });
+      ui.query = search.value;
+      applyMountSearch(panel, ui.query);
+    },
+    true
+  );
   // 顶部三个标签：角色 / 技能 / 效果。
   $$(".ed-tab").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
@@ -3771,6 +4117,7 @@ function setupForms() {
   $("#ed-effect-form")?.addEventListener("input", onEffect);
   $("#ed-effect-form")?.addEventListener("change", onEffect);
   $("#ed-effect-form")?.addEventListener("click", (e) => {
+    if (handleMountEvent("effect", e)) return;
     if (e.target.closest('[data-action="effect-color-reset"]')) {
       const card = currentEffect();
       if (!card) return;

@@ -1208,11 +1208,14 @@ export function openLocalBattle({ registry, config, onExit }) {
           if (rect) s.fx.aura(rect, { kind: "buff" });
           if (unit) addLog(`${unit.name} 获得「${def?.name || ev.effect}」`, "is-sys");
           syncUnits();
+          // 效果挂载的技能随效果获得 / 消失，行动栏立刻刷新
+          renderActions();
           await sleep(100);
           break;
         }
         case "effect:removed": {
           syncUnits();
+          renderActions();
           await sleep(60);
           break;
         }
@@ -1263,9 +1266,13 @@ export function openLocalBattle({ registry, config, onExit }) {
         case "buff:removed":
         case "action:start":
         case "action:skip":
-        case "skill:granted":
         case "battle:start":
           break;
+        case "skill:granted": {
+          syncUnits();
+          renderActions();
+          break;
+        }
         default:
           break;
       }
