@@ -101,6 +101,15 @@ export function validateContent(doc) {
     }
     for (const e of validateEffectDisplay(raw)) errors.push(`效果 ${id}: ${e}`);
     for (const e of validateEffectAttrBonus(raw && raw.attrBonus)) errors.push(`效果 ${id}: ${e}`);
+    if (raw && raw.skillIds !== undefined) {
+      if (!Array.isArray(raw.skillIds)) errors.push(`效果 ${id}: skillIds 必须是数组`);
+      else {
+        for (const sid of raw.skillIds) {
+          if (typeof sid !== "string" || !sid) errors.push(`效果 ${id}: skillIds 必须是非空字符串`);
+          else if (!skillIds.has(sid)) errors.push(`效果 ${id} 挂载了不存在的技能 ${sid}`);
+        }
+      }
+    }
   }
 
   for (const unit of units) {

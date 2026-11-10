@@ -81,6 +81,12 @@ export class ContentRegistry {
     if (def.autoConsume !== undefined && typeof def.autoConsume !== "boolean") {
       errors.push("autoConsume 必须是布尔值");
     }
+    if (def.skillIds !== undefined) {
+      if (!Array.isArray(def.skillIds)) errors.push("skillIds 必须是数组");
+      else if (def.skillIds.some((sid) => typeof sid !== "string" || !sid)) {
+        errors.push("skillIds 必须是非空字符串数组");
+      }
+    }
     if (def.image !== undefined && def.image !== null && typeof def.image !== "string") {
       errors.push("image 必须是字符串或 null");
     }
@@ -107,6 +113,10 @@ export class ContentRegistry {
       triggers: Array.isArray(def.triggers) ? def.triggers.map((t) => ({ ...t })) : [],
       flows: typeof def.flows === "object" && def.flows ? structuredClone(def.flows) : {},
       attrBonus: normalizeEffectAttrBonus(def.attrBonus),
+      /** 效果挂载技能：持有该效果时临时获得，效果移除后失去 */
+      skillIds: Array.isArray(def.skillIds)
+        ? [...new Set(def.skillIds.filter((sid) => typeof sid === "string" && sid))]
+        : [],
       /** 自动消耗：每次该效果的触发流程执行完后消耗 1 层 */
       autoConsume: Boolean(def.autoConsume),
       description: def.description || "",
@@ -150,12 +160,17 @@ export class ContentRegistry {
     return { ok: failed.length === 0, failed };
   }
 
-  /** 校验单位卡引用的技能是否都存在 */
+  /** 校验单位卡 / 效果卡引用的技能是否都存在 */
   checkSkillRefs() {
     const missing = [];
     for (const unit of this.units.values()) {
       for (const sid of unit.skills) {
         if (!this.skills.has(sid)) missing.push({ unit: unit.id, skill: sid });
+      }
+    }
+    for (const effect of this.effects.values()) {
+      for (const sid of effect.skillIds || []) {
+        if (!this.skills.has(sid)) missing.push({ effect: effect.id, skill: sid });
       }
     }
     return missing;

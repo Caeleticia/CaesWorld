@@ -276,10 +276,13 @@ function compareValues(a, b, operator) {
  * 运行一个积木流程。
  *
  * env（由 battle 提供）：
- *   owner / self      流程拥有者（技能/效果的持有单位）
+ *   owner / self      流程拥有者（技能/效果的持有单位）；owner 是效果真正挂在谁身上
+ *   currentEffectId   正在执行的效果 id（技能流程里为 null）
  *   context           { unit: 遍历中的单位 }
  *   rng()             随机源
  *   sideOf(u) / listSide(side) / pickForPlayer(cands)
+ *   factionOf(u) / listFaction(faction, { includeUncounted }) / listAllUnits({ countedOnly })
+ *   effectSource(holder, effectId) / effectSourceFaction(holder, effectId, opts)
  *   unitData(u, field, { effectId })
  *   newAttackGroup()  开一次「攻击动作」批次；同一次攻击的多目标命中共用它
  *   damage(target, value, attribute, { source, additional, ignoreReduction, attackGroup })
@@ -458,6 +461,33 @@ export function runFlow(prepared, env, opts = {}) {
         const side = o.side === "ally" ? env.sideOf(env.self) : env.otherSide(env.sideOf(env.self));
         return env.listSide(side);
       }
+      case "factionSet": {
+        // 只有「没接线」才回落到自己；接了但值为空（例如没找到施加者）就是空集
+        const raw = valueOf(node, "unit", local);
+        const u = raw === undefined ? env.self : raw;
+        if (!env.listFaction) return [];
+        return env.listFaction(env.factionOf ? env.factionOf(u) : null, {
+          includeUncounted: Boolean(o.includeUncounted),
+        });
+      }
+      case "allUnits":
+        return env.listAllUnits ? env.listAllUnits({ countedOnly: Boolean(o.countedOnly) }) : [];
+      case "currentEffect":
+        return env.currentEffectId || "";
+      case "effectSource": {
+        const raw = valueOf(node, "unit", local);
+        const holder = raw === undefined ? env.owner || env.self || null : raw;
+        const eid = str(valueOf(node, "effectId", local)) || env.currentEffectId || "";
+        return env.effectSource ? env.effectSource(holder, eid) : null;
+      }
+      case "effectSourceSide": {
+        const raw = valueOf(node, "unit", local);
+        const holder = raw === undefined ? env.owner || env.self || null : raw;
+        const eid = str(valueOf(node, "effectId", local)) || env.currentEffectId || "";
+        return env.effectSourceFaction
+          ? env.effectSourceFaction(holder, eid, { includeUncounted: Boolean(o.includeUncounted) })
+          : [];
+      }
       case "chooseUnit":
         return evalSticky(node, local, () => {
           const raw = valueOf(node, "targets", local);
@@ -478,7 +508,7 @@ export function runFlow(prepared, env, opts = {}) {
         // 没接「目标」时指向流程的「自己」
         const raw = valueOf(node, "unit", local);
         const u = raw === undefined || raw === null ? env.self : raw;
-        if (!u || !u.key) return o.field === "name" || o.field === "label" || o.field === "id" ? "" : 0;
+        if (!u || !u.key) return o.field === "name" || o.field === "label" || o.field === "id" || o.field === "faction" ? "" : 0;
         const res = env.unitData(u, o.field, { effectId: valueOf(node, "effectId", local) });
         return res;
       }
@@ -570,6 +600,8 @@ export function runFlow(prepared, env, opts = {}) {
         const attribute = str(v("attribute")) || o.attribute || "physical";
         const additional = Boolean(o.additional);
         const ignoreReduction = Boolean(o.ignoreReduction);
+        // 伤害来源：可选输入；不接 = 流程拥有者自己（旧行为）
+        const source = unitList(valueOf(node, "source", local))[0] || env.self;
         // 同一个「攻击」积木的多目标结算 = 一次攻击动作（同时命中）；
         // 循环体里的每一轮会各自开新批次，所以仍然是依次攻击。
         const attackGroup = env.newAttackGroup ? env.newAttackGroup() : null;
@@ -577,7 +609,7 @@ export function runFlow(prepared, env, opts = {}) {
         let total = 0;
         for (const t of targets) {
           const rec = env.damage(t, value, attribute, {
-            source: env.self,
+            source,
             additional,
             ignoreReduction,
             attackGroup,
@@ -588,7 +620,7 @@ export function runFlow(prepared, env, opts = {}) {
           }
         }
         // 「附加伤害」不视为攻击：不计入攻击统计，也不触发「单位攻击时」
-        if (!additional && hits.length) env.noteAttack?.(env.self, hits, total, { attackGroup });
+        if (!additional && hits.length) env.noteAttack?.(source, hits, total, { attackGroup });
         go(nextId("next"));
         return;
       }

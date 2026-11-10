@@ -288,7 +288,12 @@ export function createBattle(setup) {
       if (!check.ok) throw new Error(`${side} 侧：${check.reason}`);
     }
     const uid = `u${state.units.length + 1}`;
-    state.units.push(makeUnit(uid, card, side, slot, spec.hp, spec.label));
+    const unit = makeUnit(uid, card, side, slot, spec.hp, spec.label);
+    // 预留多阵营：单位可以单独指定阵营，缺省跟 side 一致
+    if (spec.faction !== undefined && spec.faction !== null && String(spec.faction) !== "") {
+      unit.faction = String(spec.faction);
+    }
+    state.units.push(unit);
   });
 
   function makeUnit(uid, card, side, slot, hp, label) {
@@ -305,6 +310,12 @@ export function createBattle(setup) {
       cardId: card.id,
       name: card.name || card.id,
       side,
+      /**
+       * 阵营：目前默认等于 side，但「按单位的阵营」「效果的施加者阵营」只认这个字段。
+       * 以后要做多阵营时，给单位指定不同的 faction 即可，卡包不用重写；
+       * 战斗的先后手 / 站位仍按 side（两阵营）。
+       */
+      faction: side,
       slot,
       occupiesSlot: card.occupiesSlot,
       countsAsUnit: card.countsAsUnit,
@@ -355,6 +366,23 @@ export function createBattle(setup) {
   const livingUnits = () => state.units.filter(isAlive);
   const livingOf = (side) => livingUnits().filter((u) => u.side === side);
   const listSide = (side) => livingOf(side).filter((u) => u.countsAsUnit);
+  /** 单位所属阵营：没写 faction 的旧数据回落到 side */
+  const factionOf = (u) => {
+    if (!u) return null;
+    const f = u.faction;
+    return f === undefined || f === null || f === "" ? u.side : String(f);
+  };
+  /** 某阵营的存活单位（默认只取计数单位，和 listSide 的口径一致） */
+  const listFaction = (faction, opts = {}) => {
+    if (!faction) return [];
+    const includeUncounted = Boolean(opts.includeUncounted);
+    return livingUnits().filter((u) => factionOf(u) === faction && (includeUncounted || u.countsAsUnit));
+  };
+  /** 场上全部存活单位（多阵营时供「筛选目标集」自行分组） */
+  const listAllUnits = (opts = {}) => {
+    const countedOnly = opts.countedOnly !== false;
+    return livingUnits().filter((u) => !countedOnly || u.countsAsUnit);
+  };
   const displayLabel = (u) => (u && u.label !== undefined && u.label !== null ? String(u.label) : "");
 
   function statsOf(unit, scope = "normal") {
@@ -436,8 +464,16 @@ export function createBattle(setup) {
     let layer = u.effects.find((e) => e.id === eid);
     const isNew = !layer;
     if (isNew) {
-      layer = { id: eid, stacks: 0, sourceId: extra.source ? extra.source.key : null };
+      layer = { id: eid, stacks: 0, sourceId: null, sourceFaction: null };
       u.effects.push(layer);
+    }
+    // 施加者：同一次附加只记一个，取「最近一次带来源的附加」。
+    // sourceFaction 是附加时的阵营快照，施加者退场 / 被移出战场后仍能兜底。
+    // 多层由不同单位分别附加时，层数会合并，归属统一算最后一个施加者——
+    // 需要严格按层归属时，得升级成「每层来源」，当前先保持单字段。
+    if (extra.source) {
+      layer.sourceId = extra.source.key;
+      layer.sourceFaction = factionOf(extra.source);
     }
     // 层数计数默认关闭：关闭时永远只有 1 层；开启时按「层数上限」叠加（0 = 无上限）
     const stackable = Boolean(def.stackable);
@@ -451,7 +487,14 @@ export function createBattle(setup) {
       if (layer.stacks < 1) layer.stacks = 1;
     }
     recomputeAttrBonuses(u);
-    log(BATTLE_EVENT.EFFECT_ADDED, { unit: u.uid, effect: eid, stacks: layer.stacks, layers: add });
+    log(BATTLE_EVENT.EFFECT_ADDED, {
+      unit: u.uid,
+      effect: eid,
+      stacks: layer.stacks,
+      layers: add,
+      source: extra.source ? extra.source.uid : null,
+      sourceFaction: layer.sourceFaction || null,
+    });
     // 只有「第一次获得该效果」才算一次获得；重复附加只刷新层数
     if (isNew) emit("unitEnter", [u]);
     emit("dataUpdate", [u]);
@@ -531,7 +574,8 @@ export function createBattle(setup) {
    */
   function eventSkillEffectsOf(u) {
     const out = [];
-    for (const skill of u.skills || []) {
+    // 含「给予技能」临时获得的技能，以及效果授予、效果移除后会立刻消失的技能
+    for (const skill of allSkillsOf(u)) {
       if (!skill || !skill.flow) continue;
       const nodes = Array.isArray(skill.flow.nodes) ? skill.flow.nodes : [];
       const triggers = nodes
@@ -737,6 +781,8 @@ export function createBattle(setup) {
     return {
       self,
       owner,
+      /** 「当前效果」积木：正在执行的效果 id（技能流程为 null） */
+      currentEffectId: effect ? effect.id : null,
       /** 「8-1 触发的单位」积木：本次触发的单位（技能流程里就是自己） */
       triggerUnit: effect ? triggerUnit || owner : owner,
       context: { unit: null },
@@ -745,6 +791,11 @@ export function createBattle(setup) {
       sideOf: (u) => (u ? u.side : "ally"),
       otherSide,
       listSide,
+      factionOf,
+      listFaction,
+      listAllUnits,
+      effectSource: effectSourceOf,
+      effectSourceFaction: effectSourceFactionOf,
       currentTarget: () => prevSkillTargets.slice(),
       pickForPlayer: (cands, opts) => playerChoose(cands, opts),
       /** 开一个新的「攻击动作」批次；同一次攻击积木的多目标命中共用它 */
@@ -846,7 +897,7 @@ export function createBattle(setup) {
   }
 
   function unitDataOf(u, field, opts = {}) {
-    if (!u) return field === "name" || field === "label" || field === "id" ? "" : 0;
+    if (!u) return field === "name" || field === "label" || field === "id" || field === "faction" ? "" : 0;
     switch (field) {
       case "atk": return statsOf(u).atk;
       case "def": return statsOf(u).def;
@@ -863,11 +914,35 @@ export function createBattle(setup) {
       }
       case "lastHitSource": return u.stats.lastHitSource ? getUnit(u.stats.lastHitSource) : null;
       case "effectStacks": return typeof opts.effectId === "string" && opts.effectId ? effectStacks(u, opts.effectId) : 0;
+      case "faction": return factionOf(u) || "";
       case "label": return displayLabel(u);
       case "name": return u.name;
       case "id": return u.cardId;
       default: return 0;
     }
+  }
+
+  /** 读取「某个效果」的施加者；没有记录（卡面初始效果 / 系统施加）返回 null */
+  function effectSourceOf(holderRef, effectId) {
+    const u = getUnit(holderRef);
+    if (!u || !effectId) return null;
+    const layer = u.effects.find((e) => e.id === effectId);
+    if (!layer || !layer.sourceId) return null;
+    return getUnit(layer.sourceId);
+  }
+
+  /**
+   * 施加者阵营的全体单位：优先按施加者的「当前」阵营取；
+   * 施加者已经不在场（或记录不到）时用附加时的阵营快照兜底。
+   */
+  function effectSourceFactionOf(holderRef, effectId, opts = {}) {
+    const u = getUnit(holderRef);
+    if (!u || !effectId) return [];
+    const layer = u.effects.find((e) => e.id === effectId);
+    if (!layer) return [];
+    const src = layer.sourceId ? getUnit(layer.sourceId) : null;
+    const faction = src ? factionOf(src) : layer.sourceFaction;
+    return listFaction(faction, opts);
   }
 
   /* ================= 伤害 ================= */
@@ -1086,6 +1161,8 @@ export function createBattle(setup) {
     if (slot === null) return null;
     const uid = `s${++summonSeq}`;
     const unit = makeUnit(uid, card, side, slot, undefined, label || card.label);
+    // 召唤物跟召唤者同阵营（多阵营时不会被算进别的阵营）
+    unit.faction = parent ? factionOf(parent) : side;
     unit.parentKey = parent ? parent.key : null;
     if (parent) {
       const inherited = parent.attrBonus || {};
@@ -1094,7 +1171,13 @@ export function createBattle(setup) {
         resistances: { ...(inherited.resistances || {}) },
       };
       for (const layer of parent.effects) {
-        unit.effects.push({ id: layer.id, stacks: layer.stacks, inheritedFrom: { source: parent.key, effectId: layer.id } });
+        unit.effects.push({
+          id: layer.id,
+          stacks: layer.stacks,
+          sourceId: layer.sourceId || null,
+          sourceFaction: layer.sourceFaction || null,
+          inheritedFrom: { source: parent.key, effectId: layer.id },
+        });
       }
       recomputeAttrBonuses(unit);
     }
@@ -1613,9 +1696,33 @@ export function createBattle(setup) {
   }
 
   /* ================= 技能 ================= */
+  /**
+   * 效果挂载的技能：只按当前仍然持有的效果层计算。
+   * 效果被移除（自然掉层 / 强制移除 / 自动消耗 / 继承来源消失）后，
+   * 这一项立刻消失，不需要额外的回收逻辑；召唤物继承效果时也会跟着获得。
+   */
+  function effectSkillsOf(u) {
+    const ids = [];
+    for (const layer of u.effects || []) {
+      const def = registry.getEffect(layer.id);
+      if (!def || !Array.isArray(def.skillIds)) continue;
+      for (const sid of def.skillIds) if (!ids.includes(sid)) ids.push(sid);
+    }
+    return ids.map((id) => registry.getSkill(id)).filter(Boolean);
+  }
+
   function allSkillsOf(u) {
-    const extra = u.granted.map((g) => registry.getSkill(g.skillId)).filter(Boolean);
-    return [...u.skills, ...extra];
+    const seen = new Set();
+    const out = [];
+    const push = (skill) => {
+      if (!skill || seen.has(skill.id)) return;
+      seen.add(skill.id);
+      out.push(skill);
+    };
+    for (const skill of u.skills || []) push(skill);
+    for (const g of u.granted || []) push(registry.getSkill(g.skillId));
+    for (const skill of effectSkillsOf(u)) push(skill);
+    return out;
   }
 
   function useSkill(index, opts = {}) {
@@ -1772,6 +1879,7 @@ export function createBattle(setup) {
       cardId: u.cardId,
       name: u.name,
       side: u.side,
+      faction: factionOf(u),
       slot: u.slot,
       hp: u.hp,
       hpMax: s.hp,
@@ -1785,7 +1893,12 @@ export function createBattle(setup) {
       parentKey: u.parentKey,
       /** side 模式：这个单位本回合是否已经行动过 */
       acted: state.acted.includes(u.uid),
-      effects: u.effects.map((e) => ({ id: e.id, stacks: e.stacks })),
+      effects: u.effects.map((e) => ({
+        id: e.id,
+        stacks: e.stacks,
+        sourceId: e.sourceId || null,
+        sourceFaction: e.sourceFaction || null,
+      })),
       buffs: u.buffs.map((b) => ({ uid: b.uid, label: b.label, duration: b.duration })),
       skills: allSkillsOf(u).map((sk) => ({ id: sk.id, name: sk.name, type: sk.type })),
     };
@@ -1984,8 +2097,10 @@ export function createBattle(setup) {
     heal(unitRef, amount, { log: shouldLog = false } = {}) {
       return withMuted(!shouldLog, () => heal(unitRef, amount));
     },
-    attachEffect(unitRef, effectId, { log: shouldLog = false, layers = 1 } = {}) {
-      return withMuted(!shouldLog, () => attachEffect(getUnit(unitRef), effectId, { layers }));
+    attachEffect(unitRef, effectId, { log: shouldLog = false, layers = 1, source = null } = {}) {
+      return withMuted(!shouldLog, () =>
+        attachEffect(getUnit(unitRef), effectId, { layers, source: source ? getUnit(source) : null })
+      );
     },
     forceExit(unitRef, { log: shouldLog = false } = {}) {
       return withMuted(!shouldLog, () => forceExit(getUnit(unitRef)));

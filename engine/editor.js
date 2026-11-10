@@ -157,6 +157,10 @@ export function normalizeProject(project) {
     if (!effect) continue;
     effect.attrBonus = normalizeEffectAttrBonus(effect.attrBonus);
     effect.autoConsume = Boolean(effect.autoConsume);
+    // 效果挂载技能：持有该效果时临时获得，效果移除后失去
+    effect.skillIds = Array.isArray(effect.skillIds)
+      ? [...new Set(effect.skillIds.filter((sid) => typeof sid === "string" && sid))]
+      : [];
   }
   return project;
 }
@@ -200,6 +204,8 @@ export function createEffect(id = "custom_effect_new", name = "新效果") {
     packName: "默认包",
     /** 属性修正：效果附着期间给持有者提供的面板加成，可空、可多条 */
     attrBonus: [],
+    /** 效果挂载的技能：持有该效果时临时获得，效果移除后失去 */
+    skillIds: [],
     /** 自动消耗：每次该效果的触发流程执行完后消耗 1 层（未开启层数计数时直接移除） */
     autoConsume: false,
     triggers: [],
@@ -534,6 +540,17 @@ export function validateProject(project) {
       if (!Number.isFinite(n) || n < 0) list.push(`层数上限必须是 ≥ 0 的数字：${effect.maxStacks}`);
     }
     list.push(...validateEffectAttrBonus(effect.attrBonus));
+    if (effect.skillIds !== undefined) {
+      if (!Array.isArray(effect.skillIds)) list.push("挂载技能必须是数组");
+      else {
+        const seen = new Set();
+        for (const sid of effect.skillIds) {
+          if (typeof sid !== "string" || !sid) list.push("挂载技能 id 必须是非空字符串");
+          else if (seen.has(sid)) list.push(`挂载技能重复：${sid}`);
+          else seen.add(sid);
+        }
+      }
+    }
     if (effect.autoConsume !== undefined && typeof effect.autoConsume !== "boolean") {
       list.push("自动消耗必须是布尔值");
     }
@@ -555,6 +572,11 @@ export function validateProject(project) {
   for (const ch of characters) {
     for (const sid of ch.skillIds || []) {
       if (!skillIds.has(sid)) errors.push(`角色 ${ch.name || ch.id} 挂载了不存在的技能 ${sid}`);
+    }
+  }
+  for (const effect of project.effects || []) {
+    for (const sid of effect.skillIds || []) {
+      if (!skillIds.has(sid)) errors.push(`效果 ${effect.name || effect.id} 挂载了不存在的技能 ${sid}`);
     }
   }
 
@@ -645,6 +667,9 @@ export function effectToContent(effect) {
       ])
     ),
     attrBonus: normalizeEffectAttrBonus(effect.attrBonus),
+    ...(Array.isArray(effect.skillIds) && effect.skillIds.length
+      ? { skillIds: [...new Set(effect.skillIds.filter((sid) => typeof sid === "string" && sid))] }
+      : {}),
     autoConsume: Boolean(effect.autoConsume),
   };
 }

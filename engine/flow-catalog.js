@@ -131,6 +131,7 @@ const UNIT_DATA_FIELDS = Object.freeze([
   { value: "lastAttackTarget", label: "上一次攻击的目标", type: "target" },
   { value: "lastHitSource", label: "上一次受击的来源目标", type: "target" },
   { value: "effectStacks", label: "目标指定效果的层数", type: "number" },
+  { value: "faction", label: "阵营", type: "string" },
   { value: "label", label: "标签", type: "string" },
   { value: "name", label: "名字", type: "string" },
   { value: "id", label: "id", type: "string" },
@@ -211,6 +212,7 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "targets", label: "目标集", direction: "in", type: "targetset" },
       { id: "value", label: "数值", direction: "in", type: "number" },
       { id: "attribute", label: "属性（字符串）", direction: "in", type: "string" },
+      { id: "source", label: "伤害来源（可选，默认自己）", direction: "in", type: "target" },
       { id: "next", direction: "out" },
     ],
     outflows: ["next"],
@@ -240,7 +242,7 @@ export function buildFlowCatalog(ctx = {}) {
         default: false,
       },
     ],
-    note: "「无视减免」只跳过目标侧的防御 / 抗性 / 易伤，攻击方加成与暴击照常；「附加伤害」不吃任何加成、不看任何减免、不暴击，也不触发「单位攻击时」。目标集里有多个单位时，它们属于同一次攻击动作，命中同时结算；要依次攻击请把「攻击」放进遍历 / 次数 / 条件循环。",
+    note: "「无视减免」只跳过目标侧的防御 / 抗性 / 易伤，攻击方加成与暴击照常；「附加伤害」不吃任何加成、不看任何减免、不暴击，也不触发「单位攻击时」。目标集里有多个单位时，它们属于同一次攻击动作，命中同时结算；要依次攻击请把「攻击」放进遍历 / 次数 / 条件循环。「伤害来源」留空就是流程拥有者自己；持续伤害可以接到「效果的施加者」，让击杀归属 / 日志记到施加者头上。",
   });
   def({
     kind: "heal",
@@ -385,7 +387,7 @@ export function buildFlowCatalog(ctx = {}) {
     kind: "giveSkill",
     group: "action",
     title: "给予技能",
-    subtitle: "持有该效果时获得一个额外技能",
+    subtitle: "临时获得一个额外技能（不随效果移除；效果挂载技能请用效果表单）",
     ports: [
       { id: "in", direction: "in" },
       { id: "skillId", label: "技能 id（字符串）", direction: "in", type: "string" },
@@ -554,6 +556,61 @@ export function buildFlowCatalog(ctx = {}) {
     subtitle: "获取敌方/我方全体",
     ports: [{ id: "set", direction: "out", type: "targetset" }],
     options: [{ key: "side", label: "目标集", control: "select", options: SIDE_OPTIONS, default: "enemy" }],
+    note: "「敌方 / 我方」按两阵营简化处理：取「自己所在阵营 / 对立阵营」。多阵营或要按「施加者的阵营」取人时，请用「按单位的阵营」「效果的施加者阵营」。",
+  });
+  def({
+    kind: "factionSet",
+    group: "data",
+    title: "按单位的阵营",
+    subtitle: "获取某个单位所属阵营的全体单位",
+    note: "不依赖两阵营假设：按单位身上记录的阵营取同阵营的存活单位。单位留空 = 自己。默认只取计数单位（召唤物等不计数单位需要勾选）。",
+    ports: [
+      { id: "unit", label: "单位（可空＝自己）", direction: "in", type: "target" },
+      { id: "set", direction: "out", type: "targetset" },
+    ],
+    options: [{ key: "includeUncounted", label: "包含不计数单位（召唤物等）", control: "checkbox", default: false }],
+  });
+  def({
+    kind: "allUnits",
+    group: "data",
+    title: "全部单位",
+    subtitle: "场上所有存活单位",
+    note: "多阵营时用来按「获取单位数据 → 阵营」自行筛选；默认只取计数单位。",
+    ports: [{ id: "set", direction: "out", type: "targetset" }],
+    options: [{ key: "countedOnly", label: "只取计数单位", control: "checkbox", default: true }],
+  });
+  def({
+    kind: "currentEffect",
+    group: "data",
+    title: "当前效果",
+    subtitle: "正在执行的这个效果的 id",
+    note: "只能在效果流程里用；技能流程里没有「当前效果」，读到空字符串。用来代替手写的效果 id 字符串，效果改名 / 复制卡时不用再改积木。",
+    ports: [{ id: "str", direction: "out", type: "string" }],
+  });
+  def({
+    kind: "effectSource",
+    group: "data",
+    title: "效果的施加者",
+    subtitle: "读取某个效果的施加者",
+    note: "「效果 id」留空 = 当前正在执行的效果；「持有者」留空 = 流程拥有者。「施加者」是最后一次附加该效果的单位；没有记录（卡面初始效果 / 系统施加）时输出空。",
+    ports: [
+      { id: "effectId", label: "效果 id（可空＝当前效果）", direction: "in", type: "string" },
+      { id: "unit", label: "持有者（可空＝自己）", direction: "in", type: "target" },
+      { id: "target", direction: "out", type: "target" },
+    ],
+  });
+  def({
+    kind: "effectSourceSide",
+    group: "data",
+    title: "效果的施加者阵营",
+    subtitle: "获取施加者所属阵营的全体单位",
+    note: "优先按施加者当前阵营取；施加者已经不在场时，用附加效果时记下的阵营快照。没有施加者时输出空集。「效果 id」「持有者」用法同「效果的施加者」。",
+    ports: [
+      { id: "effectId", label: "效果 id（可空＝当前效果）", direction: "in", type: "string" },
+      { id: "unit", label: "持有者（可空＝自己）", direction: "in", type: "target" },
+      { id: "set", direction: "out", type: "targetset" },
+    ],
+    options: [{ key: "includeUncounted", label: "包含不计数单位（召唤物等）", control: "checkbox", default: false }],
   });
   def({
     kind: "chooseUnit",
