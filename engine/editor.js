@@ -80,6 +80,8 @@ export function createCharacter() {
     critRate: 0.05,
     critDamage: 0.5,
     speed: 100,
+    /** 每回合默认可行动次数（角色字段「速度」） */
+    actionsPerTurn: 1,
     /** 三系抗性；本源是真实伤害，没有抗性 */
     resistances: { physical: 0.05, magic: 0.05, spirit: 0.05 },
     label: "",
@@ -141,6 +143,7 @@ export function normalizeProject(project) {
   for (const ch of project.characters) {
     if (!ch) continue;
     if (ch.pack === undefined || ch.pack === null || ch.pack === "") ch.pack = "default";
+    ch.actionsPerTurn = Math.max(1, Math.floor(Number(ch.actionsPerTurn) || 1));
     // 效果不能初始挂载：旧工程里的 effectIds 直接丢弃
     delete ch.effectIds;
   }
@@ -153,6 +156,11 @@ export function normalizeProject(project) {
     card.packName = pack.name;
   }
   ensurePack("default", "默认包");
+  for (const skill of project.skills) {
+    if (!skill) continue;
+    skill.usesPerTurn = Math.max(0, Math.floor(Number(skill.usesPerTurn) || 0));
+    skill.usesTotal = Math.max(0, Math.floor(Number(skill.usesTotal) || 0));
+  }
   for (const effect of project.effects) {
     if (!effect) continue;
     effect.attrBonus = normalizeEffectAttrBonus(effect.attrBonus);
@@ -173,6 +181,10 @@ export function createSkill(id = "custom_skill_new", name = "新技能") {
     description: "",
     /** 技能图标路径；空 = 取模组 icons/skill/<短 id>.*，null = 强制不用图标 */
     image: "",
+    /** 每回合可用次数；0 = 不限 */
+    usesPerTurn: 0,
+    /** 整场对局可用次数；0 = 不限 */
+    usesTotal: 0,
     pack: "default",
     packName: "默认包",
     flow: emptyFlow(),
@@ -605,6 +617,7 @@ export function characterToUnit(ch) {
     critRate: ch.critRate,
     critDamage: ch.critDamage,
     speed: ch.speed,
+    actionsPerTurn: ch.actionsPerTurn === undefined ? 1 : ch.actionsPerTurn,
     resistances: ch.resistances,
     label: ch.label,
     description: ch.description,
@@ -631,6 +644,8 @@ export function skillToContent(skill) {
     targets: 1,
     requiresTarget: false,
     effects: [],
+    usesPerTurn: Math.max(0, Math.floor(Number(skill.usesPerTurn) || 0)),
+    usesTotal: Math.max(0, Math.floor(Number(skill.usesTotal) || 0)),
     format: "flow",
     flow: skill.flow ? normalizeFlow(skill.flow) : emptyFlow(),
   });

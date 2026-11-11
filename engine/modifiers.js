@@ -41,6 +41,7 @@ export const BONUS_KEYS = Object.freeze([
   "critRate",
   "critDamage",
   "speed",
+  "speedPct",
 ]);
 
 /** 运行时累加器里出现的键（含层叠乘子） */
@@ -61,6 +62,7 @@ export function emptyAccum() {
     critRate: 0,
     critDamage: 0,
     speed: 0,
+    speedPct: 0,
     attrDmgBoostPct: attrZero(0),
     attrPenPct: attrZero(0),
     hpMul: 1,

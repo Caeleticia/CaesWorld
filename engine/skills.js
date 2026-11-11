@@ -44,6 +44,10 @@ export function createSkillDefaults() {
      */
     effects: [],
     requiresTarget: true,
+    /** 每回合可用次数；0 = 不限。每个单位独立计数，回合开始时刷新。 */
+    usesPerTurn: 0,
+    /** 整场对局可用次数；0 = 不限。每个单位独立计数，新上场的同名单位重新计数。 */
+    usesTotal: 0,
     /** 技能图标路径；空 = 取模组 icons/skill/<短 id>.*，null = 强制不用图标 */
     image: "",
   };
@@ -52,6 +56,8 @@ export function createSkillDefaults() {
 export function createSkillCard(input = {}) {
   const skill = { ...createSkillDefaults(), ...input };
   skill.effects = Array.isArray(input.effects) ? input.effects.map((e) => ({ ...e })) : [];
+  skill.usesPerTurn = Math.max(0, Math.floor(Number(skill.usesPerTurn) || 0));
+  skill.usesTotal = Math.max(0, Math.floor(Number(skill.usesTotal) || 0));
   return skill;
 }
 
@@ -94,6 +100,8 @@ export function validateSkillCard(skill) {
   }
 
   checkNumber(errors, "targets", skill.targets, { min: -1, max: 99, integer: true });
+  checkNumber(errors, "usesPerTurn", skill.usesPerTurn, { min: 0, max: 999, integer: true });
+  checkNumber(errors, "usesTotal", skill.usesTotal, { min: 0, max: 9999, integer: true });
   if (!SKILL_FORMATS.includes(skill.format)) {
     errors.push(`format 必须是 ${SKILL_FORMATS.join("/")}：${skill.format}`);
   }

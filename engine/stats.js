@@ -45,8 +45,8 @@ export function computeStats(card, acc = emptyAccum()) {
     hp: Math.max(0, hp),
     critRate: card.critRate + a.critRate,
     critDamage: card.critDamage + a.critDamage,
-    /** 速度：卡面速度 +（来自加成系统的 speed 叠加），只决定行动顺序 */
-    speed: (card.speed || 0) + a.speed,
+    /** 速度：卡面速度 ×（1 + speedPct）+ speed 数值加成；只决定行动顺序 */
+    speed: (card.speed || 0) * (1 + (a.speedPct || 0)) + a.speed,
     /** 伤害提升百分比（全局） */
     dmgBoostPct: a.dmgBoostPct,
     /** 四系伤害提升百分比 */

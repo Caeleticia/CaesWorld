@@ -36,6 +36,8 @@ export function createUnitDefaults() {
     critRate: UNIT_DEFAULTS.critRate,
     critDamage: UNIT_DEFAULTS.critDamage,
     speed: UNIT_DEFAULTS.speed,
+    /** 每回合默认可行动次数（角色字段「速度」） */
+    actionsPerTurn: UNIT_DEFAULTS.actionsPerTurn,
     resistances: resistanceFill(UNIT_DEFAULTS.resistances),
     /** 标签（一个单位一个，可为空） */
     label: UNIT_DEFAULTS.label,
@@ -70,6 +72,7 @@ export function createUnitCard(input = {}) {
   card.label = input.label === undefined || input.label === null ? "" : String(input.label);
   card.description = input.description === undefined || input.description === null ? "" : String(input.description);
   card.resistances = resistanceFill(input.resistances ?? base.resistances);
+  card.actionsPerTurn = Math.max(1, Math.floor(Number(card.actionsPerTurn) || 1));
   card.skills = Array.isArray(input.skills) ? input.skills.slice() : [];
   card.bonuses = Array.isArray(input.bonuses) ? input.bonuses.map((b) => ({ ...b })) : [];
   // 旧数据里可能残留 effects（角色初始挂载效果）：这个能力已移除，读入时直接丢弃
@@ -127,6 +130,7 @@ export function validateUnitCard(card) {
   checkNumber(errors, "critRate", card.critRate, { min: 0, max: 1 });
   checkNumber(errors, "critDamage", card.critDamage, { min: 0 });
   checkNumber(errors, "speed", card.speed, { min: 0 });
+  checkNumber(errors, "actionsPerTurn", card.actionsPerTurn, { min: 1, max: 99, integer: true });
 
   if (!card.resistances || typeof card.resistances !== "object") {
     errors.push("resistances 必须是对象");

@@ -157,7 +157,7 @@ export function validateEffectDisplay(def) {
  * 效果「属性修正」可用的键：效果附着期间给持有者提供的面板加成。
  *
  *   atkPct / atkFlat / defPct / defFlat / hpPct / hpFlat —— 三项基础面板
- *   critRate / critDamage / speed                        —— 暴击与速度
+ *   critRate / critDamage / speed / speedPct              —— 暴击与速度（数值 / 百分比）
  *   dmgBoostPct / damageTakenPct / vulnPct / resistDownPct —— 伤害类百分比
  *   physical / magic / spirit                            —— 三系抗性（百分点）
  *   attrDmgBoostPct.<系> / attrPenPct.<系>                —— 三系伤害提升 / 三系抗性穿透
@@ -175,6 +175,7 @@ export const EFFECT_ATTR_BONUS_KEYS = Object.freeze([
   "critRate",
   "critDamage",
   "speed",
+  "speedPct",
   "dmgBoostPct",
   "damageTakenPct",
   "vulnPct",
@@ -254,6 +255,8 @@ export const UNIT_DEFAULTS = Object.freeze({
   critRate: 0.05,
   critDamage: 0.5,
   speed: 100,
+  /** 每回合默认可行动次数（角色字段「速度」）；回合开始时剩余次数重置为这个值 */
+  actionsPerTurn: 1,
   /** 三系抗性；本源是真实伤害，没有抗性字段 */
   resistances: Object.freeze({ physical: 0.05, magic: 0.05, spirit: 0.05 }),
   /** 标签：战斗中每个单位独立的字段，一个单位只有一个标签（字符串，可为空） */

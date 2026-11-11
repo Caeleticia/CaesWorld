@@ -39,8 +39,8 @@ function coerceVar(type, v) {
 
 /**
  * 目标集 → 单位数组。
- * 「目标」也是可接受的目标（单个目标 / 目标在循环里由 5-9 提供时），
- * 这样 7-1、8-1 也能直接接在需要目标集的输入上。
+ * 「目标」也是可接受的目标（单个目标 / 目标在循环里由「遍历中的单位」提供时），
+ * 这样「遍历中的阵营」「当前目标」等目标集积木也能直接接在需要目标集的输入上。
  */
 const unitList = (v) => (v ? (Array.isArray(v) ? v.filter(Boolean) : [v]) : []);
 
@@ -315,6 +315,8 @@ export function runFlow(prepared, env, opts = {}) {
   let currentNodeId = null;
   /** 起点触发的条件未通过：流程被挡在入口，后续积木一个都没执行 */
   let triggerBlocked = false;
+  /** conditionOnly 模式下求出的触发条件结果 */
+  let conditionPassed = true;
 
   function inputNode(nodeId, port) {
     return prepared.inputOwner.get(`${nodeId}.${port}`) || null;
@@ -582,14 +584,27 @@ export function runFlow(prepared, env, opts = {}) {
 
     switch (node.type) {
       case "trigger": {
-        // 可选「单位集」+ 条件：集合里只要有单位满足条件，这条触发流程才继续
-        const units = unitList(v("unit"));
-        if (units.length) {
-          const passed = units.some((u) => condOf(node, "condition", { ...local, unit: u }));
-          if (!passed) {
-            triggerBlocked = true;
-            return;
-          }
+        // 「条件」永远按「单位」求值：
+        //   · 没接「单位集」→「单位」= 自己（流程拥有者 / 技能施放者）；
+        //   · 接了「单位集」→「单位」= 集合里的任意一个单位，有一个满足就继续；
+        //     集合为空 = 没有可指代的单位，触发不通过（不再回落到自己）。
+        const hasUnitSet = Boolean(inputNode(node.id, "unit"));
+        const hasCondition = Boolean(inputNode(node.id, "condition"));
+        const units = hasUnitSet ? unitList(v("unit")) : [];
+        let passed = true;
+        if (hasUnitSet) {
+          if (!units.length) passed = false;
+          else if (hasCondition) passed = units.some((u) => condOf(node, "condition", { ...local, unit: u }));
+        } else if (hasCondition) {
+          passed = condOf(node, "condition", { ...local, unit: env.self || null });
+        }
+        if (opts.conditionOnly) {
+          conditionPassed = passed;
+          return;
+        }
+        if (!passed) {
+          triggerBlocked = true;
+          return;
         }
         go(nextId("next"));
         return;
@@ -684,6 +699,14 @@ export function runFlow(prepared, env, opts = {}) {
       }
       case "skipTurn": {
         for (const t of unitList(valueOf(node, "targets", local))) env.skipTurn(t);
+        go(nextId("next"));
+        return;
+      }
+      case "extraAction": {
+        const amount = Math.trunc(num(v("value")));
+        if (amount) {
+          for (const t of unitList(valueOf(node, "targets", local))) env.addActions?.(t, amount);
+        }
         go(nextId("next"));
         return;
       }
@@ -791,7 +814,7 @@ export function runFlow(prepared, env, opts = {}) {
   if (!start) return { ran: false, steps: 0, visited: [] };
 
   step(start, { unit: null, memo: [], sticky: [], vars: new Map() });
-  return { ran: true, steps, visited, triggerBlocked };
+  return { ran: true, steps, visited, triggerBlocked, conditionPassed };
 }
 
 /** 便捷方法：直接给 (flow, env) 运行 */

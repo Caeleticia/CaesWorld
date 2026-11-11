@@ -42,6 +42,7 @@ export const BATTLE_EVENT = Object.freeze({
   SIDE_TURN: "side:turn",
   ACTION_START: "action:start",
   ACTION_SKIP: "action:skip",
+  ACTION_POINTS: "action:points",
   SKILL: "skill",
   ATTACK: "attack",
   DAMAGE: "damage",
@@ -72,7 +73,7 @@ export const BATTLE_EVENT = Object.freeze({
  * 战斗模式：
  *   speed —— 按速度排序，每个单位轮流行动（旧流程，默认）
  *   side  —— 训练场流程：每回合双方各自入场新单位 → 触发回合开始效果 →
- *            红方先手、双方交替各选 1 个未行动单位行动 1 次 → 回合结束效果 → 下一回合
+ *            红方先手、双方交替选择有剩余可动次数的单位行动 → 回合结束效果 → 下一回合
  *   local —— 游玩 / 同屏：手牌 + 手动上场 + 定时补牌，从手牌部署单位
  */
 export const BATTLE_MODE = Object.freeze({
@@ -221,8 +222,6 @@ export function createBattle(setup) {
     /** side 模式：当前轮到哪一方选单位 */
     sideTurn: first,
     firstSide: first,
-    /** side 模式：本回合已经行动过的单位 uid */
-    acted: [],
     /** side 模式：本回合已经触发过「单位行动开始时」的单位 uid（换人时不重复触发） */
     started: [],
     /** side 模式：当前行动单位是否已经使用过技能（用于禁止用过技能后再换单位） */
@@ -311,7 +310,7 @@ export function createBattle(setup) {
       name: card.name || card.id,
       side,
       /**
-       * 阵营：目前默认等于 side，但「按单位的阵营」「效果的施加者阵营」只认这个字段。
+       * 阵营：目前默认等于 side，但「单位所属的阵营」只认这个字段。
        * 以后要做多阵营时，给单位指定不同的 faction 即可，卡包不用重写；
        * 战斗的先后手 / 站位仍按 side（两阵营）。
        */
@@ -324,6 +323,12 @@ export function createBattle(setup) {
       /** 标签：一个单位一个（召唤时可覆盖） */
       label: label !== undefined && label !== null ? String(label) : card.label,
       skills,
+      /** 每回合默认可行动次数；回合开始时 actionsLeft 重置到这个值 */
+      actionsPerTurn: Math.max(1, Math.floor(Number(card.actionsPerTurn) || 1)),
+      /** 本回合剩余可动次数；角色不再用「是否已行动」的布尔值 */
+      actionsLeft: Math.max(1, Math.floor(Number(card.actionsPerTurn) || 1)),
+      /** 本场对局每个技能的已使用次数：{ [skillId]: { round, turn, total } } */
+      skillUses: {},
       buffs: [],
       /** 效果层栈：[{ id, stacks }]，按首次附加顺序 */
       effects: [],
@@ -384,6 +389,35 @@ export function createBattle(setup) {
     return livingUnits().filter((u) => !countedOnly || u.countsAsUnit);
   };
   const displayLabel = (u) => (u && u.label !== undefined && u.label !== null ? String(u.label) : "");
+
+  /* ================= 行动次数 ================= */
+  /** 回合开始：把所有存活单位的剩余可动次数重置为「每回合默认可动次数」 */
+  function resetActions() {
+    for (const u of livingUnits()) {
+      u.actionsLeft = Math.max(1, Math.floor(Number(u.actionsPerTurn) || 1));
+    }
+  }
+  const canAct = (u) => Boolean(u) && isAlive(u) && (Number(u.actionsLeft) || 0) > 0;
+  function spendAction(u, n = 1) {
+    if (!u) return 0;
+    const before = Math.max(0, Number(u.actionsLeft) || 0);
+    u.actionsLeft = Math.max(0, before - Math.max(0, Math.floor(n) || 0));
+    return before - u.actionsLeft;
+  }
+  /** 「额外行动」积木：增加 / 扣减本回合剩余可动次数（负值扣减） */
+  function addActions(unitRef, amount) {
+    const u = getUnit(unitRef);
+    if (!u || !isAlive(u)) return null;
+    const n = Math.trunc(Number(amount) || 0);
+    if (!n) return u;
+    u.actionsLeft = Math.max(0, Math.min(99, (Number(u.actionsLeft) || 0) + n));
+    log(BATTLE_EVENT.ACTION_POINTS, {
+      unit: u.uid,
+      delta: n,
+      actionsLeft: u.actionsLeft,
+    });
+    return u;
+  }
 
   function statsOf(unit, scope = "normal") {
     if (!unit) return null;
@@ -783,7 +817,7 @@ export function createBattle(setup) {
       owner,
       /** 「当前效果」积木：正在执行的效果 id（技能流程为 null） */
       currentEffectId: effect ? effect.id : null,
-      /** 「8-1 触发的单位」积木：本次触发的单位（技能流程里就是自己） */
+      /** 「触发的单位」积木：本次触发的单位（技能流程里就是自己） */
       triggerUnit: effect ? triggerUnit || owner : owner,
       context: { unit: null },
       interrupted: false,
@@ -800,6 +834,8 @@ export function createBattle(setup) {
       pickForPlayer: (cands, opts) => playerChoose(cands, opts),
       /** 开一个新的「攻击动作」批次；同一次攻击积木的多目标命中共用它 */
       newAttackGroup: () => ++attackGroupSeq,
+      /** 「额外行动」积木：增加目标本回合剩余可动次数 */
+      addActions,
       unitData: (u, field, opts) => unitDataOf(u, field, opts),
       damage: (target, value, attribute, extra) => {
         const t = getUnit(target);
@@ -1182,9 +1218,8 @@ export function createBattle(setup) {
       recomputeAttrBonuses(unit);
     }
     state.units.push(unit);
-    // 召唤出来的单位默认「视为未行动」：本回合仍然可以行动。
-    // 只有调用方显式要求（markActed: true）时才记成已行动——例如「回合开始的部署」不需要。
-    if (markActed && !state.acted.includes(unit.uid)) state.acted.push(unit.uid);
+    // 召唤出来的单位默认保留本回合可动次数；只有调用方显式要求（markActed: true）时才用完。
+    if (markActed) unit.actionsLeft = 0;
     log(BATTLE_EVENT.SUMMON, {
       unit: uid,
       cardId: unitId,
@@ -1488,40 +1523,47 @@ export function createBattle(setup) {
 
   function advance(previous) {
     if (checkEnd()) return api;
-    // 「跳过行动」只对当前行动单位生效：若被跳过，则直接连到下一个
+    // 从上一个行动者之后找一个「本回合还有剩余可动次数」的单位；
+    // 全都没有时结束本回合，重置所有人的剩余次数后再开始下一回合。
     let guard = 0;
     for (;;) {
       guard += 1;
       if (guard > 1000) throw new Error("行动推进出现死循环");
       const order = actionOrder();
       if (!order.length) return api;
-      let next;
-      if (previous) {
-        const idx = order.findIndex((u) => u.uid === previous.uid);
-        next = order[idx >= 0 ? (idx + 1) % order.length : 0];
-        if (idx >= 0 && idx + 1 >= order.length) {
-          // 一轮结束
-          state.cycle += 1;
-          if (state.cycle >= state.maxCycles) {
-            state.status = "finished";
-            state.endReason = BATTLE_END_REASON.MAX_CYCLES;
-            log(BATTLE_EVENT.BATTLE_END, { reason: state.endReason, winner: null });
-            return api;
-          }
-          // 回合开始/结束：事件对象是「行动顺序最靠前的单位」，供触发积木的「自己指谁」取用
-          const leader = livingUnits()
-            .slice()
-            .sort((x, y) => statsOf(y).speed - statsOf(x).speed || (x.uid < y.uid ? -1 : 1))[0];
-          emit("turnEnd", leader ? [leader] : []);
-          state.turn += 1;
-          emit("turnStart", leader ? [leader] : []);
-          if (state.status === "finished") return api;
-          const order2 = actionOrder();
-          if (!order2.length) return api;
-          next = order2[0];
+      const startIdx = previous ? order.findIndex((u) => u.uid === previous.uid) + 1 : 0;
+      let next = null;
+      for (let i = 0; i < order.length; i += 1) {
+        const u = order[(startIdx + i + order.length) % order.length];
+        if (canAct(u)) {
+          next = u;
+          break;
         }
-      } else {
-        next = order[0];
+      }
+      if (!next) {
+        // 一轮结束
+        state.cycle += 1;
+        if (state.cycle >= state.maxCycles) {
+          state.status = "finished";
+          state.endReason = BATTLE_END_REASON.MAX_CYCLES;
+          log(BATTLE_EVENT.BATTLE_END, { reason: state.endReason, winner: null });
+          return api;
+        }
+        // 回合开始/结束：事件对象是「行动顺序最靠前的单位」，供触发积木的「自己指谁」取用
+        const leader = livingUnits()
+          .slice()
+          .sort((x, y) => statsOf(y).speed - statsOf(x).speed || (x.uid < y.uid ? -1 : 1))[0];
+        emit("turnEnd", leader ? [leader] : []);
+        state.turn += 1;
+        state.started = [];
+        state.skippedThisTurn = [];
+        state.actionUsed = false;
+        resetActions();
+        emit("turnStart", leader ? [leader] : []);
+        if (state.status === "finished") return api;
+        const order2 = actionOrder();
+        if (!order2.length) return api;
+        next = order2.find((u) => canAct(u)) || order2[0];
       }
       state.actionSeq += 1;
       state.activeId = next.uid;
@@ -1530,6 +1572,7 @@ export function createBattle(setup) {
       emit("unitTurnStart", [next]);
       if (state.status === "finished") return api;
       if (state.skippedThisTurn.includes(next.uid)) {
+        next.actionsLeft = 0;
         log(BATTLE_EVENT.ACTION_SKIP, { activeId: next.uid });
         log(BATTLE_EVENT.TURN_END, { activeId: next.uid, actionSeq: state.actionSeq, skipped: true });
         previous = next;
@@ -1541,9 +1584,9 @@ export function createBattle(setup) {
   }
 
   /* ================= side 模式：回合 / 选人 / 交替行动 ================= */
-  /** 某方是否还有「本回合没行动过」的存活单位 */
+  /** 某方是否还有「本回合有剩余可动次数」的存活单位 */
   function hasActable(side) {
-    return livingOf(side).some((u) => !state.acted.includes(u.uid));
+    return livingOf(side).some((u) => canAct(u));
   }
 
   /** 行动顺序最靠前的存活单位（回合开始/结束事件的对象） */
@@ -1569,10 +1612,11 @@ export function createBattle(setup) {
       log(BATTLE_EVENT.BATTLE_END, { reason: state.endReason, winner: null });
       return;
     }
-    state.acted = [];
     state.started = [];
     state.skippedThisTurn = [];
     state.activeId = null;
+    state.actionUsed = false;
+    resetActions();
     if (localMode) {
       // 同屏模式不自动从牌组上场；按设置给双方交替补牌
       refillLocal();
@@ -1636,7 +1680,7 @@ export function createBattle(setup) {
     if (state.phase !== BATTLE_PHASE.SELECT && state.phase !== BATTLE_PHASE.ACT) return false;
     if (state.phase === BATTLE_PHASE.ACT && state.actionUsed) return false;
     const u = getUnit(unitRef);
-    if (!isAlive(u) || u.side !== state.sideTurn || state.acted.includes(u.uid)) return false;
+    if (!isAlive(u) || u.side !== state.sideTurn || !canAct(u)) return false;
     if (state.phase === BATTLE_PHASE.ACT && state.activeId === u.uid) return true;
     state.activeId = u.uid;
     state.phase = BATTLE_PHASE.ACT;
@@ -1658,7 +1702,7 @@ export function createBattle(setup) {
     // 否则同一个单位会在本回合被反复选中，控制效果等于没有。
     if (state.skippedThisTurn.includes(u.uid)) {
       state.skippedThisTurn = state.skippedThisTurn.filter((uid) => uid !== u.uid);
-      if (!state.acted.includes(u.uid)) state.acted.push(u.uid);
+      u.actionsLeft = 0;
       state.activeId = null;
       state.actionUsed = false;
       state.phase = BATTLE_PHASE.SELECT;
@@ -1689,7 +1733,7 @@ export function createBattle(setup) {
         log(BATTLE_EVENT.BUFF_EXPIRED, { unit: A.uid, buffs: expired.map((b) => b.uid) });
       }
     }
-    if (A && !state.acted.includes(A.uid)) state.acted.push(A.uid);
+    if (A) A.actionsLeft = 0;
     log(BATTLE_EVENT.TURN_END, { activeId: A ? A.uid : null, actionSeq: state.actionSeq });
     if (state.status !== "running") return api;
     return advanceSide(A);
@@ -1725,6 +1769,95 @@ export function createBattle(setup) {
     return out;
   }
 
+  /** 技能流程预处理缓存：技能卡在一次战斗里不会变，避免 UI/AI 反复 prepare */
+  const flowCache = new WeakMap();
+  function preparedFlowOf(flow) {
+    if (!flow || typeof flow !== "object") return null;
+    let prepared = flowCache.get(flow);
+    if (!prepared) {
+      prepared = prepareFlow(flow);
+      flowCache.set(flow, prepared);
+    }
+    return prepared;
+  }
+
+  /** 技能「释放条件」：由释放类触发积木的 condition 输入决定；没接条件 = 可以释放 */
+  function skillConditionOk(u, skill) {
+    if (!skill || skill.format !== "flow" || !skill.flow) return true;
+    const prepared = preparedFlowOf(skill.flow);
+    if (!prepared || !prepared.ok) return false;
+    const castTriggers = [...prepared.nodes.values()].filter(
+      (n) =>
+        n &&
+        n.type === "trigger" &&
+        n.options &&
+        (n.options.event === "skillCastSelf" || n.options.event === "skillCast")
+    );
+    if (!castTriggers.length) return true;
+    try {
+      return castTriggers.some((trigger) => {
+        const env = flowEnv(u, null);
+        // 可用性检查只是求条件，不应读取上一次技能的目标、不应向玩家弹选择框，
+        // 也不能消耗战斗 RNG（否则 UI 每次刷新都会改变战斗随机序列 / 存档重放）。
+        env.currentTarget = () => [];
+        env.pickForPlayer = () => null;
+        env.rng = () => 0.5;
+        const res = runFlow(prepared, env, {
+          triggerNode: trigger.id,
+          conditionOnly: true,
+        });
+        return res.conditionPassed !== false;
+      });
+    } catch {
+      // 条件本身有错时不阻塞 UI：技能显示为不可用，具体错误由释放时的流程错误日志报告
+      return false;
+    }
+  }
+
+  /**
+   * 技能的可用状态：释放条件 + 每回合次数 + 总次数。
+   * 0 次 = 不限；每回合次数按当前回合数（state.turn）独立计算，单位本身保存总次数。
+   */
+  function skillStateOf(u, skill) {
+    const perTurn = Math.max(0, Math.floor(Number(skill?.usesPerTurn) || 0));
+    const total = Math.max(0, Math.floor(Number(skill?.usesTotal) || 0));
+    const rec = u && u.skillUses ? u.skillUses[skill?.id] : null;
+    const turnUsed = rec && rec.round === state.turn ? Math.max(0, Number(rec.turn) || 0) : 0;
+    const totalUsed = rec ? Math.max(0, Number(rec.total) || 0) : 0;
+    const turnLeft = perTurn === 0 ? null : Math.max(0, perTurn - turnUsed);
+    const totalLeft = total === 0 ? null : Math.max(0, total - totalUsed);
+    const conditionOk = skillConditionOk(u, skill);
+    let reason = "";
+    if (!isAlive(u)) reason = "单位已不在场";
+    else if (skill?.type !== "active") reason = "被动技能";
+    else if (turnLeft === 0) reason = "本回合次数已用完";
+    else if (totalLeft === 0) reason = "总次数已用完";
+    else if (!conditionOk) reason = "释放条件未满足";
+    return {
+      perTurn,
+      total,
+      turnUsed,
+      totalUsed,
+      turnLeft,
+      totalLeft,
+      conditionOk,
+      available: !reason,
+      reason,
+    };
+  }
+
+  function spendSkillUse(u, skill) {
+    if (!u || !skill) return;
+    const id = skill.id;
+    let rec = u.skillUses[id];
+    if (!rec || rec.round !== state.turn) {
+      rec = { round: state.turn, turn: 0, total: rec ? Math.max(0, Number(rec.total) || 0) : 0 };
+    }
+    rec.turn += 1;
+    rec.total += 1;
+    u.skillUses[id] = rec;
+  }
+
   function useSkill(index, opts = {}) {
     if (state.status !== "running") return null;
     const A = active();
@@ -1732,6 +1865,9 @@ export function createBattle(setup) {
     const skill = allSkillsOf(A)[index];
     if (!skill) throw new Error(`${A.name} 没有第 ${index} 个技能`);
     if (skill.type !== "active") throw new Error(`${skill.name} 是被动技能，不能主动使用`);
+    if (!canAct(A)) throw new Error(`${A.name} 本回合没有剩余可动次数`);
+    const skillState = skillStateOf(A, skill);
+    if (!skillState.available) throw new Error(`${skill.name} 当前不可用：${skillState.reason}`);
 
     let primary = opts.targetRef ? getUnit(opts.targetRef) : null;
     if (primary && !isAlive(primary)) return null;
@@ -1746,6 +1882,10 @@ export function createBattle(setup) {
       skillName: skill.name,
       target: primary ? primary.uid : null,
     });
+    // 一次技能 = 消耗 1 次可动次数 + 1 次技能次数
+    spendSkillUse(A, skill);
+    spendAction(A, 1);
+    // 本次行动已经使用过技能：不能再换人；还有剩余次数时留在本单位继续用技能
     state.actionUsed = true;
 
     // 当前目标：技能的目标单独放一个变量，因为执行时会被其他流程里的流程上下文盖住
@@ -1885,6 +2025,9 @@ export function createBattle(setup) {
       hpMax: s.hp,
       atk: s.atk,
       def: s.def,
+      /** 每回合默认可动次数 / 本回合剩余可动次数 */
+      actionsPerTurn: u.actionsPerTurn,
+      actionsLeft: u.actionsLeft,
       label: displayLabel(u),
       state: u.state,
       countsAsUnit: u.countsAsUnit,
@@ -1892,7 +2035,8 @@ export function createBattle(setup) {
       invincible: isInvincible(u),
       parentKey: u.parentKey,
       /** side 模式：这个单位本回合是否已经行动过 */
-      acted: state.acted.includes(u.uid),
+      /** 兼容旧界面：没有剩余可动次数就等价于「已行动」 */
+      acted: (Number(u.actionsLeft) || 0) <= 0,
       effects: u.effects.map((e) => ({
         id: e.id,
         stacks: e.stacks,
@@ -1900,7 +2044,12 @@ export function createBattle(setup) {
         sourceFaction: e.sourceFaction || null,
       })),
       buffs: u.buffs.map((b) => ({ uid: b.uid, label: b.label, duration: b.duration })),
-      skills: allSkillsOf(u).map((sk) => ({ id: sk.id, name: sk.name, type: sk.type })),
+      skills: allSkillsOf(u).map((sk) => ({
+        id: sk.id,
+        name: sk.name,
+        type: sk.type,
+        ...skillStateOf(u, sk),
+      })),
     };
   }
 
@@ -1920,7 +2069,7 @@ export function createBattle(setup) {
       sideTurn: state.sideTurn,
       firstSide: state.firstSide,
       maxUnits: state.maxUnits,
-      acted: state.acted.slice(),
+      acted: state.units.filter((u) => isAlive(u) && (Number(u.actionsLeft) || 0) <= 0).map((u) => u.uid),
       invincibleSides: state.invincibleSides.slice(),
       decks: { ally: (state.decks.ally || []).length, enemy: (state.decks.enemy || []).length },
       ...(localMode
@@ -2030,6 +2179,8 @@ export function createBattle(setup) {
     if (!A) return api;
     lastEndedAction = A;
     state.skippedThisTurn = state.skippedThisTurn.filter((k) => k !== A.uid);
+    // 主动结束行动：本回合剩余可动次数作废，下回合重置
+    A.actionsLeft = 0;
     return finishAction(A);
   }
 
@@ -2070,6 +2221,12 @@ export function createBattle(setup) {
     /** 当前模式（speed / side / local） */
     mode: state.mode,
     allSkillsOf,
+    /** 技能可用状态：释放条件 / 本回合剩余次数 / 总剩余次数 */
+    skillStateOf,
+    /** 增加 / 扣减单位本回合剩余可动次数（额外行动） */
+    addActions,
+    resetActions,
+    canAct,
     isAlive,
     isInvincible,
     effectStacks,

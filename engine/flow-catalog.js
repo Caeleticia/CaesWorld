@@ -50,7 +50,9 @@ export const BLOCK_GROUPS = Object.freeze({
   action: { label: "执行类", color: "#F08A2C" },
   structure: { label: "结构类", color: "#E6B422" },
   logic: { label: "条件类", color: "#3FA45B" },
-  data: { label: "数据类", color: "#5FB0E6" },
+  "data-op": { label: "运算", color: "#5FB0E6" },
+  "data-unit": { label: "单位", color: "#4A9FD8" },
+  "data-set": { label: "目标集", color: "#78C8F0" },
   variable: { label: "变量类", color: "#9B59B6" },
 });
 
@@ -177,11 +179,11 @@ export function buildFlowCatalog(ctx = {}) {
     kind: "trigger",
     group: "trigger",
     title: "触发",
-    subtitle: "满足条件时触发",
-    note: "流程入口。技能流程可以放多个触发，每个触发执行它后面的内容；效果的每个触发是一条独立流程。可选的「单位集」+「条件」会在集合里任一单位满足条件时才继续。",
+    subtitle: "满足条件时触发（条件按「单位」求值）",
+    note: "流程入口。技能流程可以放多个触发，每个触发执行它后面的内容；效果的每个触发是一条独立流程。「条件」按「单位」求值：没接「单位集」时「单位」= 自己（技能施放者 / 效果持有者）；接了「单位集」时「单位」= 集合里的任意一个单位，有一个满足条件就继续，集合为空则不继续。技能释放条件：把布尔条件接到「单位释放该技能」触发的「条件」输入；不接 = 始终可释放。",
     ports: [
       { id: "unit", label: "单位集（可选）", direction: "in", type: "targetset" },
-      { id: "condition", label: "条件（可选）", direction: "in", type: "condition" },
+      { id: "condition", label: "条件（可选；技能释放条件）", direction: "in", type: "condition" },
       { id: "next", direction: "out" },
     ],
     inflow: null,
@@ -360,6 +362,20 @@ export function buildFlowCatalog(ctx = {}) {
     outflows: ["next"],
   });
   def({
+    kind: "extraAction",
+    group: "action",
+    title: "额外行动",
+    subtitle: "增加目标单位本回合剩余的可动次数",
+    note: "数值为负时可以扣减可动次数。只影响本回合；回合开始时剩余次数会重置为角色的「每回合可动次数」。",
+    ports: [
+      { id: "in", direction: "in" },
+      { id: "targets", label: "目标集", direction: "in", type: "targetset" },
+      { id: "value", label: "增加次数", direction: "in", type: "number" },
+      { id: "next", direction: "out" },
+    ],
+    outflows: ["next"],
+  });
+  def({
     kind: "immuneDamage",
     group: "action",
     title: "免疫伤害",
@@ -435,7 +451,7 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "end", label: "结束", direction: "out" },
     ],
     outflows: ["body", "end"],
-    options: [{ key: "context", label: "循环内「7-1 当前目标站」指代", control: "select", default: "each", options: [
+    options: [{ key: "context", label: "循环内「遍历中的单位」指代", control: "select", default: "each", options: [
       { value: "each", label: "本次遍历的单位" },
       { value: "stay", label: "不变" },
     ] }],
@@ -499,7 +515,7 @@ export function buildFlowCatalog(ctx = {}) {
   /* ---------------- 5 数据类 ---------------- */
   def({
     kind: "number",
-    group: "data",
+    group: "data-op",
     title: "数值",
     subtitle: "键入一个固定数值",
     ports: [{ id: "num", direction: "out", type: "number" }],
@@ -523,7 +539,7 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "string",
-    group: "data",
+    group: "data-op",
     title: "字符串",
     subtitle: "键入一个固定字符串",
     ports: [{ id: "str", direction: "out", type: "string" }],
@@ -531,7 +547,7 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "math",
-    group: "data",
+    group: "data-op",
     title: "运算",
     subtitle: "对数值进行运算",
     note: "max / min 的输入数量等于「已连接数 + 1」，连满后会再长出一个输入口。",
@@ -540,7 +556,7 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "getUnit",
-    group: "data",
+    group: "data-unit",
     title: "获取单位",
     subtitle: "从目标集中取第几个单位",
     ports: [
@@ -551,19 +567,19 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "targetSide",
-    group: "data",
+    group: "data-set",
     title: "获取目标集",
     subtitle: "获取敌方/我方全体",
     ports: [{ id: "set", direction: "out", type: "targetset" }],
     options: [{ key: "side", label: "目标集", control: "select", options: SIDE_OPTIONS, default: "enemy" }],
-    note: "「敌方 / 我方」按两阵营简化处理：取「自己所在阵营 / 对立阵营」。多阵营或要按「施加者的阵营」取人时，请用「按单位的阵营」「效果的施加者阵营」。",
+    note: "「敌方 / 我方」按两阵营简化处理：取「自己所在阵营 / 对立阵营」。多阵营或要按单位所属阵营取人时，请用「单位所属的阵营」。",
   });
   def({
     kind: "factionSet",
-    group: "data",
-    title: "按单位的阵营",
-    subtitle: "获取某个单位所属阵营的全体单位",
-    note: "不依赖两阵营假设：按单位身上记录的阵营取同阵营的存活单位。单位留空 = 自己。默认只取计数单位（召唤物等不计数单位需要勾选）。",
+    group: "data-set",
+    title: "单位所属的阵营",
+    subtitle: "输入一个单位，获取该单位所属阵营的全体单位",
+    note: "不依赖两阵营假设：按单位身上记录的阵营取同阵营的存活单位。单位留空 = 自己。默认只取计数单位（召唤物等不计数单位需要勾选）。旧名「按单位的阵营」，现统一为「单位所属的阵营」。",
     ports: [
       { id: "unit", label: "单位（可空＝自己）", direction: "in", type: "target" },
       { id: "set", direction: "out", type: "targetset" },
@@ -572,7 +588,7 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "allUnits",
-    group: "data",
+    group: "data-set",
     title: "全部单位",
     subtitle: "场上所有存活单位",
     note: "多阵营时用来按「获取单位数据 → 阵营」自行筛选；默认只取计数单位。",
@@ -581,7 +597,7 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "currentEffect",
-    group: "data",
+    group: "data-op",
     title: "当前效果",
     subtitle: "正在执行的这个效果的 id",
     note: "只能在效果流程里用；技能流程里没有「当前效果」，读到空字符串。用来代替手写的效果 id 字符串，效果改名 / 复制卡时不用再改积木。",
@@ -589,7 +605,7 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "effectSource",
-    group: "data",
+    group: "data-unit",
     title: "效果的施加者",
     subtitle: "读取某个效果的施加者",
     note: "「效果 id」留空 = 当前正在执行的效果；「持有者」留空 = 流程拥有者。「施加者」是最后一次附加该效果的单位；没有记录（卡面初始效果 / 系统施加）时输出空。",
@@ -601,8 +617,8 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "effectSourceSide",
-    group: "data",
-    title: "效果的施加者阵营",
+    group: "data-set",
+    title: "效果的施加者阵营（旧版，已隐藏）",
     subtitle: "获取施加者所属阵营的全体单位",
     note: "优先按施加者当前阵营取；施加者已经不在场时，用附加效果时记下的阵营快照。没有施加者时输出空集。「效果 id」「持有者」用法同「效果的施加者」。",
     ports: [
@@ -611,10 +627,11 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "set", direction: "out", type: "targetset" },
     ],
     options: [{ key: "includeUncounted", label: "包含不计数单位（召唤物等）", control: "checkbox", default: false }],
+    hidden: true,
   });
   def({
     kind: "chooseUnit",
-    group: "data",
+    group: "data-unit",
     title: "选择单位",
     subtitle: "由玩家在战斗中指定单位",
     ports: [
@@ -626,7 +643,7 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "setOp",
-    group: "data",
+    group: "data-set",
     title: "集合运算",
     subtitle: "对目标集进行集合运算",
     ports: [
@@ -648,7 +665,7 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "unitData",
-    group: "data",
+    group: "data-op",
     title: "获取单位数据",
     subtitle: "获取某个单位的数据字段",
     ports: [
@@ -660,7 +677,7 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "selfData",
-    group: "data",
+    group: "data-op",
     title: "自己的数值",
     subtitle: "直接读取流程拥有者自己的数据字段",
     note: "不需要连「目标」，永远取流程的拥有者（技能施放者 / 效果持有者）。字段与「获取单位数据」相同。",
@@ -672,9 +689,9 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "filterSet",
-    group: "data",
+    group: "data-set",
     title: "筛选目标集",
-    subtitle: "保留满足条件的单位（指代用 7-1）",
+    subtitle: "保留满足条件的单位（条件里用「遍历中的单位」指代当前单位）",
     ports: [
       { id: "targets", label: "目标集", direction: "in", type: "targetset" },
       { id: "condition", label: "条件", direction: "in", type: "condition" },
@@ -683,14 +700,14 @@ export function buildFlowCatalog(ctx = {}) {
   });
   def({
     kind: "contextUnit",
-    group: "data",
+    group: "data-unit",
     title: "遍历中的单位",
     subtitle: "占位符，指代遍历中选中的单位",
     ports: [{ id: "target", direction: "out", type: "target" }],
   });
   def({
     kind: "selfUnit",
-    group: "data",
+    group: "data-unit",
     title: "单位",
     subtitle: "获取指定单位",
     ports: [{ id: "target", direction: "out", type: "target" }],
@@ -756,24 +773,24 @@ export function buildFlowCatalog(ctx = {}) {
     options: [{ key: "name", label: "变量名", control: "text", default: "var" }],
   });
 
-  /* ---------------- 7 补全（实现 5-8 的「用 5-9 指代」） ---------------- */
+  /* ---------------- 补全：让「筛选目标集」的条件可以用「遍历中的单位」指代 ---------------- */
   def({
     kind: "contextSide",
-    group: "data",
+    group: "data-set",
     title: "遍历中的阵营",
     subtitle: "占位符，指代遍历中选中单位的阵营（用于拼敌方/我方全体 - 当前目标）",
     ports: [{ id: "set", direction: "out", type: "targetset" }],
   });
   def({
     kind: "currentTarget",
-    group: "data",
+    group: "data-set",
     title: "当前目标",
     subtitle: "技能被打出的目标（战斗中由玩家选定）",
     ports: [{ id: "set", direction: "out", type: "targetset" }],
   });
   def({
     kind: "triggerUnit",
-    group: "data",
+    group: "data-unit",
     title: "触发的单位",
     subtitle: "触发积木里连接的「单位」（没连则为本流程的拥有者）",
     ports: [{ id: "target", direction: "out", type: "target" }],
@@ -784,6 +801,17 @@ export function buildFlowCatalog(ctx = {}) {
   const op = math.options[0].default;
   math.dynamicInputs = true;
   math.fixedInputPorts = (options = {}) => MATH_FIXED_INPUTS[options.operator] || MATH_FIXED_INPUTS[op] || [];
+
+  /** 数据类内部排序：运算 → 单位 → 目标集；编辑器按 order 排，不依赖定义顺序 */
+  const DATA_ORDER = {
+    number: 1, string: 2, math: 3, unitData: 4, selfData: 5, currentEffect: 6,
+    getUnit: 11, chooseUnit: 12, selfUnit: 13, contextUnit: 14, triggerUnit: 15, effectSource: 16,
+    targetSide: 21, factionSet: 22, allUnits: 23, setOp: 24, filterSet: 25, contextSide: 26, currentTarget: 27,
+    effectSourceSide: 28,
+  };
+  for (const [kind, order] of Object.entries(DATA_ORDER)) {
+    if (blocks[kind]) blocks[kind].order = order;
+  }
 
   return { blocks, DATA_TYPES, BLOCK_GROUPS, TRIGGER_EVENTS, UNIT_DATA_FIELDS, MATH_OPERATORS };
 }
