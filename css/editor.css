@@ -1041,3 +1041,13 @@ path.drag-line { stroke: #ff6b8b; stroke-width: 2.5; stroke-dasharray: 6 5; fill
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(255, 107, 139, 0.18);
 }
+
+
+/* 移动端 / 竖屏：挂载技能区可折叠，避免编辑时上下滚动过长 */
+.ed-mount-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ed-mount-head h2 { margin: 0; }
+#btn-toggle-mount { display: none; }
+@media (max-width: 900px) {
+  #btn-toggle-mount { display: inline-flex; }
+  .ed-col-mount.is-collapsed .ed-mount-body { display: none; }
+}
