@@ -62,7 +62,8 @@ function buffDesc(buff) {
     hpFlat: "生命值",
     critRate: "暴击率",
     critDamage: "暴击伤害",
-    speed: "速度",
+    speed: "速度（行动顺序）",
+  speedPct: "速度加成 %",
     dmgBoostPct: "伤害提升",
     resistDownPct: "抗性降低",
     damageTakenPct: "受到伤害提升",
@@ -194,7 +195,9 @@ export function createBattleDetail({ container, battle, registry, onOpenChange }
     const stats = battle.statsOf(unit);
     const pub = pubOf(view.uid);
     const quality = QUALITY_LABEL[card.quality] || card.quality || "白";
-    const status = pub?.acted ? "本回合已行动" : "本回合未行动";
+    const status = pub
+      ? `本回合剩余行动 ${Number(pub.actionsLeft) || 0} / ${Number(pub.actionsPerTurn) || 1}`
+      : "";
     const invincible = unit.invincible || battle.state.invincibleSides.includes(unit.side);
     const effects = collectUnitEffects(unit);
     const resist = stats.resistances || {};
@@ -224,7 +227,8 @@ export function createBattleDetail({ container, battle, registry, onOpenChange }
               ${statRow("生命值", card.baseHp, stats.hp, { wide: true, extra: `当前 ${Math.ceil(unit.hp)}` })}
               ${statRow("暴击率", card.critRate, stats.critRate, { percent: true })}
               ${statRow("暴击伤害", card.critDamage, stats.critDamage, { percent: true })}
-              ${statRow("速度", card.speed, stats.speed)}
+              ${statRow("行动顺序", card.speed, stats.speed)}
+              ${statRow("每回合行动", card.actionsPerTurn ?? 1, pub?.actionsPerTurn ?? card.actionsPerTurn ?? 1)}
               <li class="is-wide"><span>抗性</span><b>物理 ${pct(resist.physical || 0)} · 魔法 ${pct(
                 resist.magic || 0
               )} · 精神 ${pct(resist.spirit || 0)}</b></li>
@@ -367,6 +371,7 @@ export function createBattleDetail({ container, battle, registry, onOpenChange }
       body: `<section class="tbd-section">
         <h4>技能介绍</h4>
         <p class="tbd-entry-desc">${escapeHtml(skill.description || "这个技能还没有填写介绍。")}</p>
+        <p class="tbd-entry-desc">每回合 ${skill.usesPerTurn ? `${skill.usesPerTurn} 次` : "不限"} · 整场 ${skill.usesTotal ? `${skill.usesTotal} 次` : "不限"}</p>
       </section>`,
     });
   }

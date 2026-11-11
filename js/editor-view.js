@@ -190,6 +190,8 @@ async function hydrateFromPacks({ force = false } = {}) {
         image: card.image === null ? null : card.image || "",
         pack: card.pack || DEFAULT_PACK_ID,
         packName: card.packName || (card.pack === DEFAULT_PACK_ID ? DEFAULT_PACK_NAME : card.pack),
+        usesPerTurn: Math.max(0, Math.floor(Number(card.usesPerTurn) || 0)),
+        usesTotal: Math.max(0, Math.floor(Number(card.usesTotal) || 0)),
       });
       s.flow = flowFromContent(card.flow);
       project.skills.push(s);
@@ -1203,6 +1205,7 @@ function renderCharacter() {
     "f-crit": ch.critRate,
     "f-critdmg": ch.critDamage,
     "f-speed": ch.speed,
+    "f-actions": ch.actionsPerTurn ?? 1,
     "f-label": ch.label,
     "f-intro": ch.description,
   };
@@ -1234,7 +1237,7 @@ function renderCharacter() {
   const unit = characterToUnit(ch);
   const stats = $("#ed-unit-stats");
   if (stats) {
-    stats.textContent = `Lv.${unit.level} · HP ${unit.baseHp} · ATK ${unit.baseAtk} · DEF ${unit.baseDef} · 暴击 ${(
+    stats.textContent = `Lv.${unit.level} · HP ${unit.baseHp} · ATK ${unit.baseAtk} · DEF ${unit.baseDef} · 行动顺序 ${unit.speed} · 每回合 ${unit.actionsPerTurn} 次 · 暴击 ${(
       unit.critRate * 100
     ).toFixed(0)}% / ${(unit.critDamage * 100).toFixed(0)}%`;
   }
@@ -1267,6 +1270,16 @@ function renderSkillPanel() {
       ["passive", "被动"],
     ], s.type))}
     ${field(
+      "每回合可用次数",
+      `<input data-skill="usesPerTurn" type="number" min="0" step="1" value="${Number(s.usesPerTurn) || 0}" />`,
+      "0 = 不限；每个单位独立计数，回合开始时刷新"
+    )}
+    ${field(
+      "总可用次数",
+      `<input data-skill="usesTotal" type="number" min="0" step="1" value="${Number(s.usesTotal) || 0}" />`,
+      "0 = 不限；整场对局每个单位独立计数，新上场的同名单位重新计数"
+    )}
+    ${field(
       "技能图标",
       `<input data-skill="image" value="${escapeHtml(cardIconPath(s))}" placeholder="${escapeHtml(
         defaultCardImageName(s)
@@ -1283,7 +1296,7 @@ function renderSkillPanel() {
       <span>触发</span>
       <button class="btn small" type="button" data-action="add-skill-trigger">+ 新触发</button>
     </div>
-    <p class="hint">每个触发选自己的条件，后续积木接在对应触发后面；同一技能可以放多个触发。新触发默认「单位释放该技能」，退场 / 入场等事件触发对主动和被动技能都会生效。</p><p class="hint">退场分裂：触发条件选「单位退场时」，后接「召唤单位」或「召唤子单位」；单位 id 留空 = 召唤自己。</p>`;
+    <p class="hint">每个触发选自己的条件，后续积木接在对应触发后面；同一技能可以放多个触发。新触发默认「单位释放该技能」，退场 / 入场等事件触发对主动和被动技能都会生效。</p><p class="hint">释放条件：把一个条件积木接到「单位释放该技能」触发积木的「条件」输入上；条件不满足时技能不可选中。不接条件 = 始终可释放。</p><p class="hint">退场分裂：触发条件选「单位退场时」，后接「召唤单位」或「召唤子单位」；单位 id 留空 = 召唤自己。</p>`;
 }
 
 function renderEffectPanel() {
@@ -1525,7 +1538,8 @@ const ATTR_BONUS_LABEL = {
   hpFlat: "生命值提升值",
   critRate: "暴击率",
   critDamage: "暴击伤害",
-  speed: "速度",
+  speed: "速度（行动顺序）",
+  speedPct: "速度加成 %",
   dmgBoostPct: "伤害提升 %",
   damageTakenPct: "受到伤害提升 %",
   vulnPct: "易伤 %",
@@ -2793,6 +2807,8 @@ function applySkillField(card, key, value) {
     active.skill = card;
   } else if (key === "image") {
     card.image = String(value ?? "").trim();
+  } else if (key === "usesPerTurn" || key === "usesTotal") {
+    card[key] = Math.max(0, Math.floor(Number(value) || 0));
   } else card[key] = String(value ?? "");
 }
 
@@ -3304,6 +3320,8 @@ const edit = {
     if (key === "image") ch.image = value === null ? null : String(value || "");
     else if (["level", "baseHp", "baseAtk", "baseDef", "critRate", "critDamage", "speed"].includes(key)) {
       ch[key] = Number(value) || 0;
+    } else if (key === "actionsPerTurn") {
+      ch.actionsPerTurn = Math.max(1, Math.floor(Number(value) || 1));
     } else if (["occupiesSlot", "countsAsUnit", "invincible", "obtainable"].includes(key)) ch[key] = Boolean(value);
     else if (["name", "id", "quality", "label", "description", "pack", "packName"].includes(key)) ch[key] = String(value ?? "");
     else throw new Error(`未知角色字段：${key}`);
@@ -3574,6 +3592,7 @@ export async function initEditor() {
   if (!currentSkill()) active.skill = (project.skills || [])[0] || null;
   if (!currentEffect()) active.effect = (project.effects || [])[0] || null;
   setupForms();
+  setupMountCollapse();
   setupCanvas();
   // 设置页清除本地数据后：立即丢弃内存里的旧工程 / 旧卡组，重新从存储和卡包同步
   onDataCleared((kind) => {
@@ -3614,18 +3633,23 @@ export async function initEditor() {
 function renderPalette() {
   const groups = {};
   for (const block of Object.values(catalog.blocks)) {
+    if (block.hidden) continue;
     if (block.group === "trigger" && active.tab === "skills" && block.kind !== "trigger") continue;
     (groups[block.group] = groups[block.group] || []).push(block);
   }
-  const order = ["trigger", "action", "structure", "logic", "data", "variable"];
+  const order = ["trigger", "action", "structure", "logic", "data-op", "data-unit", "data-set", "variable"];
   const html = order
     .filter((g) => groups[g])
-    .map(
-      (g) => `
+    .map((g) => {
+      const meta = BLOCK_GROUPS[g] || { label: g, color: "#5FB0E6" };
+      const items = groups[g]
+        .slice()
+        .sort((a, b) => (a.order || 0) - (b.order || 0));
+      return `
       <div class="palette-group">
-        <div class="palette-title" style="--g:${BLOCK_GROUPS[g].color}">${escapeHtml(BLOCK_GROUPS[g].label)}</div>
+        <div class="palette-title" style="--g:${meta.color}">${escapeHtml(meta.label)}</div>
         <div class="palette-items">
-          ${groups[g]
+          ${items
             .map(
               (b) =>
                 `<button class="palette-item" type="button" data-block="${escapeHtml(b.kind)}" draggable="true" style="--g:${b.color}" title="${escapeHtml(
@@ -3634,8 +3658,8 @@ function renderPalette() {
             )
             .join("")}
         </div>
-      </div>`
-    )
+      </div>`;
+    })
     .join("");
   for (const id of ["#ed-palette", "#ed-palette-2"]) {
     const el = $(id);
@@ -3721,6 +3745,7 @@ function unitCardToCharacter(card) {
     critRate: card.critRate,
     critDamage: card.critDamage,
     speed: card.speed,
+    actionsPerTurn: card.actionsPerTurn === undefined ? 1 : Math.max(1, Math.floor(Number(card.actionsPerTurn) || 1)),
     label: card.label || "",
     description: card.description || "",
     occupiesSlot: card.occupiesSlot,
@@ -3785,6 +3810,8 @@ function importPackDoc(doc, file) {
     card.image = s.image === null ? null : s.image || "";
     card.pack = id;
     card.packName = name;
+    card.usesPerTurn = Math.max(0, Math.floor(Number(s.usesPerTurn) || 0));
+    card.usesTotal = Math.max(0, Math.floor(Number(s.usesTotal) || 0));
     card.flow = flowFromContent(s.flow);
     if (s.ui) card.ui = clone(s.ui);
     upsertCard(project.skills || (project.skills = []), card);
@@ -4027,6 +4054,30 @@ function flushSaveSync() {
   }
 }
 
+function setupMountCollapse() {
+  const col = $("#ed-mount-col");
+  const btn = $("#btn-toggle-mount");
+  if (!col || !btn) return;
+  const media = window.matchMedia("(max-width: 900px)");
+  const apply = () => {
+    // 电脑 / 横屏强制展开，并隐藏折叠按钮；移动端默认展开
+    if (!media.matches) col.classList.remove("is-collapsed");
+    const collapsed = col.classList.contains("is-collapsed");
+    btn.hidden = !media.matches;
+    btn.textContent = collapsed ? "展开" : "收起";
+    btn.setAttribute("aria-expanded", String(!collapsed));
+  };
+  if (!btn.dataset.bound) {
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      col.classList.toggle("is-collapsed");
+      apply();
+    });
+    media.addEventListener?.("change", apply);
+  }
+  apply();
+}
+
 function setupForms() {
   const ch = () => {
     const cur = currentCharacter();
@@ -4061,6 +4112,7 @@ function setupForms() {
   bind("f-crit", (el) => (ch().critRate = Number(el.value) || 0));
   bind("f-critdmg", (el) => (ch().critDamage = Number(el.value) || 0));
   bind("f-speed", (el) => (ch().speed = Number(el.value) || 0));
+  bind("f-actions", (el) => (ch().actionsPerTurn = Math.max(1, Math.floor(Number(el.value) || 1))));
   bind("f-label", (el) => (ch().label = el.value));
   bind("f-intro", (el) => (ch().description = el.value));
   bind("f-image", (el) => {

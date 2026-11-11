@@ -659,6 +659,56 @@ export function loadServerMods({ force = false } = {}) {
   return promise.then(visibleServerMods);
 }
 
+/**
+ * 包内自带的更新时间（编辑器保存 / 导出时写入）。
+ * 解析不出来返回 null——旧模组没有这个字段，按旧规则处理。
+ */
+export function modUpdatedAt(mod) {
+  const raw = mod && mod.raw;
+  const text = raw && typeof raw.updatedAt === "string" ? raw.updatedAt : "";
+  if (!text) return null;
+  const t = Date.parse(text);
+  return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * 同一个 mod.id 出现两份时选哪份：
+ *   · 两份都能读到包内 updatedAt → 新的优先（这样「导出后重新上传」能立刻生效，
+ *     旧副本不会因为读到的顺序在后面而被当成最新）
+ *   · 比不出来 → 维持旧规则「本地覆盖服务器」，同来源时后读到的优先
+ */
+export function preferNewerMod(prev, next) {
+  if (!prev) return next;
+  if (!next) return prev;
+  const a = modUpdatedAt(prev);
+  const b = modUpdatedAt(next);
+  if (a !== null && b !== null && a !== b) return b > a ? next : prev;
+  if (prev.source === next.source) return next;
+  return next.source === "local" ? next : prev;
+}
+
+/**
+ * 同一个卡包被导入成多个文件（浏览器下载重名会存成「包 (1).zip」）时只留最新的一份。
+ * 否则两份同名卡包会一起进战斗：旧副本按文件名排在后面，反而盖掉新导入的卡。
+ */
+function dedupeLocalMods(mods, errors) {
+  const byPack = new Map();
+  for (const mod of mods) {
+    const key = mod.packId || mod.id;
+    const prev = byPack.get(key);
+    if (!prev) {
+      byPack.set(key, mod);
+      continue;
+    }
+    const a = Number(prev.importedAt) || 0;
+    const b = Number(mod.importedAt) || 0;
+    const [keep, drop] = b >= a ? [mod, prev] : [prev, mod];
+    byPack.set(key, keep);
+    errors.push(`${drop.fileName || drop.id}: 与 ${keep.fileName || keep.id} 是同一个卡包（${key}），已忽略较旧的副本`);
+  }
+  return [...byPack.values()];
+}
+
 /** 读浏览器里导入的模组（localStorage 的 JSON + IndexedDB 的 ZIP） */
 export function loadLocalMods({ force = false } = {}) {
   if (localCache.promise && !force) return localCache.promise;
@@ -679,7 +729,10 @@ export function loadLocalMods({ force = false } = {}) {
       for (const rec of records) {
         try {
           const bytes = rec.bytes instanceof ArrayBuffer ? rec.bytes : new Uint8Array(rec.bytes).buffer;
-          mods.push(await makeZipMod(bytes, rec.name, "local", localStamp(rec)));
+          const mod = await makeZipMod(bytes, rec.name, "local", localStamp(rec));
+          // 记住导入时间：同一个卡包被导入成多个文件时用它挑最新的一份
+          mod.importedAt = Number(rec.importedAt) || 0;
+          mods.push(mod);
         } catch (err) {
           errors.push(`${rec.name}: ${errText(err)}`);
         }
@@ -689,7 +742,7 @@ export function loadLocalMods({ force = false } = {}) {
       errors.push(`本地 ZIP 模组读取失败：${errText(err)}`);
     }
 
-    return { mods, errors };
+    return { mods: dedupeLocalMods(mods, errors), errors };
   })();
   localCache.promise = promise;
   promise.catch(() => {
@@ -700,13 +753,15 @@ export function loadLocalMods({ force = false } = {}) {
 
 /**
  * 全部模组（服务器 + 本地）。
- * 同文件名时本地覆盖服务器；includeDisabled=false 时只返回启用的。
+ * 同文件名时按包内 updatedAt 取较新的一份（比不出来则本地覆盖服务器）；
+ * includeDisabled=false 时只返回启用的。
  */
 export async function loadAllMods({ includeDisabled = true, force = false } = {}) {
   const [server, local] = await Promise.all([loadServerMods({ force }), loadLocalMods({ force })]);
   const byId = new Map();
-  for (const mod of server.mods) byId.set(mod.id, mod);
-  for (const mod of local.mods) byId.set(mod.id, mod);
+  for (const mod of [...server.mods, ...local.mods]) {
+    byId.set(mod.id, preferNewerMod(byId.get(mod.id) || null, mod));
+  }
   const disabled = readDisabledMods();
   const all = [...byId.values()].map((mod) => ({ ...mod, enabled: isModEnabled(mod.id, disabled) }));
   applyModImages(all);

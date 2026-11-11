@@ -37,7 +37,8 @@ const ATTR_BONUS_LABEL = {
   hpFlat: "生命值提升值",
   critRate: "暴击率",
   critDamage: "暴击伤害",
-  speed: "速度",
+  speed: "速度（行动顺序）",
+  speedPct: "速度加成 %",
   dmgBoostPct: "伤害提升 %",
   damageTakenPct: "受到伤害提升 %",
   vulnPct: "易伤 %",
@@ -456,7 +457,8 @@ function unitDetail(card) {
         ${statItem("生命值", fmt(card.baseHp))}
         ${statItem("攻击力", fmt(card.baseAtk))}
         ${statItem("防御力", fmt(card.baseDef))}
-        ${statItem("速度", fmt(card.speed))}
+        ${statItem("行动顺序", fmt(card.speed))}
+        ${statItem("每回合行动", fmt(card.actionsPerTurn ?? 1))}
         ${statItem("暴击率", pct(card.critRate))}
         ${statItem("暴击伤害", pct(card.critDamage))}
         ${statItem(
@@ -537,6 +539,10 @@ function skillDetail(card) {
     <section class="lib-detail-section">
       <h3>触发</h3>
       <div class="lib-detail-chips"><span class="lib-detail-chip">${escapeHtml(triggerText)}</span></div>
+    </section>
+    <section class="lib-detail-section">
+      <h3>使用次数</h3>
+      <p class="lib-detail-lore">每回合 ${card.usesPerTurn ? `${card.usesPerTurn} 次` : "不限"} · 整场 ${card.usesTotal ? `${card.usesTotal} 次` : "不限"}</p>
     </section>
     <section class="lib-detail-section">
       <h3>流程概要</h3>

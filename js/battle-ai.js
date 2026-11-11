@@ -26,6 +26,7 @@ const EFFECT_NODES = new Set([
   "skipTurn",
   "forceExit",
   "immuneDamage",
+  "extraAction",
 ]);
 
 /**
@@ -42,7 +43,11 @@ export function chooseAISkill(battle, active, registry = null) {
   const skills = battle
     .allSkillsOf(active)
     .map((skill, index) => ({ skill, index }))
-    .filter((x) => x.skill.type === "active");
+    .filter(
+      (x) =>
+        x.skill.type === "active" &&
+        (!battle.skillStateOf || battle.skillStateOf(active, x.skill).available)
+    );
   if (!skills.length) return null;
 
   // 控制、伤害、效果放到同一把尺子上比较：
@@ -106,6 +111,7 @@ const FLOW_ACTION_NODES = new Set([
   "summonChild",
   "getSkill",
   "giveSkill",
+  "extraAction",
 ]);
 
 /**
@@ -350,6 +356,8 @@ function effectMetrics(
         }
       }
     } else if (node.type === "summon" || node.type === "summonChild") {
+      effect += 2 * mult;
+    } else if (node.type === "extraAction") {
       effect += 2 * mult;
     } else if (node.type === "giveSkill") {
       effect += 3 * mult;
@@ -897,6 +905,16 @@ function resolveTargetsInner(graph, active, nodeId, candidate, units, depth) {
   switch (node.type) {
     case "targetSide":
       return sideUnits(node.options?.side === "ally" ? active.side : other(active.side));
+    case "factionSet": {
+      const sourceId = source("unit");
+      const raw = sourceId ? resolveTargetsInner(graph, active, sourceId, candidate, units, depth + 1) : [];
+      const ref = raw[0] || candidate || active;
+      const faction = ref.faction || ref.side;
+      const includeUncounted = Boolean(node.options?.includeUncounted);
+      return units.filter(
+        (u) => (u.faction || u.side) === faction && (includeUncounted || u.countsAsUnit)
+      );
+    }
     case "chooseUnit": {
       const range = resolveTargetsInner(graph, active, source("targets"), candidate, units, depth + 1);
       if (!range.length) return [];

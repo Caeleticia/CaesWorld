@@ -299,7 +299,7 @@ export function openBattle({ registry, config, onExit }) {
   const canPickUnit = (pub) => {
     const pb = s.battle.publicBattle();
     if (s.busy || pb.status !== "running") return false;
-    if (!isHumanSide(pub.side) || pub.side !== pb.sideTurn || pub.acted || pub.state !== "alive") return false;
+    if (!isHumanSide(pub.side) || pub.side !== pb.sideTurn || (Number(pub.actionsLeft) || 0) <= 0 || pub.state !== "alive") return false;
     if (pb.phase === "select") return true;
     // act 阶段：还没选技能、也还没用技能时，点另一个未行动单位可以换行动单位
     if (pb.phase === "act" && !s.pending && !pb.actionUsed) return pb.activeId !== pub.uid;
@@ -647,7 +647,7 @@ export function openBattle({ registry, config, onExit }) {
         return;
       }
       const units = pb.units
-        .filter((u) => u.side === side && u.state === "alive" && !u.acted)
+        .filter((u) => u.side === side && u.state === "alive" && (Number(u.actionsLeft) || 0) > 0)
         .sort((a, b) => Math.abs(a.slot) - Math.abs(b.slot));
       el.innerHTML = `
         <div class="tbt-act-hint"><b>${sideName(side)}行动</b></div>
@@ -677,11 +677,18 @@ export function openBattle({ registry, config, onExit }) {
         if (sk.type !== "active") return "";
         const icon = resolveCardIcon(sk);
         const needsTarget = skillNeedsPlayerTarget(sk);
-        return `<button class="tbt-skill ${s.pending?.index === i ? "is-targeting" : ""}" type="button" data-skill="${i}">
+        const st = s.battle.skillStateOf(active, sk);
+        const useText = st.perTurn || st.total
+          ? ` · 回合 ${st.turnLeft === null ? "∞" : st.turnLeft} / 总 ${st.totalLeft === null ? "∞" : st.totalLeft}`
+          : "";
+        const label = st.available
+          ? `${needsTarget ? "手动选择目标" : "直接施放"}${useText}`
+          : st.reason;
+        return `<button class="tbt-skill ${s.pending?.index === i ? "is-targeting" : ""}" type="button" data-skill="${i}" ${st.available ? "" : "disabled"}>
                <div class="tbt-skill-main">${
                  icon ? `<img class="tbt-skill-icon" src="${escapeHtml(icon)}" alt="" draggable="false" />` : ""
                }<b>${escapeHtml(sk.name)}</b></div>
-               <span>${needsTarget ? "手动选择目标" : "直接施放"}</span>
+               <span>${escapeHtml(label)}</span>
              </button>`;
       })
       .join("");
@@ -702,7 +709,7 @@ export function openBattle({ registry, config, onExit }) {
       ? `<div class="tbt-act-hint"><b>选择目标</b> · 点击${sideName(
           active.side === "ally" ? "enemy" : "ally"
         )}单位</div>`
-      : `<div class="tbt-act-hint">选择一个技能，或结束行动；点其他未行动单位可换人</div>`;
+      : `<div class="tbt-act-hint">选择一个技能，或结束行动；剩余可动 ${Number(active.actionsLeft) || 0} 次</div>`;
     el.innerHTML = `
       <div class="tbt-act-head">
         <img class="tbt-act-portrait" src="${resolveCardImage(card)}" alt="" draggable="false"
@@ -817,7 +824,9 @@ export function openBattle({ registry, config, onExit }) {
     const stats = s.battle.statsOf(unit);
     const pub = pubOf(uid);
     const quality = QUALITY_LABEL[card.quality] || card.quality || "白";
-    const status = pub?.acted ? "本回合已行动" : "本回合未行动";
+    const status = pub
+      ? `本回合剩余行动 ${Number(pub.actionsLeft) || 0} / ${Number(pub.actionsPerTurn) || 1}`
+      : "";
     const invincible = unit.invincible || s.battle.state.invincibleSides.includes(unit.side);
     const effects = collectEffects(unit);
     const resist = stats.resistances || {};
@@ -1322,6 +1331,18 @@ export function openBattle({ registry, config, onExit }) {
     s.preferredTargets = [];
     await playEvents(events);
     if (s.destroyed) return;
+    const after = activeUnit();
+    // 还有剩余可动次数：保持当前单位行动中，可以继续选技能 / 换人；用完才自动结束
+    if (
+      s.battle.state.status === "running" &&
+      after &&
+      (Number(after.actionsLeft) || 0) > 0 &&
+      s.battle.state.phase === "act"
+    ) {
+      s.busy = false;
+      finishStep();
+      return;
+    }
     if (s.battle.state.status === "running") {
       const tail = take(() => s.battle.endTurn());
       await playEvents(tail);
@@ -1393,7 +1414,9 @@ export function openBattle({ registry, config, onExit }) {
   async function runAIStep() {
     const pb = s.battle.publicBattle();
     if (pb.status !== "running" || pb.phase !== "select") return;
-    const candidates = pb.units.filter((u) => u.side === pb.sideTurn && u.state === "alive" && !u.acted);
+    const candidates = pb.units.filter(
+      (u) => u.side === pb.sideTurn && u.state === "alive" && (Number(u.actionsLeft) || 0) > 0
+    );
     if (!candidates.length) return;
     candidates.sort((a, b) => b.atk - a.atk);
     const pick = Math.random() < 0.72 ? candidates[0] : candidates[Math.floor(Math.random() * candidates.length)];
@@ -1403,10 +1426,14 @@ export function openBattle({ registry, config, onExit }) {
     if (s.destroyed) return;
     if (s.battle.state.phase !== "act") return;
 
-    const active = activeUnit();
-    if (!active) return;
-    const choice = chooseAISkill(s.battle, active, s.registry);
-    if (choice) {
+    // 一个单位本回合有多次可动时，连续评估并释放技能，直到次数用完或没有可用技能
+    for (let step = 0; step < 8; step += 1) {
+      if (s.destroyed) return;
+      if (s.battle.state.status !== "running" || s.battle.state.phase !== "act") break;
+      const active = activeUnit();
+      if (!active || (Number(active.actionsLeft) || 0) <= 0) break;
+      const choice = chooseAISkill(s.battle, active, s.registry);
+      if (!choice) break;
       s.preferredTargets = choice.targetUid ? [choice.targetUid] : [];
       let events = [];
       try {
@@ -1417,8 +1444,8 @@ export function openBattle({ registry, config, onExit }) {
         s.preferredTargets = [];
       }
       await playEvents(events);
+      if (s.destroyed) return;
     }
-    if (s.destroyed) return;
     if (s.battle.state.status === "running") {
       const tail = take(() => s.battle.endTurn());
       await playEvents(tail);
