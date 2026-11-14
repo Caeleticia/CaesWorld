@@ -376,10 +376,12 @@ textarea:focus { border-color: var(--brand-deep); box-shadow: 0 0 0 3px rgba(127
 .chips input { width: auto; }
 
 .attrbonus-list { display: grid; gap: 6px; margin: 6px 0; }
-.attrbonus-row { display: flex; gap: 6px; align-items: center; }
-.attrbonus-row select { flex: 1 1 auto; min-width: 0; }
+.attrbonus-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.attrbonus-row select { flex: 1 1 110px; min-width: 0; }
 .attrbonus-row input { width: 96px; flex: none; }
 .attrbonus-row .btn { flex: none; }
+.attrbonus-row .attrbonus-stack { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; }
+.attrbonus-row .attrbonus-stack input { width: auto; }
 
 .trigger-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 600; margin-top: 6px; }
 .trigger-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
