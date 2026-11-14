@@ -36,6 +36,7 @@ import {
   normalizeInvincible,
   normalizeUnselectable,
   EFFECT_ATTR_BONUS_KEYS,
+  EFFECT_ATTR_SCOPES,
   effectPolarityOf,
   effectColorOf,
   normalizeEffectAttrBonus,
@@ -211,6 +212,7 @@ async function hydrateFromPacks({ force = false } = {}) {
       e.packName = card.packName || (card.pack === DEFAULT_PACK_ID ? DEFAULT_PACK_NAME : card.pack);
       e.attrBonus = normalizeEffectAttrBonus(card.attrBonus);
       e.autoConsume = Boolean(card.autoConsume);
+      e.inherit = card.inherit !== false;
       e.skillIds = Array.isArray(card.skillIds) ? [...new Set(card.skillIds.filter((x) => typeof x === "string" && x))] : [];
       if (card.ui) e.ui = clone(card.ui);
       e.triggers = (card.triggers || []).map((t) => ({
@@ -1341,6 +1343,7 @@ function renderEffectPanel() {
   e.maxStacks = Number.isFinite(maxStacks) ? Math.max(0, Math.floor(maxStacks)) : 1;
   e.bar = Boolean(e.bar);
   e.barInvert = Boolean(e.barInvert) && e.bar;
+  if (e.inherit === undefined || e.inherit === null) e.inherit = true;
   e.attrBonus = Array.isArray(e.attrBonus) ? e.attrBonus : [];
   e.skillIds = Array.isArray(e.skillIds) ? [...new Set(e.skillIds.filter((x) => typeof x === "string" && x))] : [];
   e.triggers = e.triggers || [];
@@ -1364,6 +1367,7 @@ function renderEffectPanel() {
       <label><input type="checkbox" data-effect-flag="unremovable" ${(e.flags || []).includes("unremovable") ? "checked" : ""} /> 不可解除（需勾选「强制移除」）</label>
       <label><input type="checkbox" data-effect-flag="control" ${(e.flags || []).includes("control") ? "checked" : ""} /> 控制类效果（可被「免疫控制」挡下）</label>
       <label><input type="checkbox" data-effect-auto="1" ${e.autoConsume ? "checked" : ""} /> 自动消耗（每次执行完该效果的流程后消耗 1 层）</label>
+      <label><input type="checkbox" data-effect-inherit="1" ${e.inherit !== false ? "checked" : ""} /> 召唤物继承（取消后父单位召唤时不复制该效果）</label>
     </div>
     ${
       e.autoConsume
@@ -1441,14 +1445,20 @@ function renderEffectPanel() {
         const value = Number(op.value) || 0;
         return `<div class="attrbonus-row">
           ${select(
+            `data-attrbonus-scope="${i}"`,
+            EFFECT_ATTR_SCOPES.map((s) => [s, ATTR_SCOPE_LABEL[s] || s]),
+            op.scope || "self"
+          )}
+          ${select(
             `data-attrbonus-attr="${i}"`,
             EFFECT_ATTR_BONUS_KEYS.map((k) => [k, ATTR_BONUS_LABEL[k] || k]),
             key
           )}
           <input type="number" step="0.01" data-attrbonus-value="${i}" value="${value}" />
+          <label class="tiny attrbonus-stack"><input type="checkbox" data-attrbonus-perstack="${i}" ${op.perStack === false ? "" : "checked"} /> 按层数</label>
           <button class="btn tiny danger" type="button" data-action="delete-attrbonus" data-index="${i}" title="删除这条属性修正">×</button>
         </div>`;
-      }).join("") || `<p class="hint">没有属性修正。效果可以只做触发流程，也可以给持有者提供攻击力 / 防御力等面板加成（百分比存小数，5% = 0.05）。</p>`}
+      }).join("") || `<p class="hint">没有属性修正。效果可以只做触发流程，也可以提供攻击力 / 防御力等面板加成；作用范围可选自己、我方全体、敌方全体、全部单位。百分比存小数（5% = 0.05）；「按层数」关闭时该条修正不随效果层数放大。</p>`}
     </div>
     <div class="trigger-head">
       <span>触发流程</span>
@@ -1553,6 +1563,14 @@ const TRIGGER_LABEL = {
 const SKILL_DEFAULT_TRIGGER = "skillCastSelf";
 /** 效果新触发的默认事件：单位行动结束时 */
 const EFFECT_DEFAULT_TRIGGER = "unitTurnEnd";
+
+/** 效果「属性修正」作用范围下拉的显示名 */
+const ATTR_SCOPE_LABEL = {
+  self: "自己",
+  ally: "我方全体",
+  enemy: "敌方全体",
+  all: "全部单位",
+};
 
 /** 效果「属性修正」下拉的显示名 */
 const ATTR_BONUS_LABEL = {
@@ -1871,7 +1889,9 @@ function renderBlock(node, flow) {
   if (canvasState.selectedId === node.id) el.classList.add("is-selected");
 
   const inPorts = dataInputPorts(node, flow);
-  const outPorts = def.ports.filter((p) => p.direction === "out");
+  const outPorts = def.ports.filter(
+    (p) => p.direction === "out" && !(p.triggerOnly && p.triggerOnly !== (node.options && node.options.event))
+  );
   const flowIn = inPorts.find((p) => !p.type);
   const flowOuts = outPorts.filter((p) => !p.type);
   const leftIn = inPorts.filter((p) => p.type);
@@ -2791,14 +2811,22 @@ function onBlockOptionChange(e) {
     node.options = node.options || {};
     node.options[key] = e.target.type === "checkbox" ? e.target.checked : e.target.type === "number" ? Number(e.target.value) : e.target.value;
     changed = true;
-    if (node.type === "trigger" && active.tab === "effects") {
-      const card = currentEffect();
-      const t = (card.triggers || []).find((x) => x.block.id === node.id);
-      if (t && key === "event") {
-        t.block.event = node.options.event;
-        active.triggerId = t.block.id;
-        const flowLabel = $("#flow-title");
-        if (flowLabel) flowLabel.textContent = `当前触发：${TRIGGER_LABEL[t.block.event] || t.block.event}`;
+    if (node.type === "trigger" && key === "event") {
+      // 切走「接收到广播」时，清掉两个广播输出口上的连线，避免留下看不见的悬空连线
+      if (node.options.event !== "broadcast") {
+        flow.links = (flow.links || []).filter(
+          (l) => !(l.from === node.id && (l.port === "broadcastId" || l.port === "broadcastContent"))
+        );
+      }
+      if (active.tab === "effects") {
+        const card = currentEffect();
+        const t = (card.triggers || []).find((x) => x.block.id === node.id);
+        if (t) {
+          t.block.event = node.options.event;
+          active.triggerId = t.block.id;
+          const flowLabel = $("#flow-title");
+          if (flowLabel) flowLabel.textContent = `当前触发：${TRIGGER_LABEL[t.block.event] || t.block.event}`;
+        }
       }
     }
   }
@@ -2943,6 +2971,12 @@ function onEffectFormInput(e) {
     renderJson();
     return;
   }
+  if (e.target.dataset.effectInherit !== undefined) {
+    card.inherit = Boolean(e.target.checked);
+    markDirty();
+    renderJson();
+    return;
+  }
   if (e.target.dataset.effectPack !== undefined) {
     if (moveCardToPack(card, e.target.value)) {
       followCardPack(card);
@@ -2983,7 +3017,27 @@ function onEffectFormInput(e) {
     renderJson();
     return;
   }
-  // 属性修正：选属性 / 改数值（行内编辑不重绘表单，避免输入框失焦）
+  // 属性修正：作用范围 / 选属性 / 改数值 / 是否按层数（行内编辑不重绘表单，避免输入框失焦）
+  const attrBonusScope = e.target.dataset.attrbonusScope;
+  if (attrBonusScope !== undefined) {
+    const op = (card.attrBonus || [])[Number(attrBonusScope)];
+    if (!op) return;
+    if (e.target.value === "self") delete op.scope;
+    else op.scope = e.target.value;
+    markDirty();
+    renderJson();
+    return;
+  }
+  const attrBonusPerStack = e.target.dataset.attrbonusPerstack;
+  if (attrBonusPerStack !== undefined) {
+    const op = (card.attrBonus || [])[Number(attrBonusPerStack)];
+    if (!op) return;
+    if (e.target.checked) delete op.perStack;
+    else op.perStack = false;
+    markDirty();
+    renderJson();
+    return;
+  }
   const attrBonusIndex = e.target.dataset.attrbonusAttr;
   if (attrBonusIndex !== undefined) {
     const op = (card.attrBonus || [])[Number(attrBonusIndex)];
@@ -3574,6 +3628,7 @@ const edit = {
       active.effect = card;
     } else if (key === "attrBonus") card.attrBonus = normalizeEffectAttrBonus(value);
     else if (key === "autoConsume") card.autoConsume = Boolean(value);
+    else if (key === "inherit") card.inherit = Boolean(value);
     else if (key === "polarity") card.polarity = ["positive", "negative", "special"].includes(value) ? value : "positive";
     else if (key === "stackable") card.stackable = Boolean(value);
     else if (key === "maxStacks") {
@@ -4014,6 +4069,7 @@ function importPackDoc(doc, file) {
     def.packName = name;
     def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
     def.autoConsume = Boolean(e.autoConsume);
+    def.inherit = e.inherit !== false;
     def.skillIds = Array.isArray(e.skillIds) ? [...new Set(e.skillIds.filter((x) => typeof x === "string" && x))] : [];
     def.triggers = (e.triggers || [])
       .map((t) => ({
@@ -4109,6 +4165,7 @@ function importContent(doc, file) {
     def.packName = packName;
     def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
     def.autoConsume = Boolean(e.autoConsume);
+    def.inherit = e.inherit !== false;
     def.skillIds = Array.isArray(e.skillIds) ? [...new Set(e.skillIds.filter((x) => typeof x === "string" && x))] : [];
     def.triggers = (e.triggers || []).map((t) => ({ block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" } }));
     def.flows = {};

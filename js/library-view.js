@@ -28,6 +28,9 @@ const firstChar = (s) => [...String(s || "?")][0] || "?";
 const FLOW_CATALOG = buildFlowCatalog();
 const TRIGGER_LABEL = Object.fromEntries(FLOW_CATALOG.TRIGGER_EVENTS.map((t) => [t.value, t.label]));
 
+/** 效果属性修正作用范围的显示名 */
+const ATTR_SCOPE_LABEL = { self: "自己", ally: "我方全体", enemy: "敌方全体", all: "全部单位" };
+
 /** 效果属性修正的显示名（与编辑器保持一致） */
 const ATTR_BONUS_LABEL = {
   atkPct: "攻击力提升 %",
@@ -638,6 +641,7 @@ function effectDetail(card, ctx) {
     : "不叠层";
   const unremovable = (card.flags || []).includes("unremovable") ? "不可解除" : "可解除";
   const consume = card.autoConsume ? "每次执行完效果流程后消耗 1 层（无视不可解除）" : "不会自动消耗";
+  const inherit = card.inherit === false ? "不继承（父单位召唤时跳过）" : "可被召唤物继承";
   const display = card.bar
     ? `血条上方进度条${card.barInvert ? "（反转：显示 (上限-当前)/上限）" : "（当前/上限）"}`
     : "角色旁图标";
@@ -672,6 +676,7 @@ function effectDetail(card, ctx) {
         ${statItem("显示", display, true)}
         ${statItem("颜色", color)}
         ${statItem("自动消耗", consume, true)}
+        ${statItem("召唤物继承", inherit, true)}
       </ul>
     </section>
     <section class="lib-detail-section">
@@ -691,7 +696,11 @@ function effectDetail(card, ctx) {
       ${
         attrBonus.length
           ? `<ul class="lib-detail-stats">${attrBonus
-              .map((b) => statItem(ATTR_BONUS_LABEL[b.attr] || b.attr, bonusText(b.attr, b.value)))
+              .map((b) => {
+                const scope = ATTR_SCOPE_LABEL[b.scope || "self"] || "自己";
+                const stackNote = b.perStack === false ? "（不按层数）" : "";
+                return statItem(`${scope} · ${ATTR_BONUS_LABEL[b.attr] || b.attr}`, `${bonusText(b.attr, b.value)}${stackNote}`);
+              })
               .join("")}</ul>`
           : `<p class="lib-detail-empty">没有属性修正。</p>`
       }
