@@ -947,6 +947,15 @@
   transition: transform 120ms;
 }
 .tbt-status-ico:hover { transform: scale(1.15); }
+/* 带了图标的效果：图标铺满小圆角方块，层数徽标仍盖在上面 */
+.tbt-status-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4.5px;
+  display: block;
+  pointer-events: none;
+}
 .tbt-status-ico.is-good { background: #e6fff0; border-color: #7fd8a8; color: #1c6b3f; }
 .tbt-status-ico.is-bad { background: #fff0f3; border-color: #f0a4b6; color: #9c2340; }
 .tbt-status-ico.is-special { background: #fff8e6; border-color: #f0cf8a; color: #8a5c00; }
@@ -1004,6 +1013,10 @@
 .tbt-unit.is-active .tbt-card {
   border-color: #fff;
   box-shadow: 0 0 0 3px var(--brand-deep), 0 0 24px rgba(127, 216, 221, 0.8);
+}
+.tbt-unit.is-picked .tbt-card {
+  border-color: #ff6b8b;
+  box-shadow: 0 0 0 4px rgba(255, 107, 139, 0.85), 0 0 26px rgba(255, 107, 139, 0.6);
 }
 .tbt-unit.is-targetable .tbt-card {
   border-color: #ff6b8b;
@@ -1201,6 +1214,9 @@
 .tbt-skill.is-cancel { border-color: #f0b4c1; background: #fff7f9; color: #c93e5d; }
 .tbt-skill.is-cancel b { color: #c93e5d; }
 .tbt-skill.is-cancel:hover { background: #fff0f4; border-color: #e08aa0; }
+.tbt-skill.is-confirm { border-color: #7fd8dd; background: #eaffff; box-shadow: 0 0 0 2px rgba(127, 216, 221, 0.28); }
+.tbt-skill.is-confirm b { color: #0f5b60; }
+.tbt-skill.is-confirm:hover { background: #dcffff; border-color: var(--brand-deep); }
 .tbt-skill:disabled { opacity: 0.45; }
 .tbt-end {
   flex: none;
@@ -1601,16 +1617,30 @@
   pointer-events: none;
 }
 .tbt-card-effectbars[hidden] { display: none; }
+/* 条式显示的效果：和血条同形状（细圆角条），左侧起点是效果图标 */
 .tbt-card-effectbar {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
   min-width: 0;
-  height: 9px;
+  height: 11px;
+}
+.tbt-card-effectbar-icon,
+.tbt-card-effectbar-glyph {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55), 0 1px 2px rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.35);
+}
+.tbt-card-effectbar-icon {
+  object-fit: cover;
+  display: block;
 }
 .tbt-card-effectbar-glyph {
-  width: 8px;
-  flex: none;
+  display: grid;
+  place-items: center;
   font-size: 7px;
   font-weight: 700;
   line-height: 1;
@@ -1621,7 +1651,7 @@
 .tbt-card-effectbar-track {
   position: relative;
   flex: 1 1 auto;
-  height: 9px;
+  height: 5px;
   border-radius: 99px;
   background: rgba(0, 0, 0, 0.5);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
@@ -1637,10 +1667,7 @@
   transition: width 220ms var(--ease-out);
 }
 .tbt-card-effectbar-num {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+  flex: none;
   font-size: 7px;
   font-weight: 700;
   line-height: 1;
