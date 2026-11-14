@@ -21,15 +21,19 @@ import {
   UNIT_STATES,
   effectAttrBonusTarget,
   effectPolarityOf,
+  normalizeInvincible,
+  normalizeUnselectable,
 } from "./constants.js";
 import { createRng } from "./math.js";
 import { addBonus, emptyAccum } from "./modifiers.js";
 import { computeStats } from "./stats.js";
 import { calculateDamage } from "./damage.js";
 import { normalizeEffects } from "./skills.js";
+import { canSelectUnit } from "./units.js";
 import { buffToBonus, buffExpired, createBuff, hasTag, resetBuffSequence } from "./buffs.js";
 import { canPlace, normalizeSlot, otherSide, selectTarget, sideOf, DEFAULT_SLOTS } from "./targeting.js";
 import { prepareFlow, runFlow } from "./flow.js";
+import { isMultiTargetTriggerEvent } from "./flow-catalog.js";
 
 export const BATTLE_EVENT = Object.freeze({
   BATTLE_START: "battle:start",
@@ -45,8 +49,11 @@ export const BATTLE_EVENT = Object.freeze({
   ACTION_POINTS: "action:points",
   SKILL: "skill",
   ATTACK: "attack",
+  /** 「转移攻击」把这次伤害从原目标改到了另一个单位 */
+  ATTACK_TRANSFERRED: "attack:transferred",
   DAMAGE: "damage",
   IMMUNE: "immune",
+  EFFECT_IMMUNE: "effect:immune",
   HEAL: "heal",
   HP_LOST: "hp:lost",
   BUFF_ADDED: "buff:added",
@@ -58,6 +65,10 @@ export const BATTLE_EVENT = Object.freeze({
   SUMMON: "summon",
   EXIT: "exit",
   DEATH: "death",
+  /** 退场被无敌档位拦下（超级无敌拒绝一切退场 / 无敌拒绝普通退场） */
+  EXIT_BLOCKED: "exit:blocked",
+  /** 「拒绝退场」把这次退场取消掉了（并回了血） */
+  EXIT_REFUSED: "exit:refused",
   FLOW_ERROR: "flow:error",
   BATTLE_END: "battle:end",
   /** 同屏模式：抽牌 / 从手牌上场 / 补牌 / 需要布阵 */
@@ -302,6 +313,9 @@ export function createBattle(setup) {
       return structuredClone(s);
     });
     const startHp = hp === undefined || hp === null ? card.baseHp : hp;
+    const perTurn = Number.isFinite(Number(card.actionsPerTurn))
+      ? Math.max(0, Math.min(99, Math.floor(Number(card.actionsPerTurn))))
+      : 1;
     return {
       uid,
       key: uid,
@@ -318,15 +332,19 @@ export function createBattle(setup) {
       slot,
       occupiesSlot: card.occupiesSlot,
       countsAsUnit: card.countsAsUnit,
+      /** 选中限制：none / enemy / ally / all */
+      unselectable: normalizeUnselectable(card.unselectable),
+      immuneNegative: Boolean(card.immuneNegative),
+      immuneControl: Boolean(card.immuneControl),
       invincible: card.invincible,
       rarity: card.quality,
       /** 标签：一个单位一个（召唤时可覆盖） */
       label: label !== undefined && label !== null ? String(label) : card.label,
       skills,
       /** 每回合默认可行动次数；回合开始时 actionsLeft 重置到这个值 */
-      actionsPerTurn: Math.max(1, Math.floor(Number(card.actionsPerTurn) || 1)),
+      actionsPerTurn: perTurn,
       /** 本回合剩余可动次数；角色不再用「是否已行动」的布尔值 */
-      actionsLeft: Math.max(1, Math.floor(Number(card.actionsPerTurn) || 1)),
+      actionsLeft: perTurn,
       /** 本场对局每个技能的已使用次数：{ [skillId]: { round, turn, total } } */
       skillUses: {},
       buffs: [],
@@ -346,8 +364,10 @@ export function createBattle(setup) {
         lastAttackDamage: 0,
         lastAttackHits: 0,
         lastHeal: 0,
+        lastHealSource: null,
         lastLose: 0,
         lastHpChange: 0,
+        lastHitDamage: 0,
         lastAttackTargets: [],
         lastHitSource: null,
       },
@@ -367,25 +387,33 @@ export function createBattle(setup) {
     return null;
   };
   const isAlive = (u) => Boolean(u) && u.state === UNIT_STATES[0];
-  const isInvincible = (u) => Boolean(u) && (u.invincible || state.invincibleSides.includes(u.side));
+  /** 单位卡上的无敌档位：none / damage（免伤）/ invincible（无敌）/ super（超级无敌） */
+  const invincibleLevelOf = (u) => normalizeInvincible(u ? u.invincible : "none");
+  /** 伤害免疫：免伤 / 无敌 / 超级无敌都记 0 伤害（整方无敌的训练场开关同样记 0） */
+  const isInvincible = (u) =>
+    Boolean(u) && (invincibleLevelOf(u) !== "none" || state.invincibleSides.includes(u.side));
   const livingUnits = () => state.units.filter(isAlive);
   const livingOf = (side) => livingUnits().filter((u) => u.side === side);
-  const listSide = (side) => livingOf(side).filter((u) => u.countsAsUnit);
+  /**
+   * 「目标集」：某侧所有当前选择者能选中的存活单位。
+   * 计数只影响「阵营单位数量上限」，不再影响目标集；选中限制按 fromSide 判断。
+   */
+  const listSide = (side, opts = {}) => livingOf(side).filter((u) => canSelectUnit(u, opts.fromSide));
   /** 单位所属阵营：没写 faction 的旧数据回落到 side */
   const factionOf = (u) => {
     if (!u) return null;
     const f = u.faction;
     return f === undefined || f === null || f === "" ? u.side : String(f);
   };
-  /** 某阵营的存活单位（默认只取计数单位，和 listSide 的口径一致） */
+  /** 某阵营的存活单位；默认包含不计数单位（不计数只影响数量上限） */
   const listFaction = (faction, opts = {}) => {
     if (!faction) return [];
-    const includeUncounted = Boolean(opts.includeUncounted);
+    const includeUncounted = opts.includeUncounted !== false;
     return livingUnits().filter((u) => factionOf(u) === faction && (includeUncounted || u.countsAsUnit));
   };
-  /** 场上全部存活单位（多阵营时供「筛选目标集」自行分组） */
+  /** 场上全部存活单位；默认包含不计数单位 */
   const listAllUnits = (opts = {}) => {
-    const countedOnly = opts.countedOnly !== false;
+    const countedOnly = opts.countedOnly === true;
     return livingUnits().filter((u) => !countedOnly || u.countsAsUnit);
   };
   const displayLabel = (u) => (u && u.label !== undefined && u.label !== null ? String(u.label) : "");
@@ -394,7 +422,7 @@ export function createBattle(setup) {
   /** 回合开始：把所有存活单位的剩余可动次数重置为「每回合默认可动次数」 */
   function resetActions() {
     for (const u of livingUnits()) {
-      u.actionsLeft = Math.max(1, Math.floor(Number(u.actionsPerTurn) || 1));
+      u.actionsLeft = Math.max(0, Math.floor(Number(u.actionsPerTurn) || 0));
     }
   }
   const canAct = (u) => Boolean(u) && isAlive(u) && (Number(u.actionsLeft) || 0) > 0;
@@ -492,6 +520,15 @@ export function createBattle(setup) {
     if (!isAlive(u)) return null;
     const def = registry.getEffect(eid);
     if (!def) throw new Error(`未知效果：${eid}`);
+    // 效果免疫：在附加前拒绝，不触发该效果的入场 / 数据更新
+    if (u.immuneNegative && effectPolarity(eid) === "negative") {
+      log(BATTLE_EVENT.EFFECT_IMMUNE, { unit: u.uid, effect: eid, kind: "negative" });
+      return null;
+    }
+    if (u.immuneControl && effectFlag(eid, "control")) {
+      log(BATTLE_EVENT.EFFECT_IMMUNE, { unit: u.uid, effect: eid, kind: "control" });
+      return null;
+    }
     const rawLayers = extra.layers === undefined ? 1 : Number(extra.layers);
     const add = Number.isFinite(rawLayers) ? Math.max(0, Math.floor(rawLayers)) : 1;
     if (add <= 0) return null;
@@ -697,6 +734,30 @@ export function createBattle(setup) {
     emit("dataUpdate", [unit]);
   }
 
+  /** 找触发节点所在的流程（技能 / 效果 / 单位卡 member） */
+  function triggerFlowOf(effect, blockId) {
+    return effect && effect.__member
+      ? effect.__member.flow
+      : effect && effect.flows
+        ? effect.flows[blockId]
+        : null;
+  }
+
+  /** 触发节点是否接了「单位集」输入（决定它是否要跨单位监听） */
+  function triggerHasUnitInput(effect, blockId) {
+    const flow = triggerFlowOf(effect, blockId);
+    if (!flow || !Array.isArray(flow.links)) return false;
+    return flow.links.some((link) => link && link.to === blockId && link.portTo === "unit");
+  }
+
+  /** 触发节点的单位集方式：each（按单位分别触发）/ any（旧：只判一次） */
+  function triggerUnitMode(effect, blockId) {
+    const flow = triggerFlowOf(effect, blockId);
+    if (!flow || !Array.isArray(flow.nodes)) return "each";
+    const node = flow.nodes.find((n) => n && n.id === blockId && n.type === "trigger");
+    return (node && node.options && node.options.unitMode) || "each";
+  }
+
   /**
    * 广播事件：找出所有「身上有该事件触发」的效果并执行其流程。
    * @param {string} eventType
@@ -733,17 +794,31 @@ export function createBattle(setup) {
       ];
       for (const { effect, key: sourceKey } of sources) {
         if (!triggerMatches(effect, eventType, info)) continue;
+        const sameEvent = (ev) =>
+          ev === eventType ||
+          (ev === "always" && eventType === "dataUpdate") ||
+          (ev === "skillCastSelf" && eventType === "skillCast" && Boolean(info.skillId) && effect.id === info.skillId);
+        const blocks = effect.__member
+          ? [effect.__member.block].filter((b) => b && sameEvent(b.event))
+          : (effect.triggers || []).filter((t) => t && t.event && sameEvent(t.event));
+        if (!blocks.length) continue;
         // 全局事件人人有份；其余事件只有「事件涉及的单位」身上的效果才会触发
         // （受击事件的目标就是正在挨打的单位，所以反伤不会再反向触发攻击方）
         // 「我方单位攻击时」则让攻击者同阵营的所有单位都参与。
-        // 事件对象必须带上单位 key（单位由 makeUnit 建立，key = uid）
+        // 接了「单位集」的 12 种事件要跨单位监听：事件对象不是持有者也跑，
+        // 由流程里的单位集 / 条件再筛选。事件对象必须带上单位 key（key = uid）。
+        const crossUnit =
+          isMultiTargetTriggerEvent(eventType) &&
+          blocks.some(
+            (b) => triggerHasUnitInput(effect, b.id) && triggerUnitMode(effect, b.id) !== "any"
+          );
         const sameSide = allyAttackEvent && targets.some((t) => t && t.side === u.side);
-        const relevant = globalEvent || sameSide || targets.some((t) => t && t.key === u.key);
+        const relevant = globalEvent || sameSide || targets.some((t) => t && t.key === u.key) || crossUnit;
         if (!relevant) continue;
         const key = `${u.key}|${sourceKey}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        candidates.push({ unit: u, effect });
+        candidates.push({ unit: u, effect, blocks });
       }
     }
     if (!candidates.length) return;
@@ -754,18 +829,11 @@ export function createBattle(setup) {
     emitStack.push(frame);
     triggerDepth += 1;
     try {
-      for (const { unit, effect } of candidates) {
+      for (const { unit, effect, blocks } of candidates) {
         // unitExit 允许刚退场的单位执行自己的退场触发
         const exitingOwner = eventType === "unitExit" && unit.exited;
         if (!isAlive(unit) && !exitingOwner) continue;
         const flows = effect.flows || {};
-        const sameEvent = (ev) =>
-          ev === eventType ||
-          (ev === "always" && eventType === "dataUpdate") ||
-          (ev === "skillCastSelf" && eventType === "skillCast" && Boolean(info.skillId) && effect.id === info.skillId);
-        const blocks = effect.__member
-          ? [effect.__member.block].filter((b) => b && sameEvent(b.event))
-          : (effect.triggers || []).filter((t) => t && t.event && sameEvent(t.event));
         for (const block of blocks) {
           if (state.status === "finished") break;
           // 单位卡 member 的流程挂在 __member.flow 上（不在 effect.flows 里）
@@ -789,8 +857,12 @@ export function createBattle(setup) {
           }
           try {
             const run = runFlow(prepared, env, { triggerNode: prepared.nodes.has(block.id) ? block.id : undefined });
-            // 触发条件没通过（或没有可执行的触发入口）= 这条流程没有真正执行，不结算自动消耗
-            if (run.ran && !run.triggerBlocked) autoConsumeAfterFlow(unit, effect);
+            // 触发条件没通过（或没有可执行的触发入口）= 这条流程没有真正执行，不结算自动消耗。
+            // 单位集里多个单位分别触发时（run.runs > 1），每次独立运行各消耗 1 层。
+            if (run.ran && !run.triggerBlocked) {
+              const times = Math.max(1, Number(run.runs) || 1);
+              for (let i = 0; i < times; i += 1) autoConsumeAfterFlow(unit, effect);
+            }
           } catch (err) {
             log(BATTLE_EVENT.FLOW_ERROR, { owner: unit.uid, effect: effect.id, reason: String((err && err.message) || err) });
           }
@@ -812,6 +884,7 @@ export function createBattle(setup) {
       triggerUnit = current.targets.find((t) => t && t.key === owner.key) || current.targets[0];
     }
     const self = triggeringUnitForEffect(effect, owner, triggerUnit);
+    const healSourceKey = current && current.info && current.info.source ? current.info.source : null;
     return {
       self,
       owner,
@@ -819,19 +892,21 @@ export function createBattle(setup) {
       currentEffectId: effect ? effect.id : null,
       /** 「触发的单位」积木：本次触发的单位（技能流程里就是自己） */
       triggerUnit: effect ? triggerUnit || owner : owner,
+      /** 「回复来源」：本次 heal 事件的治疗者；不在回复触发里为空 */
+      healSource: healSourceKey ? getUnit(healSourceKey) : null,
       context: { unit: null },
       interrupted: false,
       rng,
       sideOf: (u) => (u ? u.side : "ally"),
       otherSide,
-      listSide,
+      listSide: (side, opts = {}) => listSide(side, { fromSide: opts.fromSide ?? (owner ? owner.side : "ally") }),
       factionOf,
       listFaction,
       listAllUnits,
       effectSource: effectSourceOf,
       effectSourceFaction: effectSourceFactionOf,
       currentTarget: () => prevSkillTargets.slice(),
-      pickForPlayer: (cands, opts) => playerChoose(cands, opts),
+      pickForPlayer: (cands, opts = {}) => playerChoose(cands, { ...opts, fromSide: opts.fromSide ?? (owner ? owner.side : "ally") }),
       /** 开一个新的「攻击动作」批次；同一次攻击积木的多目标命中共用它 */
       newAttackGroup: () => ++attackGroupSeq,
       /** 「额外行动」积木：增加目标本回合剩余可动次数 */
@@ -867,8 +942,8 @@ export function createBattle(setup) {
         emit("attack", [A]);
         emit("allyAttack", [A]);
       },
-      healUnit: (target, amount) => heal(getUnit(target), amount, "flow"),
-      setHp: (target, value) => setHp(getUnit(target), value, "flow"),
+      healUnit: (target, amount) => heal(getUnit(target), amount, "flow", owner),
+      setHp: (target, value) => setHp(getUnit(target), value, "flow", owner),
       attachEffect: (target, eid, layers) =>
         attachEffect(getUnit(target), eid, { source: owner, layers }),
       removeEffectByMode: (target, opts) => removeEffectByMode(getUnit(target), opts),
@@ -883,7 +958,26 @@ export function createBattle(setup) {
         const t = getUnit(target);
         if (t && isAlive(t) && !immuneGroup.includes(t.key)) immuneGroup.push(t.key);
       },
-      forceExit: (target) => forceExit(getUnit(target), { source: owner }),
+      /** 「退场」积木：force=true 时是强制退场（不接受「拒绝退场」，但超级无敌仍能拦下） */
+      forceExit: (target, opts) =>
+        forceExit(getUnit(target), { source: owner, force: Boolean(opts && opts.force) }),
+      /** 「拒绝退场」积木：取消本次退场并回血（只在自己的、非强制退场时有效；可传目标集做筛选） */
+      refuseExit: (mode, value, targets) => refuseExit(owner, mode, value, targets),
+      /** 「转移攻击」积木：把本次受到的伤害改到另一个单位身上（force = 强制转移，本源也能转） */
+      transferAttack: (from, to, opts) => transferAttack(owner, from, to, opts),
+      /** 「全部子单位」积木：这个单位下面还活着的子单位 */
+      childrenOf: (ref) => {
+        const parent = getUnit(ref);
+        if (!parent) return [];
+        return livingUnits().filter((c) => c.parentKey === parent.key);
+      },
+      /** 「父单位」积木：召唤它的那个单位（不在场就为空） */
+      parentOf: (ref) => {
+        const u = getUnit(ref);
+        if (!u || !u.parentKey) return null;
+        const parent = getUnit(u.parentKey);
+        return parent && isAlive(parent) ? parent : null;
+      },
       giveSkill: (skillId) => {
         if (!registry.getSkill(skillId)) return;
         const entry = owner.granted.find((g) => g.skillId === skillId);
@@ -919,17 +1013,46 @@ export function createBattle(setup) {
     return owner;
   }
 
-  function playerChoose(cands, opts) {
-    const list = cands && cands.length ? cands : null;
+  /**
+   * 「选择单位」积木：让玩家从候选里挑 1..max 个。
+   * opts.max 最多可选（默认 1）；opts.required 必须选满——界面没给够时按候选顺序补齐，
+   * 这样人机 / 不支持多选的旧界面也能跑。
+   * opts.fromSide 选择者阵营，用于过滤不可被敌方 / 我方选中的单位。
+   */
+  function playerChoose(cands, opts = {}) {
+    // 按选择者阵营过滤「不可被敌方 / 我方选中」的单位；显式目标集带进来也要过滤
+    const fromSide = opts.fromSide || null;
+    const list = cands && cands.length ? cands.filter((u) => u && canSelectUnit(u, fromSide)) : null;
     if (!list) return [];
-    if (typeof setup.chooseTargets !== "function") return [list[0]];
-    const picked = setup.chooseTargets({
-      candidates: list.map((u) => publicUnit(u)),
-      multiple: opts.multiple !== false,
-      battle: publicBattle(),
-    });
-    if (!picked) return [];
-    return (Array.isArray(picked) ? picked : [picked]).map((p) => getUnit(p)).filter(Boolean);
+    const max = Math.max(1, Math.floor(Number(opts.max) || 1));
+    const required = Boolean(opts.required);
+    const need = Math.min(max, list.length);
+    let picked;
+    if (typeof setup.chooseTargets !== "function") {
+      picked = list.slice(0, max);
+    } else {
+      picked = setup.chooseTargets({
+        candidates: list.map((u) => publicUnit(u)),
+        max,
+        need,
+        required,
+        multiple: max > 1,
+        battle: publicBattle(),
+      });
+    }
+    const out = [];
+    for (const p of Array.isArray(picked) ? picked : picked ? [picked] : []) {
+      const u = getUnit(p);
+      if (u && !out.some((x) => x.key === u.key)) out.push(u);
+      if (out.length >= max) break;
+    }
+    if (required && out.length < need) {
+      for (const u of list) {
+        if (out.length >= need) break;
+        if (!out.some((x) => x.key === u.key)) out.push(u);
+      }
+    }
+    return out;
   }
 
   function unitDataOf(u, field, opts = {}) {
@@ -942,18 +1065,22 @@ export function createBattle(setup) {
       case "lastAttackDamage": return u.stats.lastAttackDamage || 0;
       case "lastAttackHits": return u.stats.lastAttackHits || 0;
       case "lastHeal": return u.stats.lastHeal || 0;
+      case "lastHealSource": return u.stats.lastHealSource ? getUnit(u.stats.lastHealSource) : null;
       case "lastLose": return u.stats.lastLose || 0;
       case "lastHpChange": return u.stats.lastHpChange || 0;
+      case "lastHitDamage": return u.stats.lastHitDamage || 0;
       case "lastAttackTarget": {
         const t = (u.stats.lastAttackTargets || [])[0];
         return t ? getUnit(t) : null;
       }
       case "lastHitSource": return u.stats.lastHitSource ? getUnit(u.stats.lastHitSource) : null;
       case "effectStacks": return typeof opts.effectId === "string" && opts.effectId ? effectStacks(u, opts.effectId) : 0;
+      case "children": return livingUnits().filter((c) => c.parentKey === u.key).length;
       case "faction": return factionOf(u) || "";
       case "label": return displayLabel(u);
       case "name": return u.name;
       case "id": return u.cardId;
+      case "uid": return u.uid;
       default: return 0;
     }
   }
@@ -982,6 +1109,32 @@ export function createBattle(setup) {
   }
 
   /* ================= 伤害 ================= */
+  /**
+   * 正在结算的伤害（「转移攻击」把这次伤害改到别的单位身上）。
+   * 用栈保管：一次「受击时」的流程里可能再打出一次伤害。
+   */
+  const damageFrames = [];
+  const currentDamageFrame = () => (damageFrames.length ? damageFrames[damageFrames.length - 1] : null);
+
+  /**
+   * 「转移攻击」积木：把本次伤害从「来源」改到「对象」身上。
+   * 只认本次正在受击的那个单位（来源不接 = 就是它），对象必须活着且不是它自己。
+   * 本源伤害默认不能转移，勾了「强制转移」才可以。
+   * @returns {boolean} 是否记下了转移
+   */
+  function transferAttack(owner, from, to, opts = {}) {
+    const frame = currentDamageFrame();
+    if (!frame) return false;
+    if (frame.isTrue && !opts.force) return false;
+    const src = getUnit(from) || (from === undefined || from === null ? frame.target : null);
+    if (!src || src.key !== frame.target.key) return false;
+    const dst = getUnit(to);
+    if (!dst || !isAlive(dst) || dst.key === src.key) return false;
+    frame.to = dst;
+    frame.by = owner || null;
+    return true;
+  }
+
   function dealDamage(p) {
     const A = getUnit(p.attackerRef);
     const B = getUnit(p.targetRef);
@@ -994,8 +1147,6 @@ export function createBattle(setup) {
     const ignoreReduction = Boolean(p.ignoreReduction) || isTrue || additional;
 
     const aStats = statsOf(A, isTrue ? "origin" : "normal");
-    const bStats = statsOf(B, isTrue ? "origin" : "normal");
-    if (!isTrue) bStats.resistances = resistancesOf(B);
 
     const auto = p.value === undefined || p.value === null || p.value === "atk";
     // 本源 / 附加伤害的数值不吃加成：未指定数值时用卡面基础攻击力
@@ -1007,6 +1158,46 @@ export function createBattle(setup) {
         : auto
           ? aStats.atk
           : Number(p.value);
+
+    // 结算前的「单位受击时」：效果可以给自己叠加免疫（本组伤害共同生效），
+    // 也可以「转移攻击」——把这次伤害改到另一个单位身上。
+    // 本源伤害同样算一次受击（会触发受击时），只是伤害本身依然无视减免 / 免疫。
+    immuneGroup = [];
+    {
+      const frame = { target: B, to: null, by: null, isTrue };
+      damageFrames.push(frame);
+      try {
+        emit("attacked", [B]);
+      } finally {
+        damageFrames.pop();
+      }
+      if (frame.to && frame.to.key !== B.key) {
+        if ((Number(p.transferDepth) || 0) >= 6) {
+          log(BATTLE_EVENT.FLOW_ERROR, {
+            reason: "转移攻击嵌套过深",
+            from: B.uid,
+            to: frame.to.uid,
+          });
+        } else {
+          // 改到新目标：新目标自己的「受击时」会照常播一遍，原目标这次记 0 伤害
+          log(BATTLE_EVENT.ATTACK_TRANSFERRED, {
+            attacker: A.uid,
+            from: B.uid,
+            to: frame.to.uid,
+            skillId: p.skillId || null,
+            trueDamage: isTrue,
+          });
+          return dealDamage({
+            ...p,
+            targetRef: frame.to.key,
+            transferDepth: (Number(p.transferDepth) || 0) + 1,
+          });
+        }
+      }
+    }
+
+    const bStats = statsOf(B, isTrue ? "origin" : "normal");
+    if (!isTrue) bStats.resistances = resistancesOf(B);
 
     const result = calculateDamage({
       attacker: aStats,
@@ -1021,10 +1212,6 @@ export function createBattle(setup) {
       additional,
     });
     const rawFinal = Math.round(result.finalDamage * 1e9) / 1e9;
-
-    // 结算前的「单位受击时」：效果可以给自己叠加免疫（本组伤害共同生效）
-    immuneGroup = [];
-    if (!isTrue) emit("attacked", [B]);
     // 受击效果可能把人打死或结束战斗：先回滚这次伤害的结算，避免对已离场的单位继续动手
     const aborted = state.status === "finished" || !isAlive(B);
     const group = immuneGroup;
@@ -1045,7 +1232,8 @@ export function createBattle(setup) {
       });
       return null;
     }
-    const immune = group.includes(B.key);
+    // 本源伤害视为受击，但仍然无视「免疫伤害」的效果（本源无视一切减伤 / 免伤）
+    const immune = !isTrue && group.includes(B.key);
     const final = immune ? 0 : rawFinal;
 
     const hpBefore = B.hp;
@@ -1053,6 +1241,7 @@ export function createBattle(setup) {
     const applied = hpBefore - B.hp;
     A.damageDealt += applied;
     B.damageTaken += applied;
+    if (final > 0) B.stats.lastHitDamage = final;
     if (applied > 0) {
       B.stats.lastHitSource = A.key;
       B.stats.lastLose = applied;
@@ -1078,14 +1267,21 @@ export function createBattle(setup) {
     if (applied > 0) {
       log(BATTLE_EVENT.HP_LOST, { unit: B.uid, amount: applied, by: A.uid, hpBefore, hpAfter: B.hp });
       emit("loseHp", [B]);
+      // 「单位生命变动时」：回复 / 损失都算，这里在死亡判定之前广播，救回类效果能接
+      emit("hpChanged", [B]);
       emit("dataUpdate", [B]);
     }
 
     if (B.hp <= 0) {
-      // 致命伤害：效果有机会把自己救回来
+      // 致命伤害：效果有机会把自己救回来（致命伤害触发 / 「拒绝退场」）
       if (final > 0) emit("lethalDamage", [B]);
-      if (B.hp <= 0) kill(B, A);
-      else {
+      if (B.hp <= 0) {
+        const exited = kill(B, A);
+        if (!exited && isAlive(B)) {
+          record.saved = true;
+          record.hpAfter = B.hp;
+        }
+      } else {
         record.saved = true;
         record.hpAfter = B.hp;
       }
@@ -1093,50 +1289,155 @@ export function createBattle(setup) {
     return record;
   }
 
-  function kill(u, by) {
-    if (!isAlive(u)) return;
-    u.state = UNIT_STATES[1];
-    u.hp = 0;
-    u.killedBy = by ? by.key : null;
-    log(BATTLE_EVENT.DEATH, { unit: u.uid, by: by ? by.uid : null });
-    exitUnit(u, EXIT_CAUSE.DEATH);
+  /**
+   * 退场门禁（无敌档位）：
+   *   免伤（damage）—— 正常退场 / 强制退场都吃；
+   *   无敌（invincible）—— 只吃强制退场；
+   *   超级无敌（super）—— 什么退场都不吃。
+   * @returns {string|null} 被拦下的档位（null = 允许退场）
+   */
+  function exitBlockedBy(u, force) {
+    const level = invincibleLevelOf(u);
+    if (level === "super") return "super";
+    if (level === "invincible" && !force) return "invincible";
+    return null;
   }
 
-  /** 退场（死亡 / 强制 / 父单位退场）：子单位一起退场 */
-  function exitUnit(u, cause) {
-    if (u.exited) return;
+  /**
+   * 正在结算的退场请求（「拒绝退场」写在这里）。
+   * 子单位退场会在父单位的流程里嵌套，所以用栈。
+   */
+  const exitRequests = [];
+  const currentExitRequest = () => (exitRequests.length ? exitRequests[exitRequests.length - 1] : null);
+
+  /**
+   * 「拒绝退场」积木：只有本次触发是「退场时」、且这次退场不是强制退场时才有效；
+   * 只能拒绝自己的退场（owner = 流程拥有者）。
+   */
+  function refuseExit(owner, mode = "full", value = 0, targets = null) {
+    const req = currentExitRequest();
+    if (!req || req.saved) return Boolean(req && req.saved);
+    if (req.force) return false;
+    if (!emitting || emitting.type !== "unitExit") return false;
+    if (Array.isArray(targets)) {
+      // 接了目标集：只有正在退场的单位在集合里才拒绝
+      if (!targets.some((t) => t && t.key === req.unit.key)) return false;
+    } else if (owner && owner.key && req.unit.key !== owner.key) return false;
+    const to = mode === "to";
+    req.saved = { mode: to ? "to" : "full", value: to ? Math.max(1, Number(value) || 1) : 0 };
+    log(BATTLE_EVENT.EXIT_REFUSED, {
+      unit: req.unit.uid,
+      mode: req.saved.mode,
+      value: req.saved.value,
+      cause: req.cause,
+    });
+    return true;
+  }
+
+  /**
+   * 退场（死亡 / 普通退场 / 强制退场 / 父单位连带退场）。
+   * 分两段：① 先广播「退场时」——此时单位还在场，可以被「拒绝退场」救回来；
+   *          ② 再真正退场（子单位一起带走）。
+   * @returns {boolean} 是否真的退场了
+   */
+  function exitUnit(u, cause, opts = {}) {
+    // exiting：正在跑这个单位的「退场时」流程——防止流程里再退它一次导致无限递归
+    if (!u || u.exited || u.exiting) return false;
+    const force = Boolean(opts.force);
+    const blocked = exitBlockedBy(u, force);
+    if (blocked) {
+      // 被无敌档位拦下：不留「0 血还活着」的单位
+      if (u.hp <= 0 && isAlive(u)) u.hp = 1;
+      log(BATTLE_EVENT.EXIT_BLOCKED, {
+        unit: u.uid,
+        cause,
+        level: blocked,
+        forced: force,
+      });
+      return false;
+    }
+    const dying = cause === EXIT_CAUSE.DEATH;
+    if (dying) u.killedBy = opts.by ? opts.by.key : null;
+
+    // ① 退场时（可拒绝）
+    const request = { unit: u, cause, force, saved: null };
+    exitRequests.push(request);
+    u.exiting = true;
+    try {
+      emit("unitExit", [u]);
+    } finally {
+      u.exiting = false;
+      exitRequests.pop();
+    }
+    if (request.saved) {
+      const max = statsOf(u).hp;
+      const hp = request.saved.mode === "full" ? max : Math.max(1, Math.min(max, request.saved.value));
+      u.state = UNIT_STATES[0];
+      u.hp = hp;
+      u.exited = false;
+      u.exitedCause = null;
+      u.killedBy = null;
+      u.stats.lastHeal = hp;
+      u.stats.lastHpChange = hp;
+      log(BATTLE_EVENT.HEAL, { unit: u.uid, amount: hp, hpBefore: 0, hpAfter: hp, cause: "refuse-exit" });
+      emit("hpChanged", [u]);
+      emit("dataUpdate", [u]);
+      return false;
+    }
+
+    // ② 真正退场
     u.exited = true;
     u.exitedCause = cause;
-    if (cause !== EXIT_CAUSE.DEATH && cause !== EXIT_CAUSE.PARENT) {
-      log(BATTLE_EVENT.EXIT, { unit: u.uid, cause });
+    u.state = dying ? UNIT_STATES[1] : UNIT_STATES[2];
+    u.hp = 0;
+    if (dying) log(BATTLE_EVENT.DEATH, { unit: u.uid, by: opts.by ? opts.by.uid : null });
+    else if (cause !== EXIT_CAUSE.PARENT) {
+      log(BATTLE_EVENT.EXIT, {
+        unit: u.uid,
+        cause,
+        forced: force,
+        by: opts.by ? opts.by.uid : null,
+      });
+    }
+    // 同屏对战「允许同名角色」时：从手牌上场的卡被击败后回到牌组，之后还能再抽到；
+    // 召唤物（fromDeck=false）不回流。
+    if (dying && localMode && state.local && state.local.allowSameName !== false && u.fromDeck) {
+      const deck = state.decks[u.side];
+      if (Array.isArray(deck)) deck.push(u.cardId);
     }
     exitDepth += 1;
     try {
       const children = livingUnits().filter((c) => c.parentKey === u.key);
-      for (const c of children) {
-        c.state = UNIT_STATES[2];
-        c.hp = 0;
-        exitUnit(c, EXIT_CAUSE.PARENT);
-      }
-      emit("unitExit", [u]);
+      for (const c of children) exitUnit(c, EXIT_CAUSE.PARENT, { force });
     } finally {
       exitDepth -= 1;
     }
     // 退场触发（包括嵌套退场）全部跑完后再结算，避免最后一个单位的
     // 召唤 / 复活被 checkEnd 抢先判负。
     if (exitDepth === 0) checkEnd();
-  }
-
-  function forceExit(u, extra = {}) {
-    if (!isAlive(u)) return false;
-    u.state = UNIT_STATES[2];
-    u.hp = 0;
-    log(BATTLE_EVENT.EXIT, { unit: u.uid, cause: EXIT_CAUSE.FORCE, by: extra.source ? extra.source.uid : null });
-    exitUnit(u, EXIT_CAUSE.FORCE);
     return true;
   }
 
-  function heal(target, amount, cause = "direct") {
+  /** 退场（死亡） */
+  function kill(u, by) {
+    if (!isAlive(u)) return false;
+    return exitUnit(u, EXIT_CAUSE.DEATH, { by });
+  }
+
+  /**
+   * 退场积木 / 外部脚本入口。
+   * @param {object} u 单位
+   * @param {object} [extra] source：来源单位；force：强制退场（不接受「拒绝退场」，但超级无敌仍能拦下）
+   */
+  function forceExit(u, extra = {}) {
+    if (!isAlive(u)) return false;
+    return exitUnit(u, EXIT_CAUSE.FORCE, {
+      force: Boolean(extra.force),
+      by: extra.source || null,
+    });
+  }
+
+  function heal(target, amount, cause = "direct", source = null) {
     const u = getUnit(target);
     if (!isAlive(u)) return 0;
     const before = u.hp;
@@ -1144,15 +1445,17 @@ export function createBattle(setup) {
     const delta = u.hp - before;
     if (delta > 0) {
       u.stats.lastHeal = delta;
+      u.stats.lastHealSource = source ? source.key : null;
       u.stats.lastHpChange = delta;
-      log(BATTLE_EVENT.HEAL, { unit: u.uid, amount: delta, hpBefore: before, hpAfter: u.hp, cause });
-      emit("heal", [u]);
+      log(BATTLE_EVENT.HEAL, { unit: u.uid, amount: delta, hpBefore: before, hpAfter: u.hp, cause, source: source ? source.uid : null });
+      emit("heal", [u], { source: source ? source.key : null });
+      emit("hpChanged", [u]);
       emit("dataUpdate", [u]);
     }
     return delta;
   }
 
-  function setHp(target, value, cause = "direct") {
+  function setHp(target, value, cause = "direct", source = null) {
     const u = getUnit(target);
     if (!isAlive(u)) return 0;
     const before = u.hp;
@@ -1160,13 +1463,17 @@ export function createBattle(setup) {
     const delta = u.hp - before;
     if (delta > 0) {
       u.stats.lastHeal = delta;
-      log(BATTLE_EVENT.HEAL, { unit: u.uid, amount: delta, hpBefore: before, hpAfter: u.hp, cause });
-      emit("heal", [u]);
+      u.stats.lastHealSource = source ? source.key : null;
+      u.stats.lastHpChange = delta;
+      log(BATTLE_EVENT.HEAL, { unit: u.uid, amount: delta, hpBefore: before, hpAfter: u.hp, cause, source: source ? source.uid : null });
+      emit("heal", [u], { source: source ? source.key : null });
+      emit("hpChanged", [u]);
     } else if (delta < 0) {
       u.stats.lastLose = -delta;
       u.stats.lastHpChange = delta;
       log(BATTLE_EVENT.HP_LOST, { unit: u.uid, amount: -delta, hpBefore: before, hpAfter: u.hp, cause });
       emit("loseHp", [u]);
+      emit("hpChanged", [u]);
     }
     emit("dataUpdate", [u]);
     if (u.hp <= 0) kill(u, null);
@@ -1176,7 +1483,9 @@ export function createBattle(setup) {
   /* ================= 召唤 ================= */
   function freeSlotFor(side) {
     for (let s = 1; s <= state.slotsPerSide; s += 1) {
-      const used = state.units.some((u) => isAlive(u) && u.side === side && u.occupiesSlot && Math.abs(u.slot) === s);
+      const used = state.units.some(
+        (u) => isAlive(u) && !u.exiting && u.side === side && u.occupiesSlot && Math.abs(u.slot) === s
+      );
       if (!used) return side === "ally" ? s : -s;
     }
     return null;
@@ -1186,17 +1495,49 @@ export function createBattle(setup) {
    * 在某一侧生成 1 个单位（入场流程走 summon 事件）。
    * @returns {object|null} 生成失败（未知卡 / 超出上限 / 没有空格）返回 null
    */
-  function spawnCard({ unitId, side, label, parent, ignoreLimit = false, markActed = false, cause = "summon" }) {
+  function spawnCard({
+    unitId,
+    side,
+    label,
+    parent,
+    ignoreLimit = false,
+    markActed = false,
+    cause = "summon",
+    slotHint = null,
+  }) {
     const card = registry.getUnit(unitId);
     if (!card) {
       log(BATTLE_EVENT.FLOW_ERROR, { reason: `未知单位卡：${unitId}` });
       return null;
     }
-    if (!ignoreLimit && livingOf(side).filter((u) => u.countsAsUnit).length >= state.summonLimit) return null;
-    const slot = freeSlotFor(side);
-    if (slot === null) return null;
+    // 不计数单位本身不占「场上单位上限」的名额，不该被现有计数单位卡住
+    const countsTowardLimit = card.countsAsUnit !== false;
+    if (
+      !ignoreLimit &&
+      countsTowardLimit &&
+      livingOf(side).filter((u) => u.countsAsUnit && !u.exiting).length >= state.summonLimit
+    ) {
+      return null;
+    }
+    let slot = freeSlotFor(side);
+    let overflow = false;
+    if (slot === null) {
+      // 不占位单位（occupiesSlot:false）本来就不占格，没有空格时可以共享召唤者 / 父单位的格子；
+      // 其余单位要勾「无视单位上限」才允许溢出（溢出单位同样不占格）。
+      const canShareSlot = card.occupiesSlot === false;
+      if (!ignoreLimit && !canShareSlot) return null;
+      const maxSlot = Math.max(1, Number(state.slotsPerSide) || 1);
+      const hint = Number(slotHint);
+      const use = Number.isFinite(hint) && hint !== 0
+        ? Math.min(maxSlot, Math.max(1, Math.abs(Math.floor(hint))))
+        : 1;
+      slot = side === "ally" ? use : -use;
+      overflow = true;
+    }
     const uid = `s${++summonSeq}`;
     const unit = makeUnit(uid, card, side, slot, undefined, label || card.label);
+    if (overflow) unit.occupiesSlot = false;
+    unit.fromDeck = cause === "play";
     // 召唤物跟召唤者同阵营（多阵营时不会被算进别的阵营）
     unit.faction = parent ? factionOf(parent) : side;
     unit.parentKey = parent ? parent.key : null;
@@ -1247,6 +1588,7 @@ export function createBattle(setup) {
         ignoreLimit,
         markActed: acted,
         cause: parent ? "summon-child" : "summon",
+        slotHint: parent ? parent.slot : owner ? owner.slot : null,
       });
       if (!unit) break;
       spawned.push(unit);
@@ -1393,7 +1735,7 @@ export function createBattle(setup) {
     if (!localMode || state.status !== "running") return false;
     const d = state.localDeploy;
     if (!d || d.side !== side) return false;
-    const count = livingOf(side).filter((u) => u.countsAsUnit).length;
+    const count = livingOf(side).length;
     if (count < 1) return false;
     if (d.initial) {
       log(BATTLE_EVENT.DEPLOY_DONE, { side, initial: true });
@@ -1462,7 +1804,7 @@ export function createBattle(setup) {
       ? [otherSide(previous.side), previous.side]
       : [state.firstSide, otherSide(state.firstSide)];
     const side = ordered.find(
-      (s) => livingOf(s).filter((u) => u.countsAsUnit).length === 0 && handOf(s).length > 0
+      (s) => livingOf(s).length === 0 && handOf(s).length > 0
     );
     if (!side) return false;
     state.phase = BATTLE_PHASE.DEPLOY;
@@ -1480,14 +1822,18 @@ export function createBattle(setup) {
 
   function checkEnd() {
     if (state.status !== "running") return true;
-    const allies = livingOf("ally").filter((u) => u.countsAsUnit);
-    const enemies = livingOf("enemy").filter((u) => u.countsAsUnit);
+    // 计数只影响「阵营单位数量上限」，胜负判定按场上所有存活单位
+    const allies = livingOf("ally");
+    const enemies = livingOf("enemy");
     // side 模式：牌组里还有单位 = 还没输，下回合会补上场
     const deckLeft = (side) => (state.decks[side] || []).length;
-    // local 模式：场上全灭但手里还有牌 = 还能补上场，不算输
+    // local 模式：场上全灭但手里还有牌 = 还能补上场，不算输；
+    // 开了补牌时牌组也算资源（被击败回流的卡还在牌组里，等补牌抽回手牌）。
     const handLeft = (side) => (state.hand[side] || []).length;
-    const allyOut = allies.length === 0 && (localMode ? handLeft("ally") === 0 : !sideMode || deckLeft("ally") === 0);
-    const enemyOut = enemies.length === 0 && (localMode ? handLeft("enemy") === 0 : !sideMode || deckLeft("enemy") === 0);
+    const localRefill = localMode && state.local && state.local.refillEnabled && state.local.refillCount > 0;
+    const localOut = (side) => handLeft(side) === 0 && (!localRefill || deckLeft(side) === 0);
+    const allyOut = allies.length === 0 && (localMode ? localOut("ally") : !sideMode || deckLeft("ally") === 0);
+    const enemyOut = enemies.length === 0 && (localMode ? localOut("enemy") : !sideMode || deckLeft("enemy") === 0);
     const finish = (reason, winner) => {
       state.status = "finished";
       state.endReason = reason;
@@ -1871,8 +2217,10 @@ export function createBattle(setup) {
 
     let primary = opts.targetRef ? getUnit(opts.targetRef) : null;
     if (primary && !isAlive(primary)) return null;
+    // 按施放者阵营检查选中限制（直接 API / 旧界面也一并拦住）
+    if (primary && !canSelectUnit(primary, A.side)) return null;
     if (!primary && skill.requiresTarget) {
-      primary = selectTarget(state.units, otherSide(A.side));
+      primary = selectTarget(state.units, otherSide(A.side), { fromSide: A.side });
       if (!primary) return null;
     }
 
@@ -1914,7 +2262,7 @@ export function createBattle(setup) {
 
         // 没有指定目标时，技能默认把最近的敌方单位作为「当前目标」（与数据式技能一致）
         if (!prevSkillTargets.length) {
-          const autoTarget = selectTarget(state.units, otherSide(A.side));
+          const autoTarget = selectTarget(state.units, otherSide(A.side), { fromSide: A.side });
           if (autoTarget) prevSkillTargets = [autoTarget];
         }
         for (const trigger of startTriggers) {
@@ -1931,6 +2279,8 @@ export function createBattle(setup) {
           }
           if (state.status !== "running" || !isAlive(A)) break;
         }
+        // 技能效果都结算完再广播一次；需要「父单位技能结算后」的效果用这个事件
+        emit("skillResolved", [A], { skillId: skill.id });
         return skill;
       }
 
@@ -1944,7 +2294,7 @@ export function createBattle(setup) {
             ? [A]
             : primary
               ? [primary]
-              : [selectTarget(state.units, otherSide(A.side), { ignoreDistance: true })].filter(Boolean);
+              : [selectTarget(state.units, otherSide(A.side), { ignoreDistance: true, fromSide: A.side })].filter(Boolean);
           for (const B of targets) {
             if (!isAlive(B)) continue;
             const attr = eff.attribute || "physical";
@@ -1984,6 +2334,7 @@ export function createBattle(setup) {
         emit("attack", [A]);
         emit("allyAttack", [A]);
       }
+      emit("skillResolved", [A], { skillId: skill.id });
       return skill;
     } finally {
       state.current = prev;
@@ -2032,7 +2383,14 @@ export function createBattle(setup) {
       state: u.state,
       countsAsUnit: u.countsAsUnit,
       occupiesSlot: u.occupiesSlot,
+      /** 选中限制：none / enemy / ally / all */
+      unselectable: normalizeUnselectable(u.unselectable),
+      immuneNegative: Boolean(u.immuneNegative),
+      immuneControl: Boolean(u.immuneControl),
+      /** 伤害免疫（任一档无敌 / 整方无敌）——旧界面按布尔值用 */
       invincible: isInvincible(u),
+      /** 无敌档位：none / damage（免伤）/ invincible（无敌）/ super（超级无敌） */
+      invincibleLevel: invincibleLevelOf(u),
       parentKey: u.parentKey,
       /** side 模式：这个单位本回合是否已经行动过 */
       /** 兼容旧界面：没有剩余可动次数就等价于「已行动」 */
@@ -2259,8 +2617,8 @@ export function createBattle(setup) {
         attachEffect(getUnit(unitRef), effectId, { layers, source: source ? getUnit(source) : null })
       );
     },
-    forceExit(unitRef, { log: shouldLog = false } = {}) {
-      return withMuted(!shouldLog, () => forceExit(getUnit(unitRef)));
+    forceExit(unitRef, { log: shouldLog = false, force = true } = {}) {
+      return withMuted(!shouldLog, () => forceExit(getUnit(unitRef), { force }));
     },
     removeEffect(unitRef, effectId, { force = false, layers = Infinity, log: shouldLog = false } = {}) {
       return withMuted(!shouldLog, () => removeEffectByMode(getUnit(unitRef), { mode: "specified", effectId, layers, force }));

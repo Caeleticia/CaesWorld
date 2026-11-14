@@ -4,15 +4,14 @@
  * 每侧有 slots 个格子，每个格子最多站一个单位。
  *  - 开占位(occupiesSlot)的单位占用一个格子，不能和其他占位者重叠；
  *  - 不开占位的单位可以站在任意空格或不占位单位所在的格子里，不排队；
- *  - 开计数(countsAsUnit)的单位才进入索敌的「存活单位」列表。
+ *  - 计数(countsAsUnit)只影响「阵营单位数量上限」；不计数单位照样进入索敌 / 可选目标集；
+ *  - 不可选中(unselectable)分四种：none / enemy（不可被敌方选中）/ ally（不可被我方选中）/ all（双方都不可选）。
  *
- * 索敌默认打「最近」的计数单位：|slot| 最小者，同距离按加入顺序（slot 小的先）。
- * 目标类别由 countsAsUnit 决定：
- *  - 计数单位 → 普通敌方单位
- *  - 不计数    → 召唤物/装置（如召唤物类技能指定打召唤物）
- *  - 不占位    → 附着单位
+ * 索敌默认打「最近」的可选中单位：|slot| 最小者，同距离按加入顺序（slot 小的先）。
+ * 不再按计数与否区分目标类别；不占位只影响站位，不影响选中。
  */
 import { SIDES } from "./constants.js";
+import { canSelectUnit } from "./units.js";
 
 export function sideOf(side) {
   if (!SIDES.includes(side)) throw new Error(`无效阵营：${side}`);
@@ -70,20 +69,22 @@ export function canPlace(units, candidate) {
  * 找出某阵营里可作为目标的单位。
  * @param {Array<object>} units 全部战斗单位
  * @param {string} side
- * @param {{counted?: boolean}} [opts] counted: true=只要计数单位，false=只要不计数，缺省不过滤
+ * @param {{counted?: boolean, fromSide?: string}} [opts]
+ *   counted: true=只要计数单位，false=只要不计数，缺省不过滤
+ *   fromSide: 选择者阵营，用于判断「不可被敌方 / 我方选中」
  */
 export function candidatesForTargeting(units, side, opts = {}) {
-  const { counted } = opts;
+  const { counted, fromSide } = opts;
   return units.filter((u) => {
     if (u.side !== side) return false;
+    if (!canSelectUnit(u, fromSide)) return false;
     if (typeof counted === "boolean" && Boolean(u.countsAsUnit) !== counted) return false;
-    // 非计数单位不占格子，也就不参与「前排/后排」的排队
     return true;
   });
 }
 
 /**
- * 选目标：默认最近的普通单位；没有普通单位时退化为最近的任意单位。
+ * 选目标：最近的、当前选择者能选中的单位。
  * @returns {object|null}
  */
 export function selectTarget(units, side, opts = {}) {
@@ -91,9 +92,6 @@ export function selectTarget(units, side, opts = {}) {
   if (pool.length === 0) return null;
 
   const sorted = opts.ignoreDistance ? pool.slice() : sortByDistance(pool);
-  if (opts.counted === undefined) {
-    const counted = sorted.filter((u) => u.countsAsUnit);
-    if (counted.length) return counted[0];
-  }
+  // 计数不再影响索敌优先级：不计数单位与计数单位同等参与距离排序
   return sorted[0] || null;
 }

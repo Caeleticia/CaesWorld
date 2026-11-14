@@ -35,12 +35,16 @@ export const VARIABLE_TYPES = Object.freeze([
   { value: "number", label: "数字" },
   { value: "string", label: "字符串" },
   { value: "boolean", label: "布尔" },
+  { value: "unit", label: "单位" },
+  { value: "targetset", label: "目标集" },
 ]);
 
 /** 变量类型 → 「声明变量」值输入端口的数据类型 */
 export function variablePortType(type) {
   if (type === "string") return "string";
   if (type === "boolean") return "condition";
+  if (type === "unit") return "target";
+  if (type === "targetset") return "targetset";
   return "number";
 }
 
@@ -56,21 +60,53 @@ export const BLOCK_GROUPS = Object.freeze({
   variable: { label: "变量类", color: "#9B59B6" },
 });
 
+/**
+ * 可以接「单位集」并**按集合里的单位分别独立触发**的事件。
+ *
+ * 语义：
+ *   · 触发积木接了「单位集」→ 集合里每个满足条件的单位各跑一次流程，
+ *     流程里的「自己」= 这个单位，「触发的单位」仍然是事件涉及的单位；
+ *   · 没接「单位集」→ 和旧版一样，只按「自己」判定一次。
+ *
+ * 不在这里的事件保持旧语义（单位集只作为条件求值的范围）。
+ */
+export const MULTI_TARGET_TRIGGER_EVENTS = Object.freeze([
+  "unitTurnStart",
+  "unitTurnEnd",
+  "skillCast",
+  "skillResolved",
+  "attack",
+  "allyAttack",
+  "attacked",
+  "lethalDamage",
+  "unitEnter",
+  "unitExit",
+  "heal",
+  "loseHp",
+  "hpChanged",
+]);
+
+export function isMultiTargetTriggerEvent(event) {
+  return MULTI_TARGET_TRIGGER_EVENTS.includes(String(event || ""));
+}
+
 const TRIGGER_EVENTS = Object.freeze([
   { value: "turnStart", label: "回合开始时" },
   { value: "turnEnd", label: "回合结束时" },
-  { value: "unitTurnStart", label: "单位行动开始时" },
-  { value: "unitTurnEnd", label: "单位行动结束时" },
-  { value: "skillCast", label: "单位释放技能" },
+  { value: "unitTurnStart", label: "单位行动开始时", multi: true },
+  { value: "unitTurnEnd", label: "单位行动结束时", multi: true },
+  { value: "skillCast", label: "单位释放技能", multi: true },
   { value: "skillCastSelf", label: "单位释放该技能（仅本技能自身）" },
-  { value: "attack", label: "单位攻击时" },
-  { value: "allyAttack", label: "我方单位攻击时" },
-  { value: "attacked", label: "单位受击时" },
-  { value: "lethalDamage", label: "单位受致命伤害时" },
-  { value: "unitEnter", label: "单位入场时" },
-  { value: "unitExit", label: "单位退场时" },
-  { value: "heal", label: "单位回复生命时" },
-  { value: "loseHp", label: "单位损失生命时" },
+  { value: "skillResolved", label: "单位技能结算后", multi: true },
+  { value: "attack", label: "单位攻击时", multi: true },
+  { value: "allyAttack", label: "我方单位攻击时", multi: true },
+  { value: "attacked", label: "单位受击时", multi: true },
+  { value: "lethalDamage", label: "单位受致命伤害时", multi: true },
+  { value: "unitEnter", label: "单位入场时", multi: true },
+  { value: "unitExit", label: "单位退场时", multi: true },
+  { value: "heal", label: "单位回复生命时", multi: true },
+  { value: "loseHp", label: "单位损失生命时", multi: true },
+  { value: "hpChanged", label: "单位生命变动时（回复 / 损失都算）", multi: true },
   { value: "always", label: "始终（每次数据更新都触发一次）" },
 ]);
 
@@ -128,15 +164,19 @@ const UNIT_DATA_FIELDS = Object.freeze([
   { value: "lastAttackDamage", label: "上一次攻击的伤害", type: "number" },
   { value: "lastAttackHits", label: "上一次攻击命中的目标数", type: "number" },
   { value: "lastHeal", label: "上一次回复的生命值", type: "number" },
+  { value: "lastHealSource", label: "上一次回复的来源", type: "target" },
   { value: "lastLose", label: "上一次损失的生命值", type: "number" },
   { value: "lastHpChange", label: "上一次变动的生命值（回复为正）", type: "number" },
+  { value: "lastHitDamage", label: "上一次受到的伤害（未截断）", type: "number" },
   { value: "lastAttackTarget", label: "上一次攻击的目标", type: "target" },
   { value: "lastHitSource", label: "上一次受击的来源目标", type: "target" },
   { value: "effectStacks", label: "目标指定效果的层数", type: "number" },
+  { value: "children", label: "子单位数量", type: "number" },
   { value: "faction", label: "阵营", type: "string" },
   { value: "label", label: "标签", type: "string" },
   { value: "name", label: "名字", type: "string" },
-  { value: "id", label: "id", type: "string" },
+  { value: "id", label: "id（卡牌 id）", type: "string" },
+  { value: "uid", label: "uid（战斗内唯一）", type: "string" },
 ]);
 
 const SIDE_OPTIONS = Object.freeze([
@@ -179,10 +219,10 @@ export function buildFlowCatalog(ctx = {}) {
     kind: "trigger",
     group: "trigger",
     title: "触发",
-    subtitle: "满足条件时触发（条件按「单位」求值）",
-    note: "流程入口。技能流程可以放多个触发，每个触发执行它后面的内容；效果的每个触发是一条独立流程。「条件」按「单位」求值：没接「单位集」时「单位」= 自己（技能施放者 / 效果持有者）；接了「单位集」时「单位」= 集合里的任意一个单位，有一个满足条件就继续，集合为空则不继续。技能释放条件：把布尔条件接到「单位释放该技能」触发的「条件」输入；不接 = 始终可释放。",
+    subtitle: "满足条件时触发（可接单位集按单位分别触发）",
+    note: "流程入口。技能流程可以放多个触发，每个触发执行它后面的内容；效果的每个触发是一条独立流程。\n\n「单位集」的语义由「单位集触发方式」决定：\n· each（新，默认）：只对 12 种可多目标事件生效——集合里**每个**满足条件的单位各独立跑一次，流程里的「自己」= 这个单位，「触发的单位」仍是事件对象；没接单位集 = 只看自己。\n· any（旧）：集合只作为条件求值范围（任意一个满足就继续一次，集合为空则不继续），流程里的「自己」仍按 unitScope 取。\n· 其它事件只有 any 语义（单位集只参与条件求值）。\n\n旧卡（没有 unitMode）加载时会自动迁移：条件用了「遍历中的单位 / 遍历中的阵营」→ any；条件只依赖自己 / 触发的单位 → 删掉单位集连线（等价于新语义）。\n\n技能释放条件：把布尔条件接到「单位释放该技能」触发的「条件」输入；不接 = 始终可释放。",
     ports: [
-      { id: "unit", label: "单位集（可选）", direction: "in", type: "targetset" },
+      { id: "unit", label: "单位集（可选；each 时按单位分别触发）", direction: "in", type: "targetset" },
       { id: "condition", label: "条件（可选；技能释放条件）", direction: "in", type: "condition" },
       { id: "next", direction: "out" },
     ],
@@ -192,13 +232,23 @@ export function buildFlowCatalog(ctx = {}) {
       { key: "event", label: "触发条件", control: "select", options: TRIGGER_EVENTS, default: "unitTurnStart" },
       {
         key: "unitScope",
-        label: "「自己」指谁",
+        label: "「自己」指谁（any / 没接单位集时生效）",
         control: "select",
         options: [
           { value: "self", label: "持有该效果/技能的单位" },
           { value: "target", label: "触发事件的单位（回合开始/结束=行动者）" },
         ],
         default: "self",
+      },
+      {
+        key: "unitMode",
+        label: "单位集触发方式",
+        control: "select",
+        options: [
+          { value: "each", label: "按集合里的每个单位分别独立触发（新）" },
+          { value: "any", label: "只判定集合里是否有一个满足（旧）" },
+        ],
+        default: "each",
       },
     ],
   });
@@ -244,7 +294,7 @@ export function buildFlowCatalog(ctx = {}) {
         default: false,
       },
     ],
-    note: "「无视减免」只跳过目标侧的防御 / 抗性 / 易伤，攻击方加成与暴击照常；「附加伤害」不吃任何加成、不看任何减免、不暴击，也不触发「单位攻击时」。目标集里有多个单位时，它们属于同一次攻击动作，命中同时结算；要依次攻击请把「攻击」放进遍历 / 次数 / 条件循环。「伤害来源」留空就是流程拥有者自己；持续伤害可以接到「效果的施加者」，让击杀归属 / 日志记到施加者头上。",
+    note: "「无视减免」只跳过目标侧的防御 / 抗性 / 易伤，攻击方加成与暴击照常；「附加伤害」不吃任何加成、不看任何减免、不暴击，也不触发「单位攻击时」。目标集里有多个单位时，它们属于同一次攻击动作，命中同时结算；要依次攻击请把「攻击」放进遍历 / 次数 / 条件循环。「伤害来源」留空就是流程拥有者自己；持续伤害可以接到「效果的施加者」，让击杀归属 / 日志记到施加者头上。属性选「本源」时伤害无视一切减免与「免疫伤害」，但仍算一次受击（会触发「单位受击时」）。",
   });
   def({
     kind: "heal",
@@ -323,7 +373,8 @@ export function buildFlowCatalog(ctx = {}) {
     kind: "summon",
     group: "action",
     title: "召唤单位",
-    subtitle: "召唤单位到场上；单位 id 留空 = 召唤自己",
+    subtitle: "召唤单位到场上；单位 id 留空 = 召唤自己；无视上限时没空格会溢出同格",
+    note: "「无视单位上限」会同时绕过场上单位数量和空格限制：没有空格时，溢出的单位放在召唤者（或父单位）的格子里，且不占格，不会堵死后续召唤 / 补场。",
     ports: [
       { id: "in", direction: "in" },
       { id: "unitId", label: "召唤单位 id（字符串）", direction: "in", type: "string" },
@@ -339,6 +390,7 @@ export function buildFlowCatalog(ctx = {}) {
     group: "action",
     title: "召唤子单位",
     subtitle: "为每个单位召唤子单位，父单位退场时子单位也退场；目标集 / 单位 id 留空 = 自己",
+    note: "和「召唤单位」一样支持「无视单位上限」：数量 / 空格满了时溢出到父单位的格子（不占格）。",
     ports: [
       { id: "in", direction: "in" },
       { id: "targets", label: "目标集（父单位）", direction: "in", type: "targetset" },
@@ -348,6 +400,7 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "next", direction: "out" },
     ],
     outflows: ["next"],
+    options: [{ key: "ignoreLimit", label: "无视单位上限", control: "checkbox", default: false }],
   });
   def({
     kind: "skipTurn",
@@ -379,7 +432,8 @@ export function buildFlowCatalog(ctx = {}) {
     kind: "immuneDamage",
     group: "action",
     title: "免疫伤害",
-    subtitle: "若目标即将受到伤害，免疫本次伤害",
+    subtitle: "若目标即将受到伤害，免疫本次伤害（本源伤害不受影响）",
+    note: "放在「单位受击时」流程里，把这一组伤害记 0。本源伤害虽然也会触发受击时，但它不受「免疫伤害」影响——要挡本源请用无敌档位。",
     ports: [
       { id: "in", direction: "in" },
       { id: "targets", label: "目标集", direction: "in", type: "targetset" },
@@ -390,14 +444,58 @@ export function buildFlowCatalog(ctx = {}) {
   def({
     kind: "forceExit",
     group: "action",
-    title: "强制退场",
-    subtitle: "使目标强制退场",
+    title: "退场",
+    subtitle: "让目标退场；勾「强制退场」则不会被拒绝退场拦下",
+    note: "普通退场可以被「拒绝退场」取消；勾上「强制退场」后无视拒绝退场，直接退场。两种都会被「超级无敌」拦下；「无敌」只吃强制退场。",
     ports: [
       { id: "in", direction: "in" },
       { id: "targets", label: "目标集", direction: "in", type: "targetset" },
       { id: "next", direction: "out" },
     ],
     outflows: ["next"],
+    options: [{ key: "force", label: "强制退场", control: "checkbox", default: false }],
+  });
+  def({
+    kind: "refuseExit",
+    group: "action",
+    title: "拒绝退场",
+    subtitle: "取消本次「退场时」并回复血量",
+    note: "只在「退场时」触发里有效：把这次退场取消，并按选项回血（回复满 / 回复至指定值）。强制退场不能被拒绝；超级无敌本来就不吃退场。「目标集」可选：接了以后只有正在退场的单位在这个集合里才拒绝（不接 = 就是它自己）。",
+    ports: [
+      { id: "in", direction: "in" },
+      { id: "targets", label: "目标集（可选；默认正在退场的单位）", direction: "in", type: "targetset" },
+      { id: "value", label: "回复至（可选；不接用积木上的数字）", direction: "in", type: "number" },
+      { id: "next", direction: "out" },
+    ],
+    outflows: ["next"],
+    options: [
+      {
+        key: "mode",
+        label: "回复",
+        control: "select",
+        default: "full",
+        options: [
+          { value: "full", label: "回复满" },
+          { value: "to", label: "回复至指定值" },
+        ],
+      },
+      { key: "value", label: "回复至", control: "number", default: 1, showIf: { mode: "to" } },
+    ],
+  });
+  def({
+    kind: "transferAttack",
+    group: "action",
+    title: "转移攻击",
+    subtitle: "把本次受到的攻击改到另一个单位身上",
+    note: "通常放在「单位受击时」流程里：来源 = 本来要挨打的单位（不接就是它自己），对象 = 替它挨打的单位。只改这一次伤害；对象自己的「受击时」会照常触发。本源伤害默认不能转移，勾上「强制转移」才可以。",
+    ports: [
+      { id: "in", direction: "in" },
+      { id: "from", label: "来源（本来受击的单位）", direction: "in", type: "targetset" },
+      { id: "to", label: "对象（转移后受击的单位）", direction: "in", type: "targetset" },
+      { id: "next", direction: "out" },
+    ],
+    outflows: ["next"],
+    options: [{ key: "force", label: "强制转移（本源伤害也能转）", control: "checkbox", default: false }],
   });
   def({
     kind: "giveSkill",
@@ -483,6 +581,18 @@ export function buildFlowCatalog(ctx = {}) {
         { id: "out", direction: "out", type: "condition" },
       ],
     });
+  def({
+    kind: "sameUnit",
+    group: "logic",
+    title: "是同一单位",
+    subtitle: "比较两个单位引用是否指向同一个战斗单位",
+    note: "按战斗内 uid 比较；同名 / 同卡的不同单位也不会混淆。常用于判断「触发者是不是自己的父单位」。",
+    ports: [
+      { id: "a", label: "单位 A", direction: "in", type: "target" },
+      { id: "b", label: "单位 B", direction: "in", type: "target" },
+      { id: "out", direction: "out", type: "condition" },
+    ],
+  });
   def({
     kind: "compare",
     group: "logic",
@@ -572,28 +682,28 @@ export function buildFlowCatalog(ctx = {}) {
     subtitle: "获取敌方/我方全体",
     ports: [{ id: "set", direction: "out", type: "targetset" }],
     options: [{ key: "side", label: "目标集", control: "select", options: SIDE_OPTIONS, default: "enemy" }],
-    note: "「敌方 / 我方」按两阵营简化处理：取「自己所在阵营 / 对立阵营」。多阵营或要按单位所属阵营取人时，请用「单位所属的阵营」。",
+    note: "「敌方 / 我方」按两阵营简化处理：取「自己所在阵营 / 对立阵营」。多阵营或要按单位所属阵营取人时，请用「单位所属的阵营」。计数不再影响目标集；选中限制会按施放者阵营排除「不可被敌方选中 / 不可被我方选中 / 不可选中」的单位（想显式命中它们请用「全部单位」/「筛选目标集」）。",
   });
   def({
     kind: "factionSet",
     group: "data-set",
     title: "单位所属的阵营",
     subtitle: "输入一个单位，获取该单位所属阵营的全体单位",
-    note: "不依赖两阵营假设：按单位身上记录的阵营取同阵营的存活单位。单位留空 = 自己。默认只取计数单位（召唤物等不计数单位需要勾选）。旧名「按单位的阵营」，现统一为「单位所属的阵营」。",
+    note: "不依赖两阵营假设：按单位身上记录的阵营取同阵营的存活单位。单位留空 = 自己。默认包含不计数单位（计数只影响阵营单位数量上限）；取消勾选「包含不计数单位」才会排除它们。旧名「按单位的阵营」，现统一为「单位所属的阵营」。",
     ports: [
       { id: "unit", label: "单位（可空＝自己）", direction: "in", type: "target" },
       { id: "set", direction: "out", type: "targetset" },
     ],
-    options: [{ key: "includeUncounted", label: "包含不计数单位（召唤物等）", control: "checkbox", default: false }],
+    options: [{ key: "includeUncounted", label: "包含不计数单位（默认勾选）", control: "checkbox", default: true }],
   });
   def({
     kind: "allUnits",
     group: "data-set",
     title: "全部单位",
     subtitle: "场上所有存活单位",
-    note: "多阵营时用来按「获取单位数据 → 阵营」自行筛选；默认只取计数单位。",
+    note: "多阵营时用来按「获取单位数据 → 阵营」自行筛选；默认包含全部存活单位（不计数单位也算单位）。",
     ports: [{ id: "set", direction: "out", type: "targetset" }],
-    options: [{ key: "countedOnly", label: "只取计数单位", control: "checkbox", default: true }],
+    options: [{ key: "countedOnly", label: "只取计数单位（默认不勾选）", control: "checkbox", default: false }],
   });
   def({
     kind: "currentEffect",
@@ -626,7 +736,7 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "unit", label: "持有者（可空＝自己）", direction: "in", type: "target" },
       { id: "set", direction: "out", type: "targetset" },
     ],
-    options: [{ key: "includeUncounted", label: "包含不计数单位（召唤物等）", control: "checkbox", default: false }],
+    options: [{ key: "includeUncounted", label: "包含不计数单位（默认勾选）", control: "checkbox", default: true }],
     hidden: true,
   });
   def({
@@ -638,8 +748,12 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "targets", label: "目标集（可选范围）", direction: "in", type: "targetset" },
       { id: "set", direction: "out", type: "targetset" },
     ],
-    options: [{ key: "multiple", label: "允许多选", control: "checkbox", default: true }],
-    note: "流程里放了「选择单位」的技能，战斗界面会先让玩家点选目标再释放；全体攻击 / 固定目标的技能不需要放它。",
+    options: [
+      { key: "count", label: "最多可选", control: "number", default: 1, min: 1, max: 99 },
+      { key: "mustFill", label: "必须选满", control: "checkbox", default: false },
+      { key: "eachTime", label: "每次重选（执行到这块就重选一次）", control: "checkbox", default: false },
+    ],
+    note: "流程里放了「选择单位」的技能，战斗界面会先让玩家点选目标再释放；「最多可选」是这次能让玩家点几个（默认 1），不勾「必须选满」时可以少选几个直接放。默认同一次施放里只问一次（循环里也只问一次）；勾「每次重选」后，流程每执行到这个积木都重新让玩家选（适合循环里逐个选人）。全体攻击 / 固定目标的技能不需要放它。候选集里带进来的单位仍会按施放者阵营检查选中限制。",
   });
   def({
     kind: "setOp",
@@ -662,6 +776,17 @@ export function buildFlowCatalog(ctx = {}) {
         { value: "diff", label: "相对差集 A - B" },
       ],
     }],
+  });
+  def({
+    kind: "setCount",
+    group: "data-op",
+    title: "目标集的单位数",
+    subtitle: "数一数目标集里有几个单位",
+    note: "输出这个目标集里实际有几个单位（空集为 0），常用于「我方单位数」「子单位数量」这类判断。",
+    ports: [
+      { id: "set", label: "目标集", direction: "in", type: "targetset" },
+      { id: "count", direction: "out", type: "number" },
+    ],
   });
   def({
     kind: "unitData",
@@ -714,6 +839,37 @@ export function buildFlowCatalog(ctx = {}) {
     options: [{ key: "which", label: "单位", control: "select", options: [{ value: "self", label: "自己" }], default: "self" }],
   });
 
+  def({
+    kind: "childUnits",
+    group: "data-set",
+    title: "全部子单位",
+    subtitle: "取某个单位的全部存活子单位（召唤 / 分裂出来的）",
+    note: "不接「单位」时取流程拥有者自己。只统计还活着、并且当初是用「召唤子单位」挂在这个单位下面的子单位；父单位退场时子单位会一起退场。",
+    ports: [
+      { id: "unit", label: "单位（可选，默认自己）", direction: "in", type: "target" },
+      { id: "set", direction: "out", type: "targetset" },
+    ],
+  });
+  def({
+    kind: "parentUnit",
+    group: "data-unit",
+    title: "父单位",
+    subtitle: "取某个单位的父单位（召唤它的那个单位）",
+    note: "不接「单位」时取流程拥有者自己。不是召唤出来的单位、或父单位已经不在场时输出为空。",
+    ports: [
+      { id: "unit", label: "单位（可选，默认自己）", direction: "in", type: "target" },
+      { id: "target", direction: "out", type: "target" },
+    ],
+  });
+  def({
+    kind: "actingUnit",
+    group: "data-unit",
+    title: "操作中的单位",
+    subtitle: "执行类积木正在逐个处理的这个目标",
+    note: "攻击 / 回复 / 附加效果 / 移除效果 / 额外行动等执行类积木一次处理多个目标时，会逐个目标结算；这个积木就是「当前正在处理的那个目标」，用来读它自己的数值。和「遍历中的单位」互相独立：循环里的「遍历中的单位」不会因为执行类积木而改变，这个积木也不会因为循环而改变。不在执行类积木的目标处理里时为空。",
+    ports: [{ id: "target", label: "操作中的单位", direction: "out", type: "target" }],
+  });
+
   /* ---------------- 6 变量类 ---------------- */
   // 变量的作用域是「一次流程执行」：每次释放技能 / 触发流程都会重新声明，
   // 流程跑完就清空，因此不跨回合保存，不同技能可以放心用同名变量。
@@ -722,7 +878,7 @@ export function buildFlowCatalog(ctx = {}) {
     group: "variable",
     title: "声明变量",
     subtitle: "创建一个变量并赋值",
-    note: "变量只在本次流程执行内有效：每次释放技能 / 触发流程都会重新声明，流程结束即清空，不跨回合保存；不同技能可以用同名变量互不影响。「值」不连线时按类型取默认值（数字 0 / 字符串空 / 布尔 false）。",
+    note: "变量只在本次流程执行内有效：每次释放技能 / 触发流程都会重新声明，流程结束即清空，不跨回合保存；不同技能可以用同名变量互不影响。「值」不连线时按类型取默认值（数字 0 / 字符串空 / 布尔 false / 单位空 / 目标集空集）。",
     ports: [
       { id: "in", direction: "in" },
       { id: "value", label: "值", direction: "in", type: "number" },
@@ -795,6 +951,14 @@ export function buildFlowCatalog(ctx = {}) {
     subtitle: "触发积木里连接的「单位」（没连则为本流程的拥有者）",
     ports: [{ id: "target", direction: "out", type: "target" }],
   });
+  def({
+    kind: "healSource",
+    group: "data-unit",
+    title: "回复来源",
+    subtitle: "本次回复事件的治疗者",
+    note: "只在「单位回复生命时」触发的流程里有值；不在回复触发里输出空。用来判断是父单位、自己还是别的单位治疗了某个友方。",
+    ports: [{ id: "target", direction: "out", type: "target" }],
+  });
 
   /* 运算：按选项生成固定输入端口 */
   const math = blocks.math;
@@ -805,7 +969,8 @@ export function buildFlowCatalog(ctx = {}) {
   /** 数据类内部排序：运算 → 单位 → 目标集；编辑器按 order 排，不依赖定义顺序 */
   const DATA_ORDER = {
     number: 1, string: 2, math: 3, unitData: 4, selfData: 5, currentEffect: 6,
-    getUnit: 11, chooseUnit: 12, selfUnit: 13, contextUnit: 14, triggerUnit: 15, effectSource: 16,
+    getUnit: 11, chooseUnit: 12, selfUnit: 13, contextUnit: 14, triggerUnit: 15, effectSource: 16, actingUnit: 17,
+    parentUnit: 18, childUnits: 19, setCount: 20,
     targetSide: 21, factionSet: 22, allUnits: 23, setOp: 24, filterSet: 25, contextSide: 26, currentTarget: 27,
     effectSourceSide: 28,
   };

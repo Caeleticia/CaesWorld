@@ -13,7 +13,7 @@
  *  - 数据流（带类型的端口，画在积木两侧）：一个输出可以接多个输入，反过来不行；类型必须一致。
  *  - 「触发」积木没有执行流的输入，是流程的起点。
  */
-import { buildFlowCatalog, inputPortIds, variablePortType } from "./flow-catalog.js";
+import { buildFlowCatalog, inputPortIds, variablePortType, isMultiTargetTriggerEvent } from "./flow-catalog.js";
 
 export const FLOW_SCHEMA = 1;
 export const MAX_STEPS = 20000;
@@ -29,12 +29,20 @@ const toList = (v) => {
 const unitKey = (u) => u.key;
 
 /* 变量：值只在一次流程执行内有效（存在 runFlow 的 local.vars 里，跑完即丢） */
-const VAR_TYPES = Object.freeze(["number", "string", "boolean"]);
-const varDefault = (type) => (type === "number" ? 0 : type === "string" ? "" : false);
+const VAR_TYPES = Object.freeze(["number", "string", "boolean", "unit", "targetset"]);
+const varDefault = (type) => {
+  if (type === "number") return 0;
+  if (type === "string") return "";
+  if (type === "boolean") return false;
+  if (type === "unit") return null;
+  return []; // targetset
+};
 function coerceVar(type, v) {
   if (type === "number") return num(v);
   if (type === "string") return str(v);
-  return Boolean(v);
+  if (type === "boolean") return Boolean(v);
+  if (type === "unit") return unitList(v)[0] || null;
+  return unitList(v);
 }
 
 /**
@@ -280,7 +288,7 @@ function compareValues(a, b, operator) {
  *   currentEffectId   正在执行的效果 id（技能流程里为 null）
  *   context           { unit: 遍历中的单位 }
  *   rng()             随机源
- *   sideOf(u) / listSide(side) / pickForPlayer(cands)
+ *   sideOf(u) / listSide(side) / pickForPlayer(cands, { max, required })
  *   factionOf(u) / listFaction(faction, { includeUncounted }) / listAllUnits({ countedOnly })
  *   effectSource(holder, effectId) / effectSourceFaction(holder, effectId, opts)
  *   unitData(u, field, { effectId })
@@ -290,7 +298,10 @@ function compareValues(a, b, operator) {
  *   healUnit / setHp
  *   attachEffect(target, effectId, layers) / removeEffectByMode(target, opts)
  *   summon({ unitId, count, label, ignoreLimit, parent, owner })
- *   skipTurn / grantImmune / forceExit / giveSkill
+ *   skipTurn / grantImmune / giveSkill / addActions
+ *   forceExit(target, { force })      退场；force = 强制退场（不接受「拒绝退场」）
+ *   refuseExit(mode, value)           「拒绝退场」：取消本次退场并回血（mode: full / to）
+ *   transferAttack(from, to)          「转移攻击」：把本次伤害改到另一个单位
  *   interrupted       置 true 可中止当前循环
  *
  * 循环（条件/遍历/次数）的每一次迭代都会重新求值条件与数据积木，
@@ -317,6 +328,13 @@ export function runFlow(prepared, env, opts = {}) {
   let triggerBlocked = false;
   /** conditionOnly 模式下求出的触发条件结果 */
   let conditionPassed = true;
+  /** 本次 runFlow 里实际跑了几次独立的触发流程（单位集里多个单位满足条件时 > 1） */
+  let independentRuns = 0;
+
+  /** 当前这次执行用的「自己」：单位集触发的独立运行会覆盖成集合里的那个单位 */
+  function selfOf(local) {
+    return (local && local.selfOverride) || env.self;
+  }
 
   function inputNode(nodeId, port) {
     return prepared.inputOwner.get(`${nodeId}.${port}`) || null;
@@ -355,7 +373,15 @@ export function runFlow(prepared, env, opts = {}) {
     return null;
   }
 
+  /** 值缓存的键：遍历中的单位 + 操作中的单位（执行类积木逐个目标处理时，值要分开算） */
   function scopeKey(local) {
+    const unit = local && local.unit ? unitKey(local.unit) : "";
+    const acting = local && local.acting ? unitKey(local.acting) : "";
+    return acting ? `${unit}|${acting}` : unit;
+  }
+
+  /** 「选择单位」的缓存键：只按遍历中的单位算，一次流程执行里对同一次遍历只问一次 */
+  function pickKey(local) {
     return local && local.unit ? unitKey(local.unit) : "";
   }
 
@@ -376,7 +402,7 @@ export function runFlow(prepared, env, opts = {}) {
    */
   function evalSticky(node, local, compute) {
     if (!local.sticky) local.sticky = [];
-    const scope = scopeKey(local);
+    const scope = pickKey(local);
     const hit = local.sticky.find((m) => m.id === node.id && m.scope === scope);
     if (hit) return hit.value;
     const out = compute();
@@ -460,41 +486,59 @@ export function runFlow(prepared, env, opts = {}) {
         return list[i] || null;
       }
       case "targetSide": {
-        const side = o.side === "ally" ? env.sideOf(env.self) : env.otherSide(env.sideOf(env.self));
+        const side = o.side === "ally" ? env.sideOf(selfOf(local)) : env.otherSide(env.sideOf(selfOf(local)));
         return env.listSide(side);
       }
       case "factionSet": {
         // 只有「没接线」才回落到自己；接了但值为空（例如没找到施加者）就是空集
         const raw = valueOf(node, "unit", local);
-        const u = raw === undefined ? env.self : raw;
+        const u = raw === undefined ? selfOf(local) : raw;
         if (!env.listFaction) return [];
         return env.listFaction(env.factionOf ? env.factionOf(u) : null, {
-          includeUncounted: Boolean(o.includeUncounted),
+          includeUncounted: o.includeUncounted !== false,
         });
       }
       case "allUnits":
-        return env.listAllUnits ? env.listAllUnits({ countedOnly: Boolean(o.countedOnly) }) : [];
+        return env.listAllUnits ? env.listAllUnits({ countedOnly: o.countedOnly === true }) : [];
+      case "childUnits": {
+        // 不接「单位」时就是流程拥有者自己
+        const raw = valueOf(node, "unit", local);
+        const u = raw === undefined || raw === null ? selfOf(local) : raw;
+        return env.childrenOf ? env.childrenOf(u) : [];
+      }
+      case "parentUnit": {
+        const raw = valueOf(node, "unit", local);
+        const u = raw === undefined || raw === null ? selfOf(local) : raw;
+        return env.parentOf ? env.parentOf(u) : null;
+      }
+      case "setCount":
+        return toList(valueOf(node, "set", local)).length;
       case "currentEffect":
         return env.currentEffectId || "";
       case "effectSource": {
         const raw = valueOf(node, "unit", local);
-        const holder = raw === undefined ? env.owner || env.self || null : raw;
+        const holder = raw === undefined ? env.owner || selfOf(local) || null : raw;
         const eid = str(valueOf(node, "effectId", local)) || env.currentEffectId || "";
         return env.effectSource ? env.effectSource(holder, eid) : null;
       }
       case "effectSourceSide": {
         const raw = valueOf(node, "unit", local);
-        const holder = raw === undefined ? env.owner || env.self || null : raw;
+        const holder = raw === undefined ? env.owner || selfOf(local) || null : raw;
         const eid = str(valueOf(node, "effectId", local)) || env.currentEffectId || "";
         return env.effectSourceFaction
-          ? env.effectSourceFaction(holder, eid, { includeUncounted: Boolean(o.includeUncounted) })
+          ? env.effectSourceFaction(holder, eid, { includeUncounted: o.includeUncounted !== false })
           : [];
       }
-      case "chooseUnit":
-        return evalSticky(node, local, () => {
+      case "chooseUnit": {
+        // 最多可选多少个（默认 1）；mustFill = 必须选满，否则可以少选几个直接放
+        const pick = () => {
           const raw = valueOf(node, "targets", local);
-          return env.pickForPlayer(raw ? toList(raw) : null, { multiple: o.multiple !== false });
-        });
+          const max = Math.max(1, Math.floor(num(o.count) || 1));
+          return env.pickForPlayer(raw ? toList(raw) : null, { max, required: Boolean(o.mustFill) });
+        };
+        // eachTime = 每次执行到这个积木都重新选（不再「一次流程只问一次」）
+        return o.eachTime ? pick() : evalSticky(node, local, pick);
+      }
       case "setOp": {
         const a = toList(valueOf(node, "a", local));
         const b = toList(valueOf(node, "b", local));
@@ -509,15 +553,15 @@ export function runFlow(prepared, env, opts = {}) {
       case "unitData": {
         // 没接「目标」时指向流程的「自己」
         const raw = valueOf(node, "unit", local);
-        const u = raw === undefined || raw === null ? env.self : raw;
+        const u = raw === undefined || raw === null ? selfOf(local) : raw;
         if (!u || !u.key) return o.field === "name" || o.field === "label" || o.field === "id" || o.field === "faction" ? "" : 0;
         const res = env.unitData(u, o.field, { effectId: valueOf(node, "effectId", local) });
         return res;
       }
       case "selfData": {
         // 不连目标：永远读流程拥有者自己（技能施放者 / 效果持有者）
-        if (!env.self) return o.field === "name" || o.field === "label" || o.field === "id" ? "" : 0;
-        return env.unitData(env.self, o.field, { effectId: valueOf(node, "effectId", local) });
+        if (!selfOf(local)) return o.field === "name" || o.field === "label" || o.field === "id" ? "" : 0;
+        return env.unitData(selfOf(local), o.field, { effectId: valueOf(node, "effectId", local) });
       }
       case "readVariable": {
         const entry = varsOf(local).get(str(o.name).trim());
@@ -535,19 +579,29 @@ export function runFlow(prepared, env, opts = {}) {
       }
       case "contextUnit":
         return unitScope(local);
+      case "actingUnit":
+        // 执行类积木正在逐个处理的那个目标；不在这种操作里时为空
+        return local.acting || null;
       case "selfUnit":
-        return env.self;
+        return selfOf(local);
       case "contextSide": {
         const u = unitScope(local);
-        return env.listSide(env.sideOf(u || env.self));
+        return env.listSide(env.sideOf(u || selfOf(local)));
       }
       case "currentTarget":
         return env.currentTarget ? env.currentTarget() : [];
       case "triggerUnit":
-        return env.triggerUnit || env.self;
+        return env.triggerUnit || selfOf(local);
+      case "healSource":
+        return env.healSource || null;
       /* 条件类 */
       case "compare":
         return compareValues(valueOf(node, "a", local), valueOf(node, "b", local), o.operator || ">=");
+      case "sameUnit": {
+        const a = valueOf(node, "a", local);
+        const b = valueOf(node, "b", local);
+        return Boolean(a && b && a.key === b.key);
+      }
       case "and": return condOf(node, "a", local) && condOf(node, "b", local);
       case "or": return condOf(node, "a", local) || condOf(node, "b", local);
       case "not": return !condOf(node, "a", local);
@@ -584,19 +638,51 @@ export function runFlow(prepared, env, opts = {}) {
 
     switch (node.type) {
       case "trigger": {
-        // 「条件」永远按「单位」求值：
-        //   · 没接「单位集」→「单位」= 自己（流程拥有者 / 技能施放者）；
-        //   · 接了「单位集」→「单位」= 集合里的任意一个单位，有一个满足就继续；
-        //     集合为空 = 没有可指代的单位，触发不通过（不再回落到自己）。
+        // 「单位集」的两种语义：
+        //   · 12 种可多目标触发的事件：集合里每个满足条件的单位各独立跑一次，
+        //     流程里的「自己」= 这个单位，「触发的单位」仍是事件涉及的单位；
+        //   · 其它事件：集合只作为条件求值范围（任意一个满足就继续一次）。
+        // 没接「单位集」：只按「自己」判定一次。
         const hasUnitSet = Boolean(inputNode(node.id, "unit"));
         const hasCondition = Boolean(inputNode(node.id, "condition"));
+        const unitMode = node.options.unitMode || "each";
+        if (hasUnitSet && unitMode !== "any" && isMultiTargetTriggerEvent(node.options.event)) {
+          const units = unitList(v("unit"));
+          if (opts.conditionOnly) {
+            conditionPassed = units.some(
+              (u) => !hasCondition || condOf(node, "condition", { ...local, unit: u, selfOverride: u })
+            );
+            return;
+          }
+          if (!units.length) {
+            triggerBlocked = true;
+            return;
+          }
+          let ran = 0;
+          for (const u of units) {
+            const scope = {
+              ...local,
+              unit: u,
+              selfOverride: u,
+              memo: [],
+              sticky: [],
+              vars: new Map(local.vars || []),
+            };
+            if (hasCondition && !condOf(node, "condition", scope)) continue;
+            ran += 1;
+            go(nextId("next"), scope);
+          }
+          if (!ran) triggerBlocked = true;
+          else independentRuns += ran;
+          return;
+        }
         const units = hasUnitSet ? unitList(v("unit")) : [];
         let passed = true;
         if (hasUnitSet) {
           if (!units.length) passed = false;
           else if (hasCondition) passed = units.some((u) => condOf(node, "condition", { ...local, unit: u }));
         } else if (hasCondition) {
-          passed = condOf(node, "condition", { ...local, unit: env.self || null });
+          passed = condOf(node, "condition", { ...local, unit: selfOf(local) || null });
         }
         if (opts.conditionOnly) {
           conditionPassed = passed;
@@ -606,23 +692,29 @@ export function runFlow(prepared, env, opts = {}) {
           triggerBlocked = true;
           return;
         }
+        independentRuns += 1;
         go(nextId("next"));
         return;
       }
       case "attack": {
         const targets = unitList(valueOf(node, "targets", local));
-        const value = valueOf(node, "value", local) === undefined ? 0 : num(valueOf(node, "value", local));
-        const attribute = str(v("attribute")) || o.attribute || "physical";
         const additional = Boolean(o.additional);
         const ignoreReduction = Boolean(o.ignoreReduction);
-        // 伤害来源：可选输入；不接 = 流程拥有者自己（旧行为）
-        const source = unitList(valueOf(node, "source", local))[0] || env.self;
         // 同一个「攻击」积木的多目标结算 = 一次攻击动作（同时命中）；
         // 循环体里的每一轮会各自开新批次，所以仍然是依次攻击。
         const attackGroup = env.newAttackGroup ? env.newAttackGroup() : null;
         const hits = [];
         let total = 0;
+        let firstSource = null;
         for (const t of targets) {
+          // 逐个目标结算：数值 / 属性 / 伤害来源都按「操作中的单位」重新求值
+          const scope = { ...local, acting: t };
+          const rawValue = valueOf(node, "value", scope);
+          const value = rawValue === undefined ? 0 : num(rawValue);
+          const attribute = str(valueOf(node, "attribute", scope)) || o.attribute || "physical";
+          // 伤害来源：可选输入；不接 = 流程拥有者自己（旧行为）
+          const source = unitList(valueOf(node, "source", scope))[0] || selfOf(local);
+          if (!firstSource) firstSource = source;
           const rec = env.damage(t, value, attribute, {
             source,
             additional,
@@ -635,51 +727,62 @@ export function runFlow(prepared, env, opts = {}) {
           }
         }
         // 「附加伤害」不视为攻击：不计入攻击统计，也不触发「单位攻击时」
-        if (!additional && hits.length) env.noteAttack?.(source, hits, total, { attackGroup });
+        if (!additional && hits.length) {
+          env.noteAttack?.(firstSource || selfOf(local), hits, total, { attackGroup });
+        }
         go(nextId("next"));
         return;
       }
       case "heal": {
-        const amount = valueOf(node, "value", local) === undefined ? 0 : num(valueOf(node, "value", local));
-        for (const t of unitList(valueOf(node, "targets", local))) env.healUnit(t, amount);
+        for (const t of unitList(valueOf(node, "targets", local))) {
+          const scope = { ...local, acting: t };
+          const raw = valueOf(node, "value", scope);
+          env.healUnit(t, raw === undefined ? 0 : num(raw));
+        }
         go(nextId("next"));
         return;
       }
       case "setHp": {
-        const hp = valueOf(node, "value", local) === undefined ? 0 : num(valueOf(node, "value", local));
-        for (const t of unitList(valueOf(node, "targets", local))) env.setHp(t, hp);
+        for (const t of unitList(valueOf(node, "targets", local))) {
+          const scope = { ...local, acting: t };
+          const raw = valueOf(node, "value", scope);
+          env.setHp(t, raw === undefined ? 0 : num(raw));
+        }
         go(nextId("next"));
         return;
       }
       case "attachEffect": {
-        const eid = str(v("effectId"));
-        const layers =
-          v("value") === undefined ? 1 : Math.max(0, Math.floor(num(v("value"))));
-        if (eid && layers > 0) {
-          for (const t of unitList(valueOf(node, "targets", local))) env.attachEffect(t, eid, layers);
+        for (const t of unitList(valueOf(node, "targets", local))) {
+          const scope = { ...local, acting: t };
+          const eid = str(valueOf(node, "effectId", scope));
+          const raw = valueOf(node, "value", scope);
+          const layers = raw === undefined ? 1 : Math.max(0, Math.floor(num(raw)));
+          if (eid && layers > 0) env.attachEffect(t, eid, layers);
         }
         go(nextId("next"));
         return;
       }
       case "removeEffect": {
-        const targets = unitList(valueOf(node, "targets", local));
-        const opts = {
-          mode: o.mode,
-          effectId: str(v("effectId")),
-          layers: v("value") === undefined ? 1 : Math.max(1, Math.floor(num(v("value")))),
-          force: Boolean(o.force),
-        };
-        for (const t of targets) env.removeEffectByMode(t, opts);
+        for (const t of unitList(valueOf(node, "targets", local))) {
+          const scope = { ...local, acting: t };
+          const raw = valueOf(node, "value", scope);
+          env.removeEffectByMode(t, {
+            mode: o.mode,
+            effectId: str(valueOf(node, "effectId", scope)),
+            layers: raw === undefined ? 1 : Math.max(1, Math.floor(num(raw))),
+            force: Boolean(o.force),
+          });
+        }
         go(nextId("next"));
         return;
       }
       case "summon": {
         // 单位 id 留空 = 召唤流程拥有者自己（常用于「分裂」）
-        const unitId = str(v("unitId")) || (env.self && env.self.cardId) || "";
+        const unitId = str(v("unitId")) || (selfOf(local) && selfOf(local).cardId) || "";
         const count = v("count") === undefined ? 1 : Math.max(0, Math.floor(num(v("count"))));
         const label = str(v("label"));
         if (unitId && count > 0) {
-          env.summon({ unitId, count, label, ignoreLimit: Boolean(o.ignoreLimit), parent: null, owner: env.self });
+          env.summon({ unitId, count, label, ignoreLimit: Boolean(o.ignoreLimit), parent: null, owner: selfOf(local) });
         }
         go(nextId("next"));
         return;
@@ -687,12 +790,23 @@ export function runFlow(prepared, env, opts = {}) {
       case "summonChild": {
         const connectedParents = unitList(valueOf(node, "targets", local));
         // 目标集 / 单位 id 留空时都回落到流程拥有者自己，方便做「分裂」
-        const parents = connectedParents.length ? connectedParents : env.self ? [env.self] : [];
-        const unitId = str(v("unitId")) || (env.self && env.self.cardId) || "";
-        const count = v("count") === undefined ? 1 : Math.max(0, Math.floor(num(v("count"))));
-        const label = str(v("label"));
-        if (unitId && count > 0) {
-          for (const p of parents) env.summon({ unitId, count, label, ignoreLimit: false, parent: p, owner: env.self });
+        const parents = connectedParents.length ? connectedParents : selfOf(local) ? [selfOf(local)] : [];
+        for (const p of parents) {
+          const scope = { ...local, acting: p };
+          const unitId = str(valueOf(node, "unitId", scope)) || (selfOf(local) && selfOf(local).cardId) || "";
+          const rawCount = valueOf(node, "count", scope);
+          const count = rawCount === undefined ? 1 : Math.max(0, Math.floor(num(rawCount)));
+          const label = str(valueOf(node, "label", scope));
+          if (unitId && count > 0) {
+            env.summon({
+              unitId,
+              count,
+              label,
+              ignoreLimit: Boolean(o.ignoreLimit),
+              parent: p,
+              owner: selfOf(local),
+            });
+          }
         }
         go(nextId("next"));
         return;
@@ -703,9 +817,10 @@ export function runFlow(prepared, env, opts = {}) {
         return;
       }
       case "extraAction": {
-        const amount = Math.trunc(num(v("value")));
-        if (amount) {
-          for (const t of unitList(valueOf(node, "targets", local))) env.addActions?.(t, amount);
+        for (const t of unitList(valueOf(node, "targets", local))) {
+          const scope = { ...local, acting: t };
+          const amount = Math.trunc(num(valueOf(node, "value", scope)));
+          if (amount) env.addActions?.(t, amount);
         }
         go(nextId("next"));
         return;
@@ -716,7 +831,29 @@ export function runFlow(prepared, env, opts = {}) {
         return;
       }
       case "forceExit": {
-        for (const t of unitList(valueOf(node, "targets", local))) env.forceExit(t);
+        const force = Boolean(o.force);
+        for (const t of unitList(valueOf(node, "targets", local))) env.forceExit(t, { force });
+        go(nextId("next"));
+        return;
+      }
+      case "refuseExit": {
+        // 只有本次触发是「退场时」才有意义：取消这次退场并把血回到指定值 / 满血
+        const mode = o.mode === "to" ? "to" : "full";
+        const raw = valueOf(node, "value", local);
+        const value = raw === undefined || raw === null ? num(o.value) : num(raw);
+        // 目标集可选：接了就是「只有正在退场的单位在这个集合里才拒绝」
+        const targets = inputNode(node.id, "targets")
+          ? unitList(valueOf(node, "targets", local))
+          : null;
+        env.refuseExit?.(mode, value, targets);
+        go(nextId("next"));
+        return;
+      }
+      case "transferAttack": {
+        // 把「来源」这次受到的攻击改到「对象」身上（同一次伤害，只改一次）
+        const from = unitList(valueOf(node, "from", local))[0] || null;
+        const to = unitList(valueOf(node, "to", local))[0] || null;
+        if (to) env.transferAttack?.(from, to, { force: Boolean(o.force) });
         go(nextId("next"));
         return;
       }
@@ -811,10 +948,10 @@ export function runFlow(prepared, env, opts = {}) {
     }
   }
   const start = startId ? nodes.get(startId) : null;
-  if (!start) return { ran: false, steps: 0, visited: [] };
+  if (!start) return { ran: false, steps: 0, visited: [], runs: 0 };
 
   step(start, { unit: null, memo: [], sticky: [], vars: new Map() });
-  return { ran: true, steps, visited, triggerBlocked, conditionPassed };
+  return { ran: true, steps, visited, triggerBlocked, conditionPassed, runs: independentRuns };
 }
 
 /** 便捷方法：直接给 (flow, env) 运行 */

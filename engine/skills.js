@@ -164,3 +164,30 @@ export function skillNeedsPlayerTarget(skill) {
   const nodes = skill.flow && Array.isArray(skill.flow.nodes) ? skill.flow.nodes : [];
   return nodes.some((n) => n && n.type === "chooseUnit");
 }
+
+/**
+ * 战斗界面选目标时需要知道的参数：
+ *   max      最多可选几个（「选择单位」积木的「最多可选」，默认 1）
+ *   required 必须选满（勾了「必须选满」）
+ *   needsTarget 是否要玩家点选
+ * @param {object} skill
+ * @returns {{needsTarget: boolean, max: number, required: boolean}}
+ */
+export function skillTargetPickInfo(skill) {
+  if (!skill || typeof skill !== "object") return { needsTarget: false, max: 1, required: false };
+  const nodes = skill.flow && Array.isArray(skill.flow.nodes) ? skill.flow.nodes : [];
+  const chooses = nodes.filter((n) => n && n.type === "chooseUnit");
+  let max = 1;
+  let required = false;
+  for (const n of chooses) {
+    const o = n.options || {};
+    const c = Math.max(1, Math.floor(Number(o.count) || 1));
+    if (c > max) max = c;
+    if (o.mustFill) required = true;
+  }
+  return {
+    needsTarget: Boolean(skill.requiresTarget) || chooses.length > 0,
+    max,
+    required,
+  };
+}

@@ -22,6 +22,7 @@ import {
   validateEffectDisplay,
 } from "./constants.js";
 import { prepareFlow, FLOW_SCHEMA } from "./flow.js";
+import { isMultiTargetTriggerEvent } from "./flow-catalog.js";
 
 export const PROJECT_SCHEMA = 1;
 export const PROJECT_KIND = "caeworld-editor-project";
@@ -89,9 +90,14 @@ export function createCharacter() {
     description: "",
     occupiesSlot: true,
     countsAsUnit: true,
-    invincible: false,
+    /** 选中限制：none / enemy / ally / all */
+    unselectable: "none",
+    invincible: "none",
     /** 可获取：默认勾选，目前无用途（预留卡池 / 掉落筛选） */
     obtainable: true,
+    /** 免疫负面 / 控制类效果 */
+    immuneNegative: false,
+    immuneControl: false,
     image: "",
     skillIds: [],
   };
@@ -143,7 +149,9 @@ export function normalizeProject(project) {
   for (const ch of project.characters) {
     if (!ch) continue;
     if (ch.pack === undefined || ch.pack === null || ch.pack === "") ch.pack = "default";
-    ch.actionsPerTurn = Math.max(1, Math.floor(Number(ch.actionsPerTurn) || 1));
+    const rawPerTurn = ch.actionsPerTurn;
+    const perTurn = rawPerTurn === undefined || rawPerTurn === null || rawPerTurn === "" ? NaN : Number(rawPerTurn);
+    ch.actionsPerTurn = Number.isFinite(perTurn) ? Math.max(0, Math.min(99, Math.floor(perTurn))) : 1;
     // 效果不能初始挂载：旧工程里的 effectIds 直接丢弃
     delete ch.effectIds;
   }
@@ -169,6 +177,15 @@ export function normalizeProject(project) {
     effect.skillIds = Array.isArray(effect.skillIds)
       ? [...new Set(effect.skillIds.filter((sid) => typeof sid === "string" && sid))]
       : [];
+  }
+  // 旧触发迁移：把单位集语义从旧版（any）适配到新版（each / 显式 any）
+  for (const skill of project.skills) {
+    if (skill && skill.flow) migrateLegacyTriggerModes(skill.flow);
+  }
+  for (const effect of project.effects) {
+    if (!effect) continue;
+    if (effect.flow) migrateLegacyTriggerModes(effect.flow);
+    for (const flow of Object.values(effect.flows || {})) migrateLegacyTriggerModes(flow);
   }
   return project;
 }
@@ -623,9 +640,12 @@ export function characterToUnit(ch) {
     description: ch.description,
     occupiesSlot: ch.occupiesSlot,
     countsAsUnit: ch.countsAsUnit,
+    unselectable: ch.unselectable || "none",
     invincible: ch.invincible,
     // 旧工程没有这个字段：undefined 会回落到默认 true
     obtainable: ch.obtainable,
+    immuneNegative: ch.immuneNegative,
+    immuneControl: ch.immuneControl,
     skills: (ch.skillIds || []).slice(),
   });
   if (ch.pack) base.pack = String(ch.pack);
@@ -739,26 +759,82 @@ export function packFileOf(project, packId) {
 /** 去掉编辑器 UI 状态，只留流程本体 */
 export function normalizeFlow(flow) {
   if (!flow) return emptyFlow();
-  return {
+  const out = {
     schema: FLOW_SCHEMA,
     kind: "flow",
     nodes: (flow.nodes || []).map((n) => {
-      const out = { id: n.id, type: n.type };
+      const node = { id: n.id, type: n.type };
       // 常量：数据线没接时运行时用的值
       const consts = (n.ui && n.ui.const) || {};
       const keep = {};
       for (const key of ["unitId", "skillId", "effectId", "attribute", "label", "count", "value"]) {
         if (consts[key] !== undefined && consts[key] !== "") keep[key] = consts[key];
       }
-      if (Object.keys(keep).length) out.options = keep;
+      if (Object.keys(keep).length) node.options = keep;
       if (n.options && Object.keys(n.options).length) {
         // 积木自身的选项（触发事件、运算符…）
-        out.options = { ...(out.options || {}), ...n.options };
+        node.options = { ...(node.options || {}), ...n.options };
       }
-      return out;
+      return node;
     }),
     links: (flow.links || []).map((l) => ({ id: l.id, from: l.from, port: l.port, to: l.to, portTo: l.portTo })),
   };
+  migrateLegacyTriggerModes(out);
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* 旧触发迁移                                                          */
+/* ------------------------------------------------------------------ */
+
+/** 条件图里是否用到了「集合里的那个单位」（旧版 any 语义依赖它） */
+function conditionUsesSetUnit(flow, startId) {
+  const nodes = new Map((flow.nodes || []).filter((n) => n && n.id).map((n) => [n.id, n]));
+  const incoming = new Map();
+  for (const link of flow.links || []) {
+    if (!link || !link.to) continue;
+    if (!incoming.has(link.to)) incoming.set(link.to, []);
+    incoming.get(link.to).push(link.from);
+  }
+  const seen = new Set();
+  const queue = [startId];
+  while (queue.length) {
+    const id = queue.pop();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const node = nodes.get(id);
+    if (node && (node.type === "contextUnit" || node.type === "contextSide")) return true;
+    for (const from of incoming.get(id) || []) queue.push(from);
+  }
+  return false;
+}
+
+/**
+ * 迁移旧版触发：旧版把「单位集」当作条件求值范围（any），新版默认按单位分别触发（each）。
+ *   · 旧流程没有 unitMode 时：
+ *     - 有单位集 + 条件依赖「遍历中的单位 / 阵营」或没有条件 → unitMode: "any"（精确保留旧行为）；
+ *     - 有单位集 + 条件只依赖自己 / 触发单位 → 删除单位集连线（等价于新语义的单单位触发）；
+ *   · 已有 unitMode 的新流程不动。
+ * 幂等。
+ */
+export function migrateLegacyTriggerModes(flow) {
+  if (!flow || !Array.isArray(flow.nodes) || !Array.isArray(flow.links)) return false;
+  let changed = false;
+  for (const trg of flow.nodes) {
+    if (!trg || trg.type !== "trigger" || !trg.options || !isMultiTargetTriggerEvent(trg.options.event)) continue;
+    if (trg.options.unitMode) continue;
+    const unitLinks = flow.links.filter((l) => l && l.to === trg.id && l.portTo === "unit");
+    if (!unitLinks.length) continue;
+    const condLink = flow.links.find((l) => l && l.to === trg.id && l.portTo === "condition");
+    const usesSetUnit = condLink ? conditionUsesSetUnit(flow, condLink.from) : false;
+    if (!condLink || usesSetUnit) {
+      trg.options = { ...trg.options, unitMode: "any" };
+    } else {
+      flow.links = flow.links.filter((l) => !unitLinks.includes(l));
+    }
+    changed = true;
+  }
+  return changed;
 }
 
 /**

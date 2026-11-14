@@ -65,6 +65,33 @@ export const SKILL_TYPE_LABEL = Object.freeze({ active: "主动", passive: "被�
 export const UNIT_STATES = Object.freeze(["alive", "dead", "removed"]);
 
 /**
+ * 单位卡上的「无敌」档位（互斥，不是三个勾选框）：
+ *   none       —— 普通单位
+ *   damage     —— 免伤：任何伤害都记 0，但可以被退场（死亡 / 退场积木 / 强制退场都吃）
+ *   invincible —— 无敌：免伤 + 不能被普通退场（含死亡），只接受强制退场
+ *   super      —— 超级无敌：免伤 + 拒绝一切退场，连强制退场都拦下
+ */
+export const INVINCIBLE_LEVELS = Object.freeze(["none", "damage", "invincible", "super"]);
+
+export const INVINCIBLE_LABEL = Object.freeze({
+  none: "无",
+  damage: "免伤",
+  invincible: "无敌",
+  super: "超级无敌",
+});
+
+/**
+ * 把旧数据 / 手写数据规整成无敌档位。
+ * 旧卡包是布尔值：true = 只免伤（旧版没有“不能退场”的概念），false / 缺省 = 无。
+ */
+export function normalizeInvincible(value) {
+  if (value === true) return "damage";
+  if (value === false || value === undefined || value === null || value === "") return "none";
+  const text = String(value);
+  return INVINCIBLE_LEVELS.includes(text) ? text : "none";
+}
+
+/**
  * 效果的倾向：必选其一（不是「负面」勾选框）。
  * 正面 / 负面 / 特殊；「特殊」既不算正面也不算负面，不会被按倾向移除。
  */
@@ -263,10 +290,33 @@ export const UNIT_DEFAULTS = Object.freeze({
   label: "",
   occupiesSlot: true,
   countsAsUnit: true,
-  invincible: false,
+  /** 选中限制：none=双方都可选；enemy=不可被敌方选中；ally=不可被我方选中；all=双方都不可选 */
+  unselectable: "none",
+  /** 无敌档位：none / damage（免伤）/ invincible（无敌）/ super（超级无敌），见 INVINCIBLE_LEVELS */
+  invincible: "none",
   /** 可获取：默认勾选。目前只是标记，还没有任何玩法用到（预留给卡池 / 掉落 / 图鉴筛选） */
   obtainable: true,
+  /** 免疫负面效果：附加负面效果时直接拒绝 */
+  immuneNegative: false,
+  /** 免疫控制类效果：附加带 control 标记的效果时直接拒绝 */
+  immuneControl: false,
 });
+
+/** 选中限制：不可选中类型的枚举与显示名 */
+export const UNSELECTABLE_MODES = Object.freeze(["none", "enemy", "ally", "all"]);
+export const UNSELECTABLE_LABEL = Object.freeze({
+  none: "可被选中",
+  enemy: "不可被敌方选中",
+  ally: "不可被我方选中",
+  all: "不可选中",
+});
+
+/** 兼容旧数据：true → all，false/空 → none；非法值回落到 none */
+export function normalizeUnselectable(value) {
+  if (value === true) return "all";
+  if (value === false || value === undefined || value === null || value === "") return "none";
+  return UNSELECTABLE_MODES.includes(value) ? value : "none";
+}
 
 /** 默认品质顺序即“从低到高” */
 export function qualityRank(quality) {

@@ -1,14 +1,19 @@
 /**
  * units.js —— 单位卡：默认值、规范化、校验
  *
- * 一张单位卡 = 名字 + 基础数值 + 三项开关 + 技能 id 列表 + 可选的条件加成(bonuses) + 角色介绍(description)。
+ * 一张单位卡 = 名字 + 基础数值 + 开关 + 选中限制 + 技能 id 列表 + 可选的条件加成(bonuses) + 角色介绍(description)。
  * 「效果加成」不写在卡上，而是由加成系统实时叠算（见 modifiers.js）；
  * 效果也不能初始挂在单位上——只能在战斗中用「附加效果」积木附加。
  */
 import {
   RESISTANCE_ATTRIBUTES,
   QUALITIES,
+  INVINCIBLE_LEVELS,
+  INVINCIBLE_LABEL,
   UNIT_DEFAULTS,
+  normalizeInvincible,
+  UNSELECTABLE_MODES,
+  normalizeUnselectable,
   parseId,
 } from "./constants.js";
 
@@ -45,9 +50,14 @@ export function createUnitDefaults() {
     description: "",
     occupiesSlot: UNIT_DEFAULTS.occupiesSlot,
     countsAsUnit: UNIT_DEFAULTS.countsAsUnit,
+    /** 选中限制：none / enemy / ally / all */
+    unselectable: UNIT_DEFAULTS.unselectable,
     invincible: UNIT_DEFAULTS.invincible,
     /** 可获取：默认 true。目前只是卡面标记，还没有玩法读取它 */
     obtainable: UNIT_DEFAULTS.obtainable,
+    /** 免疫负面效果 / 免疫控制类效果 */
+    immuneNegative: UNIT_DEFAULTS.immuneNegative,
+    immuneControl: UNIT_DEFAULTS.immuneControl,
     /** 技能：按顺序存放技能 id（战斗内每次使用技能时按索引取） */
     skills: [],
     /** 可选：条件加成（常驻 buff），格式见 modifiers.js → fromBonusOverrides */
@@ -57,8 +67,8 @@ export function createUnitDefaults() {
   };
 }
 
-/** 单位卡上的布尔开关（编辑器里是勾选框） */
-export const UNIT_SWITCH_KEYS = Object.freeze(["occupiesSlot", "countsAsUnit", "invincible", "obtainable"]);
+/** 单位卡上的布尔开关（编辑器里是勾选框）；「无敌」是三档下拉，不在这里 */
+export const UNIT_SWITCH_KEYS = Object.freeze(["occupiesSlot", "countsAsUnit", "obtainable", "immuneNegative", "immuneControl"]);
 
 /** 把外部输入补全成完整单位卡（不改原对象）。缺失字段一律取默认值。 */
 export function createUnitCard(input = {}) {
@@ -69,16 +79,39 @@ export function createUnitCard(input = {}) {
   for (const key of UNIT_SWITCH_KEYS) {
     if (card[key] === undefined) card[key] = base[key];
   }
+  card.unselectable = normalizeUnselectable(card.unselectable);
+  // 无敌档位：旧卡包的 true/false 迁移成 damage/none（true 只代表“免伤”）
+  card.invincible = normalizeInvincible(card.invincible);
   card.label = input.label === undefined || input.label === null ? "" : String(input.label);
   card.description = input.description === undefined || input.description === null ? "" : String(input.description);
   card.resistances = resistanceFill(input.resistances ?? base.resistances);
-  card.actionsPerTurn = Math.max(1, Math.floor(Number(card.actionsPerTurn) || 1));
+  const rawPerTurn = card.actionsPerTurn;
+  const perTurn = rawPerTurn === undefined || rawPerTurn === null || rawPerTurn === "" ? NaN : Number(rawPerTurn);
+  card.actionsPerTurn = Number.isFinite(perTurn) ? Math.max(0, Math.min(99, Math.floor(perTurn))) : 1;
   card.skills = Array.isArray(input.skills) ? input.skills.slice() : [];
   card.bonuses = Array.isArray(input.bonuses) ? input.bonuses.map((b) => ({ ...b })) : [];
   // 旧数据里可能残留 effects（角色初始挂载效果）：这个能力已移除，读入时直接丢弃
   delete card.effects;
   card.members = Array.isArray(input.members) ? input.members.map((m) => structuredClone(m)) : [];
   return card;
+}
+
+/**
+ * 某个选择者能否选中目标单位。
+ * selectorSide 是施放技能 / 触发效果一方的阵营：
+ *   none  → 双方都可选
+ *   enemy → 不可被目标敌对方选中（目标同阵营可选它）
+ *   ally  → 不可被目标同阵营选中（目标敌对方可选它）
+ *   all   → 双方都不可选
+ */
+export function canSelectUnit(unit, selectorSide) {
+  if (!unit) return false;
+  const mode = normalizeUnselectable(unit.unselectable);
+  if (mode === "all") return false;
+  if (mode === "none") return true;
+  if (!selectorSide) return false;
+  if (mode === "enemy") return selectorSide === unit.side;
+  return selectorSide !== unit.side;
 }
 
 /** 数值字段检查 */
@@ -130,7 +163,7 @@ export function validateUnitCard(card) {
   checkNumber(errors, "critRate", card.critRate, { min: 0, max: 1 });
   checkNumber(errors, "critDamage", card.critDamage, { min: 0 });
   checkNumber(errors, "speed", card.speed, { min: 0 });
-  checkNumber(errors, "actionsPerTurn", card.actionsPerTurn, { min: 1, max: 99, integer: true });
+  checkNumber(errors, "actionsPerTurn", card.actionsPerTurn, { min: 0, max: 99, integer: true });
 
   if (!card.resistances || typeof card.resistances !== "object") {
     errors.push("resistances 必须是对象");
@@ -149,6 +182,12 @@ export function validateUnitCard(card) {
 
   for (const key of UNIT_SWITCH_KEYS) {
     if (typeof card[key] !== "boolean") errors.push(`${key} 必须是布尔值`);
+  }
+  if (!UNSELECTABLE_MODES.includes(card.unselectable)) {
+    errors.push(`unselectable 必须是 ${UNSELECTABLE_MODES.join("/")}：${card.unselectable}`);
+  }
+  if (!INVINCIBLE_LEVELS.includes(card.invincible)) {
+    errors.push(`invincible 必须是 ${INVINCIBLE_LEVELS.map((v) => `${v}(${INVINCIBLE_LABEL[v]})`).join(" / ")}`);
   }
 
   if (!Array.isArray(card.skills)) {
