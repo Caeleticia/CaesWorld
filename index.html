@@ -129,16 +129,35 @@
             <label class="form-field"><span>基础防御力</span><input id="f-def" type="number" /></label>
             <label class="form-field"><span>暴击率</span><input id="f-crit" type="number" step="0.01" /></label>
             <label class="form-field"><span>暴击伤害</span><input id="f-critdmg" type="number" step="0.1" /></label>
-            <label class="form-field"><span>速度</span><input id="f-speed" type="number" /></label>
+            <label class="form-field"><span>行动顺序</span><input id="f-speed" type="number" /></label>
+            <label class="form-field"><span>速度（每回合可动次数）</span><input id="f-actions" type="number" min="0" max="99" step="1" value="1" title="0 = 不会主动行动，但仍会计入场上、可被选中；可被「额外行动」临时增加次数" /></label>
             <label class="form-field"><span>标签</span><input id="f-label" placeholder="可选，一个单位一个标签" /></label>
             <label class="form-field form-field-wide"><span>角色介绍</span><textarea id="f-intro" rows="3" placeholder="角色背景 / 设定介绍，会显示在卡牌库的卡牌详情里"></textarea></label>
+            <label class="form-field form-field-wide"><span>无敌</span>
+              <select id="f-invincible">
+                <option value="none">无</option>
+                <option value="damage">免伤 · 不会受到伤害，但可以被退场</option>
+                <option value="invincible">无敌 · 不会受到伤害，不能被退场（只吃强制退场）</option>
+                <option value="super">超级无敌 · 不会受到伤害，阻止所有退场（含强制退场）</option>
+              </select>
+            </label>
           </div>
           <div class="form-row">
             <label class="form-check"><input id="f-occupy" type="checkbox" /> 占位</label>
-            <label class="form-check"><input id="f-count" type="checkbox" /> 计数</label>
-            <label class="form-check"><input id="f-invincible" type="checkbox" /> 无敌</label>
+            <label class="form-check" title="不勾选 = 不计入阵营单位数量上限；仍可被选中、仍参与胜负判定"><input id="f-count" type="checkbox" /> 计入数量上限</label>
             <label class="form-check" title="默认勾选。目前只是标记，还没有玩法用到"><input id="f-obtainable" type="checkbox" /> 可获取</label>
+            <label class="form-check" title="附加负面效果时直接拒绝（不触发该效果的入场）"><input id="f-immune-neg" type="checkbox" /> 免疫负面效果</label>
+            <label class="form-check" title="附加带「控制类」标记的效果时直接拒绝"><input id="f-immune-control" type="checkbox" /> 免疫控制效果</label>
           </div>
+          <label class="form-field"><span>选中限制</span>
+            <select id="f-unselectable">
+              <option value="none">可被选中（默认）</option>
+              <option value="enemy">不可被敌方选中</option>
+              <option value="ally">不可被我方选中</option>
+              <option value="all">不可选中</option>
+            </select>
+            <em>按施放者阵营判断；显式的「全部单位 / 筛选目标集」流程仍可命中。</em>
+          </label>
           <p class="muted">「可获取」默认勾选，目前无用途（预留给卡池 / 掉落 / 图鉴筛选）。</p>
           <fieldset class="resist-box">
             <legend>各系抗性（本源为真实伤害，无抗性）</legend>
@@ -148,10 +167,15 @@
           </fieldset>
         </div>
 
-        <div class="ed-col ed-col-mount">
-          <h2>② 挂载技能</h2>
-          <p class="muted">技能由角色为主体执行。不同卡包的技能分栏显示，当前编辑卡包始终在最前；支持搜索、时间 / 名称排序与正倒序切换。</p>
-          <div id="ed-mount-skills"></div>
+        <div class="ed-col ed-col-mount" id="ed-mount-col">
+          <div class="ed-mount-head">
+            <h2>② 挂载技能</h2>
+            <button class="btn tiny" id="btn-toggle-mount" type="button" aria-expanded="true">收起</button>
+          </div>
+          <div class="ed-mount-body" id="ed-mount-body">
+            <p class="muted">技能由角色为主体执行。不同卡包的技能分栏显示，当前编辑卡包始终在最前；支持搜索、时间 / 名称排序与正倒序切换。</p>
+            <div id="ed-mount-skills"></div>
+          </div>
         </div>
 
         <div class="ed-col ed-col-card">
@@ -320,7 +344,7 @@
     </div>
   </main>
 
-  <!-- ======================= 模组 / 模组管理 ======================= -->
+  <!-- ======================= 卡包 / 卡包管理 ======================= -->
   <main id="mod-page" class="subpage" hidden>
     <header class="subpage-topbar">
       <button class="btn small" id="mod-back" type="button">← 返回</button>
@@ -333,10 +357,34 @@
     </header>
     <section class="subpage-body">
       <p class="mod-hint">
-        服务器模组从 <code>mods/index.txt</code> 读取清单、从 <code>mods/</code> 读取模组包（推荐 ZIP：<code>modname/modname.json</code> + <code>images/</code> + <code>icons/skill/</code> + <code>icons/effect/</code> + <code>README.md</code>），并缓存在浏览器里；导入的模组保存在浏览器本地，启用 / 停用只影响本地。删除服务器模组只清浏览器缓存，点「刷新」或重新打开页面会重新缓存；编辑器工程里的同名卡仍优先于模组内容。
+        同 id 只显示一行：编辑器副本 / 本地导入 / 服务器文件合并。服务器有同 id 文件时标「服务端」，否则「本地」。
+        每行：启用·停用 / 内容 / 导出 / 另存为 / 删除；服务端另有「更新」（确认后删除本地修改并同步服务端最新版）。
       </p>
       <div id="mod-list" class="mod-list"></div>
     </section>
+
+    <!-- 卡包内容：卡包管理页统一的「内容」弹窗 -->
+    <div class="ed-modal" id="mod-content-modal" hidden>
+      <div class="ed-modal-box mod-content-box" role="dialog" aria-modal="true" aria-labelledby="mod-content-title">
+        <h2 id="mod-content-title">卡包内容</h2>
+        <div class="mod-content-body" id="mod-content-body"></div>
+        <div class="ed-modal-actions">
+          <button class="btn small" id="mod-content-edit" type="button" hidden>在编辑器中编辑</button>
+          <button class="btn small" id="mod-content-close" type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 卡牌详情：和卡牌库同一套详情，盖在「内容」弹窗上面 -->
+    <div class="lib-detail" id="mod-detail" hidden>
+      <div
+        class="lib-detail-sheet"
+        id="mod-detail-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mod-detail-title"
+      ></div>
+    </div>
   </main>
 
   <!-- ======================= 设置 ======================= -->
