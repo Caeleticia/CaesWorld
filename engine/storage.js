@@ -99,6 +99,9 @@ export function validateContent(doc) {
     if (raw && raw.image !== undefined && raw.image !== null && typeof raw.image !== "string") {
       errors.push(`效果 ${id}: image 必须是字符串或 null`);
     }
+    if (raw && raw.inherit !== undefined && typeof raw.inherit !== "boolean") {
+      errors.push(`效果 ${id}: inherit 必须是布尔值`);
+    }
     for (const e of validateEffectDisplay(raw)) errors.push(`效果 ${id}: ${e}`);
     for (const e of validateEffectAttrBonus(raw && raw.attrBonus)) errors.push(`效果 ${id}: ${e}`);
     if (raw && raw.skillIds !== undefined) {

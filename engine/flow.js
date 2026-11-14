@@ -96,7 +96,7 @@ export function prepareFlow(flow, opts = {}) {
       options[o.key] = n.options && n.options[o.key] !== undefined ? n.options[o.key] : o.default;
     }
     const consts = {};
-    for (const key of ["unitId", "skillId", "effectId", "attribute", "label", "count", "value"]) {
+    for (const key of ["unitId", "skillId", "effectId", "attribute", "label", "count", "value", "id", "content"]) {
       const v = n.options && n.options[key];
       if (v !== undefined && v !== null && v !== "") consts[key] = typeof v === "string" ? v : num(v);
     }
@@ -347,13 +347,23 @@ export function runFlow(prepared, env, opts = {}) {
    * 值保持一致；循环的每一次迭代都会清空它（见 resetMemo），所以随机数每轮都会重掷、
    * 条件每轮都会重判。玩家的选择（chooseUnit）另存 local.sticky，一次流程执行里只问一次。
    */
+  /** 触发积木的数据输出：目前只有「接收到广播」的广播 id / 内容 */
+  function triggerOutput(node, port) {
+    if (port === "broadcastId") return env.currentBroadcast ? String(env.currentBroadcast.id ?? "") : "";
+    if (port === "broadcastContent") return env.currentBroadcast ? String(env.currentBroadcast.content ?? "") : "";
+    return "";
+  }
+
   function valueOf(node, port, local) {
-    const fromId = inputNode(node.id, port);
-    if (!fromId) {
+    const link = prepared.links.find((l) => l.to === node.id && l.portTo === port);
+    if (!link) {
       const c = prepared.constants.get(node.id);
       return c && port in c ? c[port] : undefined;
     }
-    return evalNode(nodes.get(fromId), local);
+    const fromNode = nodes.get(link.from);
+    // 触发节点的输出按「源端口」取值，不能走 evalNode（否则会把触发当作执行积木）
+    if (fromNode && fromNode.type === "trigger") return triggerOutput(fromNode, link.port);
+    return evalNode(fromNode, local);
   }
 
   /**
@@ -602,6 +612,10 @@ export function runFlow(prepared, env, opts = {}) {
         const b = valueOf(node, "b", local);
         return Boolean(a && b && a.key === b.key);
       }
+      case "exitSaved":
+        return Boolean(env.exitSaved && env.exitSaved());
+      case "exitForced":
+        return Boolean(env.exitForced && env.exitForced());
       case "and": return condOf(node, "a", local) && condOf(node, "b", local);
       case "or": return condOf(node, "a", local) || condOf(node, "b", local);
       case "not": return !condOf(node, "a", local);
@@ -781,8 +795,12 @@ export function runFlow(prepared, env, opts = {}) {
         const unitId = str(v("unitId")) || (selfOf(local) && selfOf(local).cardId) || "";
         const count = v("count") === undefined ? 1 : Math.max(0, Math.floor(num(v("count"))));
         const label = str(v("label"));
+        const owner = selfOf(local);
+        // 「阵营」相对流程拥有者：我方 = 拥有者所在阵营，敌方 = 对立阵营
+        const ownSide = env.sideOf(owner);
+        const side = o.side === "enemy" ? env.otherSide(ownSide) : ownSide;
         if (unitId && count > 0) {
-          env.summon({ unitId, count, label, ignoreLimit: Boolean(o.ignoreLimit), parent: null, owner: selfOf(local) });
+          env.summon({ unitId, count, label, side, ignoreLimit: Boolean(o.ignoreLimit), parent: null, owner });
         }
         go(nextId("next"));
         return;
@@ -860,6 +878,16 @@ export function runFlow(prepared, env, opts = {}) {
       case "giveSkill": {
         const skillId = str(v("skillId"));
         if (skillId) env.giveSkill(skillId);
+        go(nextId("next"));
+        return;
+      }
+      case "broadcast": {
+        // 先排队，等本次流程（含嵌套流程）结束后由战斗层统一发出
+        const rawId = valueOf(node, "id", local);
+        const rawContent = valueOf(node, "content", local);
+        const id = str(rawId === undefined ? o.id : rawId);
+        const content = str(rawContent === undefined ? o.content : rawContent);
+        env.broadcast?.(id, content);
         go(nextId("next"));
         return;
       }

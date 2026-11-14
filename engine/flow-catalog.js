@@ -108,6 +108,7 @@ const TRIGGER_EVENTS = Object.freeze([
   { value: "loseHp", label: "单位损失生命时", multi: true },
   { value: "hpChanged", label: "单位生命变动时（回复 / 损失都算）", multi: true },
   { value: "always", label: "始终（每次数据更新都触发一次）" },
+  { value: "broadcast", label: "接收到广播" },
 ]);
 
 const COMPARE_OPERATORS = Object.freeze([
@@ -201,6 +202,8 @@ export function buildFlowCatalog(ctx = {}) {
       label: p.label || "",
       direction: p.direction,
       type: p.type || null,
+      // 只在特定触发事件下显示的端口（例如「接收到广播」的两个输出）
+      ...(p.triggerOnly ? { triggerOnly: p.triggerOnly } : {}),
     }));
     blocks[spec.kind] = {
       note: "",
@@ -220,11 +223,14 @@ export function buildFlowCatalog(ctx = {}) {
     group: "trigger",
     title: "触发",
     subtitle: "满足条件时触发（可接单位集按单位分别触发）",
-    note: "流程入口。技能流程可以放多个触发，每个触发执行它后面的内容；效果的每个触发是一条独立流程。\n\n「单位集」的语义由「单位集触发方式」决定：\n· each（新，默认）：只对 12 种可多目标事件生效——集合里**每个**满足条件的单位各独立跑一次，流程里的「自己」= 这个单位，「触发的单位」仍是事件对象；没接单位集 = 只看自己。\n· any（旧）：集合只作为条件求值范围（任意一个满足就继续一次，集合为空则不继续），流程里的「自己」仍按 unitScope 取。\n· 其它事件只有 any 语义（单位集只参与条件求值）。\n\n旧卡（没有 unitMode）加载时会自动迁移：条件用了「遍历中的单位 / 遍历中的阵营」→ any；条件只依赖自己 / 触发的单位 → 删掉单位集连线（等价于新语义）。\n\n技能释放条件：把布尔条件接到「单位释放该技能」触发的「条件」输入；不接 = 始终可释放。",
+    note: "流程入口。技能流程可以放多个触发，每个触发执行它后面的内容；效果的每个触发是一条独立流程。\n\n「单位集」的语义由「单位集触发方式」决定：\n· each（新，默认）：只对 12 种可多目标事件生效——集合里**每个**满足条件的单位各独立跑一次，流程里的「自己」= 这个单位，「触发的单位」仍是事件对象；没接单位集 = 只看自己。\n· any（旧）：集合只作为条件求值范围（任意一个满足就继续一次，集合为空则不继续），流程里的「自己」仍按 unitScope 取。\n· 其它事件只有 any 语义（单位集只参与条件求值）。\n\n旧卡（没有 unitMode）加载时会自动迁移：条件用了「遍历中的单位 / 遍历中的阵营」→ any；条件只依赖自己 / 触发的单位 → 删掉单位集连线（等价于新语义）。\n\n技能释放条件：把布尔条件接到「单位释放该技能」触发的「条件」输入；不接 = 始终可释放。\n\n「接收到广播」：由「广播」积木发出；触发积木上的广播 id / 广播内容留空 = 任意，两个都填时同时匹配。该触发额外提供两个字符串输出「收到的广播 id / 内容」。",
     ports: [
       { id: "unit", label: "单位集（可选；each 时按单位分别触发）", direction: "in", type: "targetset" },
       { id: "condition", label: "条件（可选；技能释放条件）", direction: "in", type: "condition" },
       { id: "next", direction: "out" },
+      // 仅「接收到广播」时显示：本次收到的广播 id / 内容
+      { id: "broadcastId", label: "收到的广播 id", direction: "out", type: "string", triggerOnly: "broadcast" },
+      { id: "broadcastContent", label: "收到的广播内容", direction: "out", type: "string", triggerOnly: "broadcast" },
     ],
     inflow: null,
     outflows: ["next"],
@@ -250,6 +256,9 @@ export function buildFlowCatalog(ctx = {}) {
         ],
         default: "each",
       },
+      // 仅「接收到广播」时出现的两个键入框：留空 = 匹配任意
+      { key: "broadcastId", label: "广播 id（留空 = 任意）", control: "text", default: "", showIf: { event: "broadcast" } },
+      { key: "broadcastContent", label: "广播内容（留空 = 任意）", control: "text", default: "", showIf: { event: "broadcast" } },
     ],
   });
 
@@ -374,7 +383,7 @@ export function buildFlowCatalog(ctx = {}) {
     group: "action",
     title: "召唤单位",
     subtitle: "召唤单位到场上；单位 id 留空 = 召唤自己；无视上限时没空格会溢出同格",
-    note: "「无视单位上限」会同时绕过场上单位数量和空格限制：没有空格时，溢出的单位放在召唤者（或父单位）的格子里，且不占格，不会堵死后续召唤 / 补场。",
+    note: "「阵营」：我方 / 敌方（默认我方），按流程拥有者的阵营判断；「无视单位上限」会同时绕过场上单位数量和空格限制：没有空格时，溢出的单位放在召唤者（或父单位）的格子里，且不占格，不会堵死后续召唤 / 补场。",
     ports: [
       { id: "in", direction: "in" },
       { id: "unitId", label: "召唤单位 id（字符串）", direction: "in", type: "string" },
@@ -383,7 +392,19 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "next", direction: "out" },
     ],
     outflows: ["next"],
-    options: [{ key: "ignoreLimit", label: "无视单位上限", control: "checkbox", default: false }],
+    options: [
+      {
+        key: "side",
+        label: "阵营",
+        control: "select",
+        options: [
+          { value: "ally", label: "我方" },
+          { value: "enemy", label: "敌方" },
+        ],
+        default: "ally",
+      },
+      { key: "ignoreLimit", label: "无视单位上限", control: "checkbox", default: false },
+    ],
   });
   def({
     kind: "summonChild",
@@ -509,6 +530,24 @@ export function buildFlowCatalog(ctx = {}) {
     ],
     outflows: ["next"],
   });
+  def({
+    kind: "broadcast",
+    group: "action",
+    title: "广播",
+    subtitle: "把一条广播排到本次流程结束后发出",
+    note: "跨单位通信：执行到这里时先记下广播，等本次流程（含它触发的嵌套流程）全部结束后再统一发出，避免广播互相嵌套导致递归。所有持有「接收到广播」触发、且广播 id / 内容匹配的单位会在广播事件里执行各自的流程。广播 id / 内容既可以接线，也可以直接在积木上键入。",
+    ports: [
+      { id: "in", direction: "in" },
+      { id: "id", label: "广播 id（字符串）", direction: "in", type: "string" },
+      { id: "content", label: "广播内容（字符串）", direction: "in", type: "string" },
+      { id: "next", direction: "out" },
+    ],
+    outflows: ["next"],
+    options: [
+      { key: "id", label: "广播 id（未接线时使用）", control: "text", default: "" },
+      { key: "content", label: "广播内容（未接线时使用）", control: "text", default: "" },
+    ],
+  });
 
   /* ---------------- 3 结构类 ---------------- */
   def({
@@ -592,6 +631,22 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "b", label: "单位 B", direction: "in", type: "target" },
       { id: "out", direction: "out", type: "condition" },
     ],
+  });
+  def({
+    kind: "exitSaved",
+    group: "logic",
+    title: "本次退场已被拒绝",
+    subtitle: "当前退场是否已经被别的效果救回",
+    note: "只在「退场时」触发的流程里有意义：同一退场请求里，前面的效果已经执行过「拒绝退场」时输出为真。用于多个救场效果 / 多个同名单位时，让后面那个不要再消耗自己的资源。",
+    ports: [{ id: "out", direction: "out", type: "condition" }],
+  });
+  def({
+    kind: "exitForced",
+    group: "logic",
+    title: "本次退场是强制退场",
+    subtitle: "当前退场是否无法被拒绝",
+    note: "只在「退场时」触发的流程里有意义：强制退场不能被「拒绝退场」取消。用「非」接上它，可以避免在强制退场时白白消耗效果 / 层数。",
+    ports: [{ id: "out", direction: "out", type: "condition" }],
   });
   def({
     kind: "compare",

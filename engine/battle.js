@@ -197,6 +197,13 @@ export function createBattle(setup) {
   const events = [];
   let muted = false;
   let triggerDepth = 0;
+  /** 广播队列：流程（含嵌套流程）结束后统一发出，避免广播互相嵌套递归 */
+  let pendingBroadcasts = [];
+  /** 当前流程执行嵌套深度：只有最外层流程结束时才发送广播 */
+  let flowDepth = 0;
+  let flushingBroadcasts = false;
+  /** 一次广播批次的最大发送数，防止「广播 → 再广播」死循环 */
+  const MAX_BROADCASTS = 1000;
   /** 退场处理嵌套深度：所有退场触发跑完后再做一次战斗结算 */
   let exitDepth = 0;
   let summonSeq = 0;
@@ -447,6 +454,9 @@ export function createBattle(setup) {
     return u;
   }
 
+  /** 作用范围为 ally / enemy / all 的效果属性修正（光环层），unitKey -> { mods, resistances } */
+  let auraBonus = new Map();
+
   function statsOf(unit, scope = "normal") {
     if (!unit) return null;
     const card = unit.card;
@@ -458,15 +468,19 @@ export function createBattle(setup) {
     // 效果属性修正：直接进加成累加器，与常驻加成同一套叠算顺序
     const layer = unit.attrBonus || {};
     if (layer.mods) addBonus(acc, layer.mods);
+    // 作用范围为 ally / enemy / all 的属性修正（来自场上持有者）
+    const aura = auraBonus.get(unit.key);
+    if (aura && aura.mods) addBonus(acc, aura.mods);
     return computeStats(card, acc);
   }
 
   function resistancesOf(u) {
     const s = statsOf(u);
     const out = { ...s.resistances };
-    const layer = u.attrBonus || {};
+    const own = u.attrBonus || {};
+    const aura = auraBonus.get(u.key) || {};
     for (const attr of RESISTANCE_ATTRIBUTES) {
-      const add = layer.resistances ? layer.resistances[attr] : 0;
+      const add = (own.resistances ? own.resistances[attr] : 0) + (aura.resistances ? aura.resistances[attr] : 0);
       if (add) out[attr] = (out[attr] || 0) + add;
     }
     return out;
@@ -484,35 +498,76 @@ export function createBattle(setup) {
   /** 效果倾向：正面 / 负面 / 特殊（「特殊」两类移除都不算） */
   const effectPolarity = (eid) => effectPolarityOf(registry.getEffect(eid));
 
+  /** 把一条属性修正累加进 { mods, resistances } 层；value 已经乘过层数 */
+  function applyAttrBonusEntry(layer, target, value) {
+    if (!layer || !target || !value) return;
+    if (target.resistance) {
+      layer.resistances[target.resistance] = (layer.resistances[target.resistance] || 0) + value;
+      return;
+    }
+    // 四系伤害提升 / 穿透是嵌套对象（按「键.系」存放），其余键直接累加
+    const [key, element] = target.mod.split(".");
+    if (element) {
+      const group = layer.mods[key] && typeof layer.mods[key] === "object" ? layer.mods[key] : (layer.mods[key] = {});
+      group[element] = (group[element] || 0) + value;
+    } else {
+      layer.mods[target.mod] = (layer.mods[target.mod] || 0) + value;
+    }
+  }
+
   /**
-   * 按当前效果层重算属性修正层。
-   * 每层效果的 attrBonus 数值 × 层数，三系抗性单独累计。
+   * 按当前效果层重算「自己」属性修正层。
+   * scope=self 的条目才进这里；ally / enemy / all 走 recomputeAuraBonuses。
+   * 每层效果的 attrBonus 数值 × 层数（perStack=false 时只算一次），三系抗性单独累计。
    */
   function recomputeAttrBonuses(u) {
     const layer = { mods: {}, resistances: {} };
     for (const eff of u.effects) {
       const def = registry.getEffect(eff.id);
       if (!def || !Array.isArray(def.attrBonus)) continue;
+      const times = eff.stacks;
       for (const entry of def.attrBonus) {
         const target = effectAttrBonusTarget(entry);
-        if (!target) continue;
-        const value = target.value * eff.stacks;
-        if (!value) continue;
-        if (target.resistance) {
-          layer.resistances[target.resistance] = (layer.resistances[target.resistance] || 0) + value;
-          continue;
-        }
-        // 四系伤害提升 / 穿透是嵌套对象（按「键.系」存放），其余键直接累加
-        const [key, element] = target.mod.split(".");
-        if (element) {
-          const group = layer.mods[key] && typeof layer.mods[key] === "object" ? layer.mods[key] : (layer.mods[key] = {});
-          group[element] = (group[element] || 0) + value;
-        } else {
-          layer.mods[target.mod] = (layer.mods[target.mod] || 0) + value;
-        }
+        if (!target || target.scope !== "self") continue;
+        applyAttrBonusEntry(layer, target, target.value * (target.perStack ? times : 1));
       }
     }
     u.attrBonus = layer;
+  }
+
+  /**
+   * 重算全场光环层：所有存活持有者身上 ally / enemy / all 范围的属性修正。
+   * 召唤物继承来的效果副本不作为光环源，避免同一份效果被重复计算。
+   */
+  function recomputeAuraBonuses() {
+    const layers = new Map();
+    const alive = livingUnits();
+    for (const u of alive) layers.set(u.key, { mods: {}, resistances: {} });
+    for (const holder of alive) {
+      const holderFaction = factionOf(holder);
+      for (const eff of holder.effects) {
+        if (eff.inheritedFrom) continue;
+        const def = registry.getEffect(eff.id);
+        if (!def || !Array.isArray(def.attrBonus)) continue;
+        for (const entry of def.attrBonus) {
+          const target = effectAttrBonusTarget(entry);
+          if (!target || target.scope === "self") continue;
+          const value = target.value * (target.perStack ? eff.stacks : 1);
+          if (!value) continue;
+          const targets =
+            target.scope === "all"
+              ? alive
+              : target.scope === "ally"
+                ? alive.filter((x) => factionOf(x) === holderFaction)
+                : alive.filter((x) => factionOf(x) !== holderFaction);
+          for (const t of targets) {
+            const layer = layers.get(t.key);
+            if (layer) applyAttrBonusEntry(layer, target, value);
+          }
+        }
+      }
+    }
+    auraBonus = layers;
   }
 
   function attachEffect(target, eid, extra = {}) {
@@ -558,6 +613,7 @@ export function createBattle(setup) {
       if (layer.stacks < 1) layer.stacks = 1;
     }
     recomputeAttrBonuses(u);
+    recomputeAuraBonuses();
     log(BATTLE_EVENT.EFFECT_ADDED, {
       unit: u.uid,
       effect: eid,
@@ -579,6 +635,7 @@ export function createBattle(setup) {
     layer.stacks -= removed;
     if (layer.stacks <= 0) u.effects.splice(idx, 1);
     recomputeAttrBonuses(u);
+    recomputeAuraBonuses();
     return removed;
   }
 
@@ -704,11 +761,32 @@ export function createBattle(setup) {
       }
       return false;
     };
+    // 广播过滤：触发积木上的广播 id / 内容留空 = 任意，两个都填时同时匹配
+    const matchesBroadcast = (options = {}) => {
+      if (eventType !== "broadcast") return true;
+      const b = (info && info.broadcast) || {};
+      const id = String(b.id ?? "");
+      const content = String(b.content ?? "");
+      const filterId = String(options.broadcastId ?? "");
+      const filterContent = String(options.broadcastContent ?? "");
+      return (!filterId || filterId === id) && (!filterContent || filterContent === content);
+    };
     if (effect.__member) {
-      if (!effect.__member.block || !effect.__member.block.event) return false;
-      return matchesEvent(effect.__member.block.event);
+      const block = effect.__member.block;
+      if (!block || !block.event) return false;
+      return matchesEvent(block.event) && matchesBroadcast(block.options || {});
     }
-    return (effect.triggers || []).some((t) => t && t.event && matchesEvent(t.event));
+    return (effect.triggers || []).some(
+      (t) => t && t.event && matchesEvent(t.event) && matchesBroadcast(triggerOptionsOf(effect, t.id))
+    );
+  }
+
+  /** 取触发节点上的选项（广播过滤等）；缺失时返回空对象 */
+  function triggerOptionsOf(effect, blockId) {
+    const flow = triggerFlowOf(effect, blockId);
+    if (!flow || !Array.isArray(flow.nodes)) return {};
+    const node = flow.nodes.find((n) => n && n.id === blockId && n.type === "trigger");
+    return (node && node.options) || {};
   }
 
   /**
@@ -773,7 +851,11 @@ export function createBattle(setup) {
     // 「始终」= 任意单位的数据更新都触发（入场 / 扣血 / 附加效果等）。
     // 它不是「只对事件目标生效」：靠 forEach 遍历我方 / 自检层数的常驻光环，
     // 需要在任何单位入场、数据变化时都重新结算一次。
-    const globalEvent = eventType === "turnStart" || eventType === "turnEnd" || eventType === "dataUpdate";
+    const globalEvent =
+      eventType === "turnStart" ||
+      eventType === "turnEnd" ||
+      eventType === "dataUpdate" ||
+      eventType === "broadcast";
     /** 「我方单位攻击时」：事件对象是攻击者，但同阵营所有存活单位身上的触发都参与 */
     const allyAttackEvent = eventType === "allyAttack";
     const candidates = [];
@@ -856,7 +938,7 @@ export function createBattle(setup) {
             env.self = unit;
           }
           try {
-            const run = runFlow(prepared, env, { triggerNode: prepared.nodes.has(block.id) ? block.id : undefined });
+            const run = runFlowAndFlush(prepared, env, { triggerNode: prepared.nodes.has(block.id) ? block.id : undefined });
             // 触发条件没通过（或没有可执行的触发入口）= 这条流程没有真正执行，不结算自动消耗。
             // 单位集里多个单位分别触发时（run.runs > 1），每次独立运行各消耗 1 层。
             if (run.ran && !run.triggerBlocked) {
@@ -872,6 +954,43 @@ export function createBattle(setup) {
       emitStack.pop();
       triggerDepth -= 1;
       emitting = prevEmitting;
+    }
+  }
+
+  /** 运行一次流程；只有最外层流程结束时才发送排队中的广播 */
+  function runFlowAndFlush(prepared, env, opts) {
+    flowDepth += 1;
+    try {
+      return runFlow(prepared, env, opts);
+    } finally {
+      flowDepth -= 1;
+      if (flowDepth === 0) flushBroadcasts();
+    }
+  }
+
+  /** 发送队列里的广播；广播触发流程里新排队的广播会在本轮继续发出 */
+  function flushBroadcasts() {
+    if (flushingBroadcasts) return;
+    if (!pendingBroadcasts.length) return;
+    flushingBroadcasts = true;
+    let sent = 0;
+    try {
+      while (pendingBroadcasts.length) {
+        if (sent >= MAX_BROADCASTS) {
+          pendingBroadcasts = [];
+          log(BATTLE_EVENT.FLOW_ERROR, { reason: "广播次数过多（可能有广播循环）" });
+          break;
+        }
+        const batch = pendingBroadcasts;
+        pendingBroadcasts = [];
+        for (const b of batch) {
+          sent += 1;
+          emit("broadcast", [], { broadcast: b });
+          if (sent >= MAX_BROADCASTS) break;
+        }
+      }
+    } finally {
+      flushingBroadcasts = false;
     }
   }
 
@@ -894,6 +1013,16 @@ export function createBattle(setup) {
       triggerUnit: effect ? triggerUnit || owner : owner,
       /** 「回复来源」：本次 heal 事件的治疗者；不在回复触发里为空 */
       healSource: healSourceKey ? getUnit(healSourceKey) : null,
+      /** 当前退场请求是否已经被拒绝（只在 unitExit 触发里有意义） */
+      exitSaved: () => Boolean(currentExitRequest() && currentExitRequest().saved),
+      /** 当前退场请求是否强制退场（只在 unitExit 触发里有意义） */
+      exitForced: () => Boolean(currentExitRequest() && currentExitRequest().force),
+      /** 本次触发拿到的广播信息（「接收到广播」触发的输出来源） */
+      currentBroadcast: current && current.info ? current.info.broadcast || null : null,
+      /** 「广播」积木：先排队，最外层流程结束后统一发出 */
+      broadcast: (id, content) => {
+        pendingBroadcasts.push({ id: String(id ?? ""), content: String(content ?? "") });
+      },
       context: { unit: null },
       interrupted: false,
       rng,
@@ -1412,6 +1541,7 @@ export function createBattle(setup) {
     } finally {
       exitDepth -= 1;
     }
+    recomputeAuraBonuses();
     // 退场触发（包括嵌套退场）全部跑完后再结算，避免最后一个单位的
     // 召唤 / 复活被 checkEnd 抢先判负。
     if (exitDepth === 0) checkEnd();
@@ -1548,6 +1678,9 @@ export function createBattle(setup) {
         resistances: { ...(inherited.resistances || {}) },
       };
       for (const layer of parent.effects) {
+        const def = registry.getEffect(layer.id);
+        // 「不继承」的效果不复制给召唤物（黑名单式的持有控制仍由流程条件负责）
+        if (def && def.inherit === false) continue;
         unit.effects.push({
           id: layer.id,
           stacks: layer.stacks,
@@ -1559,6 +1692,7 @@ export function createBattle(setup) {
       recomputeAttrBonuses(unit);
     }
     state.units.push(unit);
+    recomputeAuraBonuses();
     // 召唤出来的单位默认保留本回合可动次数；只有调用方显式要求（markActed: true）时才用完。
     if (markActed) unit.actionsLeft = 0;
     log(BATTLE_EVENT.SUMMON, {
@@ -2273,7 +2407,7 @@ export function createBattle(setup) {
             if (cur) env.self = cur;
           }
           try {
-            runFlow(prepared, env, { triggerNode: trigger.id });
+            runFlowAndFlush(prepared, env, { triggerNode: trigger.id });
           } catch (err) {
             log(BATTLE_EVENT.FLOW_ERROR, { owner: A.uid, skillId: skill.id, reason: String((err && err.message) || err) });
           }

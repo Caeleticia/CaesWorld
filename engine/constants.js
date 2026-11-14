@@ -221,33 +221,43 @@ export const EFFECT_ATTR_BONUS_KEYS = Object.freeze([
 /** 三系抗性：属性修正里按「百分点」加到面板抗性上 */
 const RESIST_ATTR_BONUS = Object.freeze(["physical", "magic", "spirit"]);
 
+/** 属性修正的作用范围：自己 / 我方全体 / 敌方全体 / 全部单位 */
+export const EFFECT_ATTR_SCOPES = Object.freeze(["self", "ally", "enemy", "all"]);
+
 /**
  * 解析一条属性修正（兼容旧格式 { attr:"atk", pct:true }）。
- * @returns {{mod: string, value: number}|{resistance: string, value: number}|null}
+ * scope 省略 = self；perStack 省略 = true（数值 × 效果层数）。
+ * @returns {{mod: string, value: number, scope: string, perStack: boolean}|{resistance: string, value: number, scope: string, perStack: boolean}|null}
  */
 export function effectAttrBonusTarget(entry) {
   if (!entry || typeof entry !== "object") return null;
   const value = Number(entry.value);
   if (!Number.isFinite(value)) return null;
+  const scope = entry.scope === undefined || entry.scope === null || entry.scope === "" ? "self" : String(entry.scope);
+  if (!EFFECT_ATTR_SCOPES.includes(scope)) return null;
+  const perStack = entry.perStack !== false;
   const attr = String(entry.attr || "");
   // 旧格式：atk / def / hp + pct 开关
   if (attr === "atk" || attr === "def" || attr === "hp") {
-    return { mod: `${attr}${entry.pct ? "Pct" : "Flat"}`, value };
+    return { mod: `${attr}${entry.pct ? "Pct" : "Flat"}`, value, scope, perStack };
   }
   // 三系抗性：直接加到面板抗性上（pct 开关无意义）
-  if (RESIST_ATTR_BONUS.includes(attr)) return { resistance: attr, value };
-  if (EFFECT_ATTR_BONUS_KEYS.includes(attr)) return { mod: attr, value };
+  if (RESIST_ATTR_BONUS.includes(attr)) return { resistance: attr, value, scope, perStack };
+  if (EFFECT_ATTR_BONUS_KEYS.includes(attr)) return { mod: attr, value, scope, perStack };
   return null;
 }
 
-/** 归一化为当前格式 [{ attr, value }]，丢弃无法识别的项 */
+/** 归一化为当前格式 [{ attr, value, scope?, perStack? }]，丢弃无法识别的项 */
 export function normalizeEffectAttrBonus(list) {
   if (!Array.isArray(list)) return [];
   const out = [];
   for (const entry of list) {
     const target = effectAttrBonusTarget(entry);
     if (!target) continue;
-    out.push({ attr: target.mod || target.resistance, value: target.value });
+    const item = { attr: target.mod || target.resistance, value: target.value };
+    if (target.scope !== "self") item.scope = target.scope;
+    if (target.perStack === false) item.perStack = false;
+    out.push(item);
   }
   return out;
 }
@@ -263,7 +273,16 @@ export function validateEffectAttrBonus(list, path = "attrBonus") {
       return;
     }
     if (!Number.isFinite(Number(entry.value))) errors.push(`${path}[${i}].value 必须是数字`);
-    else if (!effectAttrBonusTarget(entry)) errors.push(`${path}[${i}].attr 无法识别：${entry.attr}`);
+    if (entry.scope !== undefined && !EFFECT_ATTR_SCOPES.includes(String(entry.scope))) {
+      errors.push(`${path}[${i}].scope 必须是 ${EFFECT_ATTR_SCOPES.join("/")}：${entry.scope}`);
+    }
+    if (entry.perStack !== undefined && typeof entry.perStack !== "boolean") {
+      errors.push(`${path}[${i}].perStack 必须是布尔值`);
+    }
+    const scopeOk = entry.scope === undefined || EFFECT_ATTR_SCOPES.includes(String(entry.scope));
+    if (Number.isFinite(Number(entry.value)) && scopeOk && !effectAttrBonusTarget(entry)) {
+      errors.push(`${path}[${i}].attr 无法识别：${entry.attr}`);
+    }
   });
   return errors;
 }

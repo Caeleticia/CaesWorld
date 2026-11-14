@@ -173,6 +173,8 @@ export function normalizeProject(project) {
     if (!effect) continue;
     effect.attrBonus = normalizeEffectAttrBonus(effect.attrBonus);
     effect.autoConsume = Boolean(effect.autoConsume);
+    if (effect.inherit === undefined || effect.inherit === null) effect.inherit = true;
+    else effect.inherit = Boolean(effect.inherit);
     // 效果挂载技能：持有该效果时临时获得，效果移除后失去
     effect.skillIds = Array.isArray(effect.skillIds)
       ? [...new Set(effect.skillIds.filter((sid) => typeof sid === "string" && sid))]
@@ -237,6 +239,8 @@ export function createEffect(id = "custom_effect_new", name = "新效果") {
     skillIds: [],
     /** 自动消耗：每次该效果的触发流程执行完后消耗 1 层（未开启层数计数时直接移除） */
     autoConsume: false,
+    /** 召唤物是否继承该效果：false = 父单位召唤时跳过这一层 */
+    inherit: true,
     triggers: [],
     flows: {},
     ui: defaultUi(),
@@ -583,6 +587,9 @@ export function validateProject(project) {
     if (effect.autoConsume !== undefined && typeof effect.autoConsume !== "boolean") {
       list.push("自动消耗必须是布尔值");
     }
+    if (effect.inherit !== undefined && typeof effect.inherit !== "boolean") {
+      list.push("召唤物继承必须是布尔值");
+    }
     if (effect.image !== undefined && effect.image !== null && typeof effect.image !== "string") {
       list.push("图标路径必须是字符串");
     }
@@ -706,6 +713,7 @@ export function effectToContent(effect) {
       ? { skillIds: [...new Set(effect.skillIds.filter((sid) => typeof sid === "string" && sid))] }
       : {}),
     autoConsume: Boolean(effect.autoConsume),
+    ...(effect.inherit === false ? { inherit: false } : {}),
   };
 }
 
