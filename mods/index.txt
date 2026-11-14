@@ -1,3 +1,4 @@
 default.zip
 study.zip
 study2.zip
+starrail.zip
