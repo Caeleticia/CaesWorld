@@ -13,6 +13,7 @@ import {
   buildFlowCatalog,
   normalizeEffectAttrBonus,
   effectColorOf,
+  effectPolarityOf,
   cardKindOf,
   resolveCardImage,
   resolveCardIcon,
@@ -190,14 +191,15 @@ function matches(card) {
     .includes(search);
 }
 
-function cardAttrs(kind, card) {
+function cardAttrs(kind, card, interactive = true) {
+  if (!interactive) return `class="lib-card is-static"`;
   return `class="lib-card" role="button" tabindex="0" data-card-kind="${kind}" data-card-id="${escapeHtml(
     card.id
   )}" aria-label="查看${escapeHtml(card.name || card.id)}的详情"`;
 }
 
-function openHint() {
-  return `<span class="lib-card-open" aria-hidden="true">详情 ›</span>`;
+function openHint(interactive = true) {
+  return interactive ? `<span class="lib-card-open" aria-hidden="true">详情 ›</span>` : "";
 }
 
 /** 技能 / 效果的小图标；没有图标时继续用首字字形 */
@@ -210,17 +212,17 @@ function iconCardArt(card, className = "lib-card-art") {
     onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />`;
 }
 
-function unitCard(card) {
+function unitCard(card, { interactive = true } = {}) {
   const q = QUALITY_LABEL[card.quality] || card.quality || "白";
   return `
-  <article ${cardAttrs("units", card)}>
+  <article ${cardAttrs("units", card, interactive)}>
     <img class="lib-card-art" src="${resolveCardImage(card)}" alt="" loading="lazy" draggable="false"
          onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
     <div class="lib-card-main">
       <div class="lib-card-head">
         <strong>${escapeHtml(card.name || card.id)}</strong>
         <span class="lib-card-pack">${escapeHtml(card.packName || card.pack || "默认包")}</span>
-        ${openHint()}
+        ${openHint(interactive)}
       </div>
       <div class="lib-card-id">${escapeHtml(card.id)}</div>
       <div class="lib-card-meta">
@@ -235,16 +237,16 @@ function unitCard(card) {
   </article>`;
 }
 
-function skillCard(card) {
+function skillCard(card, { interactive = true } = {}) {
   const type = SKILL_TYPE_LABEL[card.type] || "主动";
   return `
-  <article ${cardAttrs("skills", card)}>
+  <article ${cardAttrs("skills", card, interactive)}>
     ${iconCardArt(card)}
     <div class="lib-card-main">
       <div class="lib-card-head">
         <strong>${escapeHtml(card.name || card.id)}</strong>
         <span class="lib-card-pack">${escapeHtml(card.packName || card.pack || "默认包")}</span>
-        ${openHint()}
+        ${openHint(interactive)}
       </div>
       <div class="lib-card-id">${escapeHtml(card.id)}</div>
       <div class="lib-card-meta"><span>${escapeHtml(type)}</span><span>流程 ${card.flow?.nodes?.length || 0} 块</span></div>
@@ -253,17 +255,17 @@ function skillCard(card) {
   </article>`;
 }
 
-function effectCard(card) {
-  const polarity = EFFECT_POLARITY_LABEL[card.polarity] || card.polarity || "正面";
+function effectCard(card, { interactive = true } = {}) {
+  const polarity = EFFECT_POLARITY_LABEL[effectPolarityOf(card)] || "正面";
   const stack = card.stackable ? `层数 ${Number(card.maxStacks) === 0 ? "无上限" : Number(card.maxStacks) || 1}` : "不叠层";
   return `
-  <article ${cardAttrs("effects", card)}>
+  <article ${cardAttrs("effects", card, interactive)}>
     ${iconCardArt(card)}
     <div class="lib-card-main">
       <div class="lib-card-head">
         <strong>${escapeHtml(card.name || card.id)}</strong>
         <span class="lib-card-pack">${escapeHtml(card.packName || card.pack || "默认包")}</span>
-        ${openHint()}
+        ${openHint(interactive)}
       </div>
       <div class="lib-card-id">${escapeHtml(card.id)}</div>
       <div class="lib-card-meta">
@@ -275,6 +277,19 @@ function effectCard(card) {
       ${card.description ? `<p class="lib-card-desc">${escapeHtml(card.description)}</p>` : ""}
     </div>
   </article>`;
+}
+
+/**
+ * 按卡牌库的卡片样式渲染一组卡（模组管理的「内容」也用这套）。
+ * interactive=false：只展示，不带点开详情的交互属性。
+ */
+export function renderCardsHtml(kind, cards, { interactive = true } = {}) {
+  const list = (Array.isArray(cards) ? cards : []).filter(Boolean);
+  if (!list.length) return "";
+  const render = kind === "skills" ? skillCard : kind === "effects" ? effectCard : unitCard;
+  return `<div class="card-grid lib-card-grid">${list
+    .map((card) => render(card, { interactive }))
+    .join("")}</div>`;
 }
 
 function render() {
@@ -326,19 +341,42 @@ function onDetailClick(e) {
   }
 }
 
-function findCard(kind, id) {
-  const list = kind === "skills" ? data?.skills : kind === "effects" ? data?.effects : data?.units;
+function detailContext(context = {}) {
+  return {
+    units: context.units || data?.units || [],
+    skills: context.skills || data?.skills || [],
+    effects: context.effects || data?.effects || [],
+    titleId: context.titleId || "library-detail-title",
+  };
+}
+
+function findCard(kind, id, ctx = detailContext()) {
+  const list = kind === "skills" ? ctx.skills : kind === "effects" ? ctx.effects : ctx.units;
   return (list || []).find((card) => card && card.id === id) || null;
 }
 
+/**
+ * 渲染一张卡的完整详情（卡牌库 / 模组管理「内容」共用）。
+ * context 可传 { units, skills, effects, titleId }；不传时用卡牌库当前载入的内容。
+ */
+export function renderCardDetail(kind, card, context = {}) {
+  if (!card) return "";
+  const ctx = detailContext(context);
+  return kind === "skills"
+    ? skillDetail(card, ctx)
+    : kind === "effects"
+      ? effectDetail(card, ctx)
+      : unitDetail(card, ctx);
+}
+
 function openDetail(kind, id) {
-  const card = findCard(kind, id);
+  const ctx = detailContext();
+  const card = findCard(kind, id, ctx);
   const modal = $("#library-detail");
   const sheet = $("#library-detail-sheet");
   if (!card || !modal || !sheet) return;
   if (modal.hidden) detailReturnFocus = document.activeElement;
-  sheet.innerHTML =
-    kind === "skills" ? skillDetail(card) : kind === "effects" ? effectDetail(card) : unitDetail(card);
+  sheet.innerHTML = renderCardDetail(kind, card, ctx);
   modal.hidden = false;
   const body = sheet.querySelector(".lib-detail-body");
   if (body) body.scrollTop = 0;
@@ -361,12 +399,12 @@ function closeDetail({ restoreFocus = true } = {}) {
   detailReturnFocus = null;
 }
 
-function detailHead(kicker, card, art, subline) {
+function detailHead(kicker, card, art, subline, titleId = "library-detail-title") {
   return `<header class="lib-detail-head">
     ${art}
     <div class="lib-detail-title">
       <span class="lib-detail-kicker">${escapeHtml(kicker)}</span>
-      <h2 id="library-detail-title">${escapeHtml(card.name || card.id)}</h2>
+      <h2 id="${titleId}">${escapeHtml(card.name || card.id)}</h2>
       <p>${subline}</p>
       <code>${escapeHtml(card.id)}</code>
     </div>
@@ -423,11 +461,11 @@ function skillDetailItem(skill) {
   </button>`;
 }
 
-function unitDetail(card) {
+function unitDetail(card, ctx) {
   const quality = QUALITY_LABEL[card.quality] || card.quality || "白";
   const res = card.resistances || {};
   const skillIds = card.skills || [];
-  const skills = skillIds.map((id) => findCard("skills", id)).filter(Boolean);
+  const skills = skillIds.map((id) => findCard("skills", id, ctx)).filter(Boolean);
   const missing = skillIds.length - skills.length;
   const members = (card.members || []).map((m) => m && m.effect).filter(Boolean);
   const intro = card.description
@@ -437,7 +475,8 @@ function unitDetail(card) {
     "单位 · 角色",
     card,
     artFor(card),
-    `${escapeHtml(card.packName || card.pack || "默认包")} · ${escapeHtml(quality)} · Lv.${escapeHtml(card.level ?? 1)}`
+    `${escapeHtml(card.packName || card.pack || "默认包")} · ${escapeHtml(quality)} · Lv.${escapeHtml(card.level ?? 1)}`,
+    ctx.titleId
   )}
   <div class="lib-detail-body">
     <section class="lib-detail-section">
@@ -508,7 +547,7 @@ function flowSummary(flow) {
   return [...counts.entries()].map(([title, n]) => (n > 1 ? `${title} ×${n}` : title)).join("、");
 }
 
-function skillDetail(card) {
+function skillDetail(card, ctx) {
   const type = SKILL_TYPE_LABEL[card.type] || "主动";
   const nodes = (card.flow && card.flow.nodes) || [];
   const triggers = triggerLabelsOfFlow(card.flow);
@@ -519,13 +558,14 @@ function skillDetail(card) {
       : "未设置触发（释放时执行默认流程）";
   const summary = flowSummary(card.flow);
   const hasActionBlock = nodes.some((n) => n && n.type !== "trigger");
-  const related = (data?.units || []).filter((u) => (u.skills || []).includes(card.id));
-  const relatedEffects = (data?.effects || []).filter((e) => (e.skillIds || []).includes(card.id));
+  const related = (ctx.units || []).filter((u) => (u.skills || []).includes(card.id));
+  const relatedEffects = (ctx.effects || []).filter((e) => (e.skillIds || []).includes(card.id));
   return `${detailHead(
     `技能 · ${type}`,
     card,
     artFor(card),
-    `${escapeHtml(card.packName || card.pack || "默认包")} · 流程 ${nodes.length} 块`
+    `${escapeHtml(card.packName || card.pack || "默认包")} · 流程 ${nodes.length} 块`,
+    ctx.titleId
   )}
   <div class="lib-detail-body">
     <section class="lib-detail-section">
@@ -587,8 +627,8 @@ function bonusText(attr, value) {
   return `${n >= 0 ? "+" : ""}${text}`;
 }
 
-function effectDetail(card) {
-  const polarity = EFFECT_POLARITY_LABEL[card.polarity] || card.polarity || "正面";
+function effectDetail(card, ctx) {
+  const polarity = EFFECT_POLARITY_LABEL[effectPolarityOf(card)] || "正面";
   const stackable = Boolean(card.stackable);
   const maxStacks = Number(card.maxStacks);
   const stack = stackable
@@ -605,13 +645,14 @@ function effectDetail(card) {
   const attrBonus = normalizeEffectAttrBonus(card.attrBonus);
   const triggers = (card.triggers || []).map((t) => TRIGGER_LABEL[t.event] || t.event || "未选择触发");
   const mountedSkillIds = Array.isArray(card.skillIds) ? card.skillIds : [];
-  const mountedSkills = mountedSkillIds.map((id) => findCard("skills", id)).filter(Boolean);
+  const mountedSkills = mountedSkillIds.map((id) => findCard("skills", id, ctx)).filter(Boolean);
   const missingSkills = mountedSkillIds.length - mountedSkills.length;
   return `${detailHead(
     `效果 · ${polarity}`,
     card,
     artFor(card),
-    `${escapeHtml(card.packName || card.pack || "默认包")} · ${escapeHtml(stack)}`
+    `${escapeHtml(card.packName || card.pack || "默认包")} · ${escapeHtml(stack)}`,
+    ctx.titleId
   )}
   <div class="lib-detail-body">
     <section class="lib-detail-section">

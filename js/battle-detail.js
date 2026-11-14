@@ -16,6 +16,8 @@ import {
   resolveCardImage,
   resolveCardIcon,
   PLACEHOLDER_IMAGE,
+  INVINCIBLE_LABEL,
+  normalizeInvincible,
 } from "../engine/index.js";
 
 const escapeHtml = (s) =>
@@ -196,9 +198,15 @@ export function createBattleDetail({ container, battle, registry, onOpenChange }
     const pub = pubOf(view.uid);
     const quality = QUALITY_LABEL[card.quality] || card.quality || "白";
     const status = pub
-      ? `本回合剩余行动 ${Number(pub.actionsLeft) || 0} / ${Number(pub.actionsPerTurn) || 1}`
+      ? `本回合剩余行动 ${Number(pub.actionsLeft) || 0} / ${pub.actionsPerTurn ?? 1}`
       : "";
-    const invincible = unit.invincible || battle.state.invincibleSides.includes(unit.side);
+    const invLevel = normalizeInvincible(unit.invincible);
+    const invincible =
+      invLevel !== "none"
+        ? INVINCIBLE_LABEL[invLevel] || "无敌"
+        : battle.state.invincibleSides.includes(unit.side)
+          ? "免伤"
+          : "";
     const effects = collectUnitEffects(unit);
     const resist = stats.resistances || {};
     const skills = skillsOfView();
@@ -208,7 +216,7 @@ export function createBattleDetail({ container, battle, registry, onOpenChange }
         ${headerHtml(
           resolveCardImage(card),
           unit.name,
-          `${sideName(unit.side)} · ${quality} · Lv.${card.level ?? 1} · ${status}${invincible ? " · 无敌" : ""}`
+          `${sideName(unit.side)} · ${quality} · Lv.${card.level ?? 1} · ${status}${invincible ? " · " + invincible : ""}`
         )}
         <div class="tbt-sheet-body">
           ${

@@ -29,6 +29,10 @@ import {
   cardImagePath,
   PLACEHOLDER_IMAGE,
   skillNeedsPlayerTarget,
+  skillTargetPickInfo,
+  INVINCIBLE_LABEL,
+  normalizeInvincible,
+  canSelectUnit,
 } from "../engine/index.js";
 import { createStageScaler, STAGE_DESIGN } from "./training-stage.js";
 import { BattleFX } from "./battle-fx.js";
@@ -182,13 +186,24 @@ export function openBattle({ registry, config, onExit }) {
         ...(config.redInvincible ? ["ally"] : []),
         ...(config.blueInvincible ? ["enemy"] : []),
       ],
-      chooseTargets: ({ candidates, multiple }) => {
+      chooseTargets: ({ candidates, max = 1, required = false }) => {
         const list = candidates || [];
         if (!list.length) return null;
-        // 玩家手动选过的目标优先；其余情况才回落到第一个候选
-        const preferred = (s.preferredTargets || []).filter((uid) => list.some((c) => c.uid === uid));
-        const picked = preferred.length ? preferred : list;
-        return multiple ? picked : picked[0];
+        const cap = Math.max(1, Math.floor(Number(max) || 1));
+        // 玩家手动选过的目标优先；不够且「必须选满」时按候选顺序补
+        const picked = [];
+        for (const uid of s.preferredTargets || []) {
+          const u = list.find((c) => c.uid === uid);
+          if (u && picked.length < cap && !picked.some((x) => x.uid === u.uid)) picked.push(u);
+        }
+        if (required) {
+          for (const u of list) {
+            if (picked.length >= Math.min(cap, list.length)) break;
+            if (!picked.some((x) => x.uid === u.uid)) picked.push(u);
+          }
+        }
+        if (!picked.length) return cap > 1 ? [] : [list[0]];
+        return cap > 1 ? picked : picked[0];
       },
       onEvent: (ev) => {
         if (s.capture) s.capture.push(ev);
@@ -358,7 +373,7 @@ export function openBattle({ registry, config, onExit }) {
     const hpText = wrap.querySelector(".tbt-card-hptext");
     if (hpText) hpText.textContent = `${Math.ceil(cur)} / ${Math.ceil(max)}`;
 
-    wrap.classList.toggle("is-acted", Boolean(pub.acted));
+    wrap.classList.toggle("is-acted", Boolean(pub.acted) && (Number(pub.actionsPerTurn) || 0) > 0);
     wrap.classList.toggle("is-active", s.battle.state.activeId === pub.uid);
     wrap.classList.toggle("is-selectable", canPickUnit(pub));
     wrap.classList.toggle("is-invincible", Boolean(pub.invincible));
@@ -368,13 +383,15 @@ export function openBattle({ registry, config, onExit }) {
       s.pending &&
       active &&
       pub.side !== active.side &&
-      pub.state === "alive";
+      pub.state === "alive" &&
+      canSelectUnit(pub, active.side);
     wrap.classList.toggle("is-targetable", Boolean(targetable));
+    wrap.classList.toggle("is-picked", Boolean(s.pending && (s.pending.picked || []).includes(pub.uid)));
 
     // 卡面外状态 / 效果图标
     const statuses = statusesOf(unit);
     // 签名要带上层数 / 剩余次数，否则叠加后图标标题不刷新
-    const sig = statuses.map((x) => `${x.key}:${x.title}`).join("|");
+    const sig = statuses.map((x) => `${x.key}:${x.title}:${x.icon || ""}`).join("|");
     if (s.statusSig.get(pub.uid) !== sig) {
       s.statusSig.set(pub.uid, sig);
       const box = wrap.querySelector(".tbt-statuses");
@@ -387,9 +404,12 @@ export function openBattle({ registry, config, onExit }) {
                   st.color
                 )};color:${escapeHtml(st.textColor)}"`
               : "";
+            const inner = st.icon
+              ? `<img class="tbt-status-img" src="${escapeHtml(st.icon)}" alt="" draggable="false" />`
+              : escapeHtml(st.glyph);
             return `<button class="tbt-status-ico ${st.cls}" type="button" data-uid="${escapeHtml(
               pub.uid
-            )}" title="${escapeHtml(st.title)}"${style}>${escapeHtml(st.glyph)}${
+            )}" title="${escapeHtml(st.title)}"${style}>${inner}${
               st.count ? `<span class="tbt-status-count" aria-hidden="true">${escapeHtml(String(st.count))}</span>` : ""
             }</button>`;
           })
@@ -405,7 +425,7 @@ export function openBattle({ registry, config, onExit }) {
     // 条式显示的效果：血条上方的进度条
     const bars = effectBarsOf(unit);
     const barSig = bars
-      .map((b) => `${b.key}:${b.current}/${b.max}:${b.ratio}:${b.color}:${b.inverted}`)
+      .map((b) => `${b.key}:${b.current}/${b.max}:${b.ratio}:${b.color}:${b.inverted}:${b.icon || ""}`)
       .join("|");
     if (s.effectBarSig.get(pub.uid) !== barSig) {
       s.effectBarSig.set(pub.uid, barSig);
@@ -414,25 +434,38 @@ export function openBattle({ registry, config, onExit }) {
         box.hidden = bars.length === 0;
         box.innerHTML = bars
           .map(
-            (b) => `<span class="tbt-card-effectbar" title="${escapeHtml(b.title)}" aria-label="${escapeHtml(
-              b.title
-            )}">
-              <span class="tbt-card-effectbar-glyph">${escapeHtml(b.glyph)}</span>
+            (b) => {
+              const lead = b.icon
+                ? `<img class="tbt-card-effectbar-icon" src="${escapeHtml(b.icon)}" alt="" draggable="false" />`
+                : `<span class="tbt-card-effectbar-glyph">${escapeHtml(b.glyph)}</span>`;
+              return `<span class="tbt-card-effectbar" title="${escapeHtml(b.title)}" aria-label="${escapeHtml(
+                b.title
+              )}">
+              ${lead}
               <span class="tbt-card-effectbar-track">
                 <i style="width:${(b.ratio * 100).toFixed(2)}%;background:${escapeHtml(b.color)}"></i>
-                <span class="tbt-card-effectbar-num">${b.shown}/${b.max}</span>
               </span>
-            </span>`
+              <span class="tbt-card-effectbar-num">${b.shown}/${b.max}</span>
+            </span>`;
+            }
           )
           .join("");
       }
     }
   };
 
+  /** 单位卡无敌档位的显示名（空串 = 普通单位）；整方无敌按「免伤」显示 */
+  function invincibleLabelOf(unit) {
+    const level = normalizeInvincible(unit && unit.invincible);
+    return level === "none" ? "" : INVINCIBLE_LABEL[level] || "无敌";
+  }
+
   function statusesOf(unit) {
     const out = [];
-    const invincible = unit.invincible || s.battle.state.invincibleSides.includes(unit.side);
-    if (invincible) out.push({ key: "inv", glyph: "无", cls: "is-invincible", title: "无敌" });
+    const invLabel = invincibleLabelOf(unit) || (s.battle.state.invincibleSides.includes(unit.side) ? "免伤" : "");
+    if (invLabel) {
+      out.push({ key: "inv", glyph: invLabel.slice(0, 1), cls: "is-invincible", title: invLabel });
+    }
     for (const layer of unit.effects || []) {
       const def = s.registry.getEffect(layer.id);
       // 条式显示的效果不走左上角图标，改走血条上方的进度条
@@ -447,6 +480,8 @@ export function openBattle({ registry, config, onExit }) {
         textColor: custom ? contrastOn(custom) : "",
         // 叠加类效果在图标右下角圆圈里标层数
         count: def?.stackable ? Math.max(1, Math.floor(Number(layer.stacks) || 1)) : 0,
+        // 有图标的效果直接显示图标，没有图标才用名字首字
+        icon: resolveCardIcon(def),
         title: `${def?.name || layer.id}${def?.stackable ? ` ${layer.stacks} 层` : ""} · ${EFFECT_POLARITY_LABEL[polarity]}`,
       });
     }
@@ -483,6 +518,7 @@ export function openBattle({ registry, config, onExit }) {
         ratio,
         inverted,
         color: effectColorOf(def),
+        icon: resolveCardIcon(def),
         title: `${def.name || layer.id} ${shown}/${max}${
           inverted ? ` · 反转（当前 ${current}/${max}）` : ""
         }`,
@@ -676,14 +712,17 @@ export function openBattle({ registry, config, onExit }) {
       .map((sk, i) => {
         if (sk.type !== "active") return "";
         const icon = resolveCardIcon(sk);
-        const needsTarget = skillNeedsPlayerTarget(sk);
+        const info = skillTargetPickInfo(sk);
         const st = s.battle.skillStateOf(active, sk);
         const useText = st.perTurn || st.total
           ? ` · 回合 ${st.turnLeft === null ? "∞" : st.turnLeft} / 总 ${st.totalLeft === null ? "∞" : st.totalLeft}`
           : "";
-        const label = st.available
-          ? `${needsTarget ? "手动选择目标" : "直接施放"}${useText}`
-          : st.reason;
+        const pickText = !info.needsTarget
+          ? "直接施放"
+          : info.max > 1
+            ? `选择至多 ${info.max} 个目标`
+            : "手动选择目标";
+        const label = st.available ? `${pickText}${useText}` : st.reason;
         return `<button class="tbt-skill ${s.pending?.index === i ? "is-targeting" : ""}" type="button" data-skill="${i}" ${st.available ? "" : "disabled"}>
                <div class="tbt-skill-main">${
                  icon ? `<img class="tbt-skill-icon" src="${escapeHtml(icon)}" alt="" draggable="false" />` : ""
@@ -705,10 +744,24 @@ export function openBattle({ registry, config, onExit }) {
            <span>${escapeHtml(pendingSkill.description || "这个技能还没有填写描述。")}</span>
          </div>`
       : "";
+    const pickMax = s.pending ? Math.max(1, Number(s.pending.max) || 1) : 1;
+    const pickRequired = Boolean(s.pending && s.pending.required);
+    const pickedUids = (s.pending && s.pending.picked) || [];
+    const foeCount = s.battle
+      .publicBattle()
+      .units.filter((u) => u.side !== active.side && u.state === "alive" && canSelectUnit(u, active.side)).length;
+    const needCount = Math.min(pickMax, foeCount);
+    const canConfirm = pickedUids.length > 0 && (!pickRequired || pickedUids.length >= needCount);
+    const confirmButton =
+      s.pending && pickMax > 1
+        ? `<button class="tbt-skill is-confirm" type="button" data-confirm ${canConfirm ? "" : "disabled"}>
+             <b>释放技能</b><span>已选 ${pickedUids.length} / ${pickMax}${pickRequired ? "（必须选满）" : "（可以少选）"}</span>
+           </button>`
+        : "";
     const targetTip = s.pending
       ? `<div class="tbt-act-hint"><b>选择目标</b> · 点击${sideName(
           active.side === "ally" ? "enemy" : "ally"
-        )}单位</div>`
+        )}单位${pickMax > 1 ? `（最多 ${pickMax} 个${pickRequired ? "，必须选满" : "，可以少选"}）` : ""}</div>`
       : `<div class="tbt-act-hint">选择一个技能，或结束行动；剩余可动 ${Number(active.actionsLeft) || 0} 次</div>`;
     el.innerHTML = `
       <div class="tbt-act-head">
@@ -722,7 +775,7 @@ export function openBattle({ registry, config, onExit }) {
       </div>
       ${targetTip}
       ${skillDesc}
-      <div class="tbt-skills">${skillButtons || `<span class="tbt-act-hint">没有主动技能</span>`}${cancelSkillButton}</div>
+      <div class="tbt-skills">${skillButtons || `<span class="tbt-act-hint">没有主动技能</span>`}${confirmButton}${cancelSkillButton}</div>
       <button class="tbt-end" type="button" data-end>结束行动</button>`;
   }
 
@@ -825,9 +878,9 @@ export function openBattle({ registry, config, onExit }) {
     const pub = pubOf(uid);
     const quality = QUALITY_LABEL[card.quality] || card.quality || "白";
     const status = pub
-      ? `本回合剩余行动 ${Number(pub.actionsLeft) || 0} / ${Number(pub.actionsPerTurn) || 1}`
+      ? `本回合剩余行动 ${Number(pub.actionsLeft) || 0} / ${pub.actionsPerTurn ?? 1}`
       : "";
-    const invincible = unit.invincible || s.battle.state.invincibleSides.includes(unit.side);
+    const invincible = invincibleLabelOf(unit) || (s.battle.state.invincibleSides.includes(unit.side) ? "免伤" : "");
     const effects = collectEffects(unit);
     const resist = stats.resistances || {};
     const skills = s.battle.allSkillsOf(unit);
@@ -840,7 +893,7 @@ export function openBattle({ registry, config, onExit }) {
           <div class="tbt-sheet-title">
             <h3>${escapeHtml(unit.name)}</h3>
             <p>${escapeHtml(sideName(unit.side))} · ${escapeHtml(quality)} · Lv.${card.level ?? 1} · ${status}${
-              invincible ? " · 无敌" : ""
+              invincible ? " · " + invincible : ""
             }</p>
           </div>
           <button class="tbt-close" type="button" data-close-detail aria-label="关闭">×</button>
@@ -1172,6 +1225,13 @@ export function openBattle({ registry, config, onExit }) {
           await sleep(ev.cause === "deploy" ? 150 : 220);
           break;
         }
+        case "attack:transferred": {
+          const from = unitOf(ev.from);
+          const to = unitOf(ev.to);
+          if (from || to) addLog(`攻击被转移：${from ? from.name : "?"} → ${to ? to.name : "?"}`, "is-sys");
+          await sleep(140);
+          break;
+        }
         case "skill": {
           const caster = unitOf(ev.caster);
           addLog(
@@ -1256,6 +1316,18 @@ export function openBattle({ registry, config, onExit }) {
           await sleep(220);
           break;
         }
+        case "exit:blocked": {
+          const unit = unitOf(ev.unit);
+          if (unit) addLog(`${unit.name} 挡住了退场（${ev.level === "super" ? "超级无敌" : "无敌"}）`, "is-sys");
+          await sleep(180);
+          break;
+        }
+        case "exit:refused": {
+          const unit = unitOf(ev.unit);
+          if (unit) addLog(`${unit.name} 拒绝退场并回血`, "is-sys");
+          await sleep(200);
+          break;
+        }
         case "battle:end": {
           const winner = ev.winner === "ally" ? "红方" : ev.winner === "enemy" ? "蓝方" : "平局";
           addLog(`战斗结束：${winner}`, "is-sys");
@@ -1308,12 +1380,13 @@ export function openBattle({ registry, config, onExit }) {
     if (s.battle.state.phase !== "act") finishStep();
   }
 
-  async function executeSkill(index, targetUid) {
+  async function executeSkill(index, targetUid, extraTargets = []) {
     if (s.busy || s.destroyed) return;
     s.pending = null;
     s.busy = true;
-    // 玩家点选的目标同时交给「选择单位」积木优先采用
-    s.preferredTargets = targetUid ? [targetUid] : [];
+    // 玩家点选的目标同时交给「选择单位」积木优先采用（多选时按点选顺序）
+    const picked = [targetUid, ...(Array.isArray(extraTargets) ? extraTargets : [])].filter(Boolean);
+    s.preferredTargets = [...new Set(picked)];
     refreshAll();
     let events = [];
     try {
@@ -1506,8 +1579,17 @@ export function openBattle({ registry, config, onExit }) {
     const pub = pb.units.find((u) => u.uid === uid);
     if (s.pending) {
       const active = activeUnit();
-      if (pub && active && pub.side !== active.side && pub.state === "alive") {
-        executeSkill(s.pending.index, uid);
+      if (pub && active && pub.side !== active.side && pub.state === "alive" && canSelectUnit(pub, active.side)) {
+        // 只能选 1 个：点谁打谁；能选多个：点一下选中 / 再点取消
+        if (Math.max(1, Number(s.pending.max) || 1) <= 1) {
+          executeSkill(s.pending.index, uid);
+          return;
+        }
+        const picked = s.pending.picked || (s.pending.picked = []);
+        const at = picked.indexOf(uid);
+        if (at >= 0) picked.splice(at, 1);
+        else if (picked.length < s.pending.max) picked.push(uid);
+        refreshAll();
       } else {
         // 不在当前可选目标范围 → 打开详情
         openDetail(uid);
@@ -1534,6 +1616,14 @@ export function openBattle({ registry, config, onExit }) {
     if (skill) return chooseSkill(Number(skill.dataset.skill));
     const end = event.target.closest("[data-end]");
     if (end) return endAction();
+    const confirm = event.target.closest("[data-confirm]");
+    if (confirm) {
+      const pending = s.pending;
+      if (!pending) return;
+      const uids = (pending.picked || []).slice();
+      if (!uids.length) return;
+      return executeSkill(pending.index, uids[0], uids.slice(1));
+    }
     const cancel = event.target.closest("[data-cancel]");
     if (cancel) {
       s.pending = null;
@@ -1557,17 +1647,20 @@ export function openBattle({ registry, config, onExit }) {
       return;
     }
     // 全体 / 固定目标 / 纯自身等技能不需要选目标：直接施放，不进入选目标状态
-    if (!skillNeedsPlayerTarget(skill)) {
+    const info = skillTargetPickInfo(skill);
+    if (!info.needsTarget) {
       executeSkill(index, null);
       return;
     }
     // 需要选目标的技能：即使只有一个敌人，也由玩家手动点选目标
-    const enemies = s.battle.publicBattle().units.filter((u) => u.side !== active.side && u.state === "alive");
+    const enemies = s.battle
+      .publicBattle()
+      .units.filter((u) => u.side !== active.side && u.state === "alive" && canSelectUnit(u, active.side));
     if (!enemies.length) {
       executeSkill(index, null);
       return;
     }
-    s.pending = { index };
+    s.pending = { index, max: Math.max(1, info.max), required: Boolean(info.required), picked: [] };
     refreshAll();
   }
 

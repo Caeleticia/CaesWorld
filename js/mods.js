@@ -34,9 +34,11 @@ import {
   DEFAULT_PACK,
   cardsOf,
   normalizeProject,
+  packFileOf,
   projectToRegistryInput,
   registerModImages,
   resolveCardImage,
+  migrateLegacyTriggerModes,
 } from "../engine/index.js";
 import { buildModZip, isZipBytes, stemOf, unpackModZip } from "./mod-zip.js";
 import { makePackZip } from "./pack-export.js";
@@ -134,12 +136,29 @@ export function writeDisabledMods(list) {
   }
 }
 
-export function isModEnabled(id, disabled = readDisabledMods()) {
-  return !disabled.includes(id);
+const editorKeyOf = (packId) => `${EDITOR_PACK_ID}:${packId}`;
+
+/**
+ * 卡包是否启用。
+ * 兼容旧数据：停用清单里可能还是文件名（mod.id）或 `editor:<包id>`，
+ * 现在统一按「卡包 id」理解，别名命中同样算停用。
+ */
+export function isPackEnabled(packId, aliases = [], entries = readDisabledMods()) {
+  const id = String(packId || "").trim();
+  if (!id) return true;
+  return !(
+    entries.includes(id) ||
+    entries.includes(editorKeyOf(id)) ||
+    aliases.some((key) => key && entries.includes(key))
+  );
 }
 
-export function setModEnabled(id, enabled) {
-  const list = readDisabledMods().filter((x) => x !== id);
+/** 启用 / 停用一个卡包：统一写卡包 id，并清掉同包的旧键（文件名 / editor:<包id>） */
+export function setPackEnabled(packId, enabled, aliases = []) {
+  const id = String(packId || "").trim();
+  if (!id) return;
+  const drop = new Set([id, editorKeyOf(id), ...aliases.filter(Boolean)]);
+  const list = readDisabledMods().filter((key) => !drop.has(key));
   if (!enabled) list.push(id);
   writeDisabledMods(list);
 }
@@ -213,6 +232,17 @@ export function normalizeModPackage(raw, { file = "", source = "server", archive
     }
   }
 
+  // 旧触发迁移：加载时就地迁移（幂等），避免新版「单位集按单位分别触发」改变旧卡行为
+  const migrateCard = (card) => {
+    if (!card || typeof card !== "object") return;
+    if (card.flow) migrateLegacyTriggerModes(card.flow);
+    for (const flow of Object.values(card.flows || {})) migrateLegacyTriggerModes(flow);
+    for (const member of card.members || []) {
+      if (member && member.flow) migrateLegacyTriggerModes(member.flow);
+    }
+  };
+  for (const card of [...units, ...skills, ...effects]) migrateCard(card);
+
   // 卡包文件里自带 id / name：卡按它归包（导出时卡 id 的包前缀也是它），
   // 停用过滤仍按文件名（mod.id）走。
   const declaredPackId =
@@ -231,7 +261,8 @@ export function normalizeModPackage(raw, { file = "", source = "server", archive
     version,
     description,
     source,
-    enabled: isModEnabled(id),
+    // 实际的启用状态按「卡包」在 loadAllMods 里统一计算
+    enabled: true,
     raw: data,
     /** 卡片归属的卡包 id / 显示名（可能和文件名不同） */
     packId: cardPackId,
@@ -660,31 +691,17 @@ export function loadServerMods({ force = false } = {}) {
 }
 
 /**
- * 包内自带的更新时间（编辑器保存 / 导出时写入）。
- * 解析不出来返回 null——旧模组没有这个字段，按旧规则处理。
+ * 同一个 mod.id 出现两份时选哪份。
+ * 不再比较版本 / 时间：按固定来源优先级取「更靠内」的一份
+ * （本地扩展 > 服务端扩展）。想换回服务端文件就走「更新」，
+ * 由用户显式决定，而不是加载时猜哪个更新。
  */
-export function modUpdatedAt(mod) {
-  const raw = mod && mod.raw;
-  const text = raw && typeof raw.updatedAt === "string" ? raw.updatedAt : "";
-  if (!text) return null;
-  const t = Date.parse(text);
-  return Number.isFinite(t) ? t : null;
-}
+const SOURCE_RANK = Object.freeze({ server: 0, local: 1, editor: 2 });
 
-/**
- * 同一个 mod.id 出现两份时选哪份：
- *   · 两份都能读到包内 updatedAt → 新的优先（这样「导出后重新上传」能立刻生效，
- *     旧副本不会因为读到的顺序在后面而被当成最新）
- *   · 比不出来 → 维持旧规则「本地覆盖服务器」，同来源时后读到的优先
- */
-export function preferNewerMod(prev, next) {
+export function preferSource(prev, next) {
   if (!prev) return next;
   if (!next) return prev;
-  const a = modUpdatedAt(prev);
-  const b = modUpdatedAt(next);
-  if (a !== null && b !== null && a !== b) return b > a ? next : prev;
-  if (prev.source === next.source) return next;
-  return next.source === "local" ? next : prev;
+  return (SOURCE_RANK[next.source] ?? 0) > (SOURCE_RANK[prev.source] ?? 0) ? next : prev;
 }
 
 /**
@@ -753,17 +770,21 @@ export function loadLocalMods({ force = false } = {}) {
 
 /**
  * 全部模组（服务器 + 本地）。
- * 同文件名时按包内 updatedAt 取较新的一份（比不出来则本地覆盖服务器）；
- * includeDisabled=false 时只返回启用的。
+ * 同文件名时按固定来源优先级取一份（本地扩展优先于服务端扩展），
+ * 不做版本比较；includeDisabled=false 时只返回启用的。
  */
 export async function loadAllMods({ includeDisabled = true, force = false } = {}) {
   const [server, local] = await Promise.all([loadServerMods({ force }), loadLocalMods({ force })]);
   const byId = new Map();
   for (const mod of [...server.mods, ...local.mods]) {
-    byId.set(mod.id, preferNewerMod(byId.get(mod.id) || null, mod));
+    byId.set(mod.id, preferSource(byId.get(mod.id) || null, mod));
   }
   const disabled = readDisabledMods();
-  const all = [...byId.values()].map((mod) => ({ ...mod, enabled: isModEnabled(mod.id, disabled) }));
+  const all = [...byId.values()].map((mod) => ({
+    ...mod,
+    // 启用状态按「卡包」算：旧的文件名键 / editor:<包id> 都映射到同一个卡包
+    enabled: isPackEnabled(mod.packId || mod.id, [mod.id], disabled),
+  }));
   applyModImages(all);
   const mods = all.filter((mod) => includeDisabled || mod.enabled);
   return { mods, errors: [...server.errors, ...local.errors] };
@@ -772,6 +793,65 @@ export async function loadAllMods({ includeDisabled = true, force = false } = {}
 /* ------------------------------------------------------------------ */
 /* 编辑器工程 / 内容汇总                                                */
 /* ------------------------------------------------------------------ */
+
+const EDITOR_OPEN_PACK_KEY = "caeworld:editor-open-pack";
+
+/** 记下「想打开编辑器里的哪个卡包」，编辑器初始化时消费（模组管理 → 编辑） */
+export function requestEditorPack(packId) {
+  try {
+    const id = String(packId || "").trim();
+    if (id) localStorage.setItem(EDITOR_OPEN_PACK_KEY, id);
+  } catch {
+    /* 隐私模式等写不进去就算了 */
+  }
+}
+
+/** 取走并清空「打开某个卡包」的请求 */
+export function takeEditorPackRequest() {
+  try {
+    const id = localStorage.getItem(EDITOR_OPEN_PACK_KEY) || "";
+    if (id) localStorage.removeItem(EDITOR_OPEN_PACK_KEY);
+    return id;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 编辑器工程里的卡包（草稿包 / 自建包），按 pack 分组返回成「卡包文件」的形状。
+ * 这些不是模组文件：内容存在 localStorage 的工程里，名称 / 版本 / 简介取自工程内的卡包清单。
+ * @returns {{packs: object[], errors: string[]}}
+ */
+export function loadEditorPacks() {
+  const errors = [];
+  let project = null;
+  try {
+    const packName = localStorage.getItem(EDITOR_PACK_KEY) || DEFAULT_PACK;
+    const raw =
+      localStorage.getItem(`${EDITOR_PROJECT_KEY}:${packName}`) ||
+      localStorage.getItem(EDITOR_PROJECT_KEY);
+    if (!raw) return { packs: [], errors };
+    project = normalizeProject(JSON.parse(raw));
+  } catch (err) {
+    return { packs: [], errors: [`编辑器工程读取失败：${errText(err)}`] };
+  }
+  const packs = [];
+  for (const meta of Array.isArray(project.packs) ? project.packs : []) {
+    if (!meta || !meta.id) continue;
+    let file;
+    try {
+      file = packFileOf(project, meta.id);
+    } catch (err) {
+      errors.push(`编辑器卡包 ${meta.id}: ${errText(err)}`);
+      continue;
+    }
+    packs.push({
+      ...file,
+      counts: { units: file.units.length, skills: file.skills.length, effects: file.effects.length },
+    });
+  }
+  return { packs, errors };
+}
 
 /** 编辑器本地工程内容 */
 export function loadEditorPackContent() {
@@ -903,27 +983,30 @@ function repairDefaultContent(units, skills) {
 }
 
 /**
- * 汇总内容：启用的模组（默认包也是模组）+ 编辑器工程。
+ * 汇总内容：模组（默认包也是模组）+ 编辑器工程。
  * 同一 id 后面的来源覆盖前面的来源（编辑器优先、本地模组优先于服务器模组）。
+ * 启用 / 停用按「卡包 id」统一判断：同一卡包的所有来源一起生效 / 一起关闭。
+ *
+ * includeDisabledMods = true 时把停用的卡包也一起返回（只给「编辑器同步」用：
+ * 编辑器要能编辑所有卡包，哪怕它当前是停用状态；实际进战斗 / 卡牌库的调用不带这个参数）。
  */
-export async function loadContentPacks({ includeEditor = true, force = false } = {}) {
+export async function loadContentPacks({ includeEditor = true, force = false, includeDisabledMods = false } = {}) {
   const errors = [];
-  const packs = [];
-
   const modsRes = await loadAllMods({ includeDisabled: true, force });
   errors.push(...modsRes.errors);
-  const disabledMods = modsRes.mods.filter((m) => !m.enabled);
-  const disabledModIds = disabledMods.map((m) => m.id);
-  // 停用模组对应的卡包 id：编辑器工程里没有 modId，只能按 pack 清理
-  const disabledPackIds = [
-    ...new Set(
-      disabledMods
-        .flatMap((m) => [...(m.units || []), ...(m.skills || []), ...(m.effects || [])])
-        .map((card) => card && card.pack)
-        .filter(Boolean)
-    ),
-  ];
-  packs.push(...modsRes.mods.filter((m) => m.enabled));
+
+  const entries = readDisabledMods();
+  // 旧的按文件名的停用键 → 卡包 id
+  const legacyOff = new Set();
+  for (const mod of modsRes.mods) {
+    if (entries.includes(mod.id)) legacyOff.add(mod.packId || mod.id);
+  }
+  const packOff = (packId) => {
+    const id = String(packId || DEFAULT_PACK);
+    return entries.includes(id) || entries.includes(`${EDITOR_PACK_ID}:${id}`) || legacyOff.has(id);
+  };
+
+  const packs = modsRes.mods.filter((m) => includeDisabledMods || !packOff(m.packId || m.id));
 
   if (includeEditor) {
     const editor = loadEditorPackContent();
@@ -931,28 +1014,27 @@ export async function loadContentPacks({ includeEditor = true, force = false } =
     packs.push(editor);
   }
 
-  const disabled = new Set(disabledModIds);
-  const disabledPacks = new Set(disabledPackIds);
+  // 先过滤再覆盖：被停用的卡包不能先盖掉同名卡、再从结果里被删掉
   const merge = (key) => {
     const map = new Map();
     for (const pack of packs) {
       for (const card of pack[key] || []) {
-        if (card && typeof card === "object" && card.id) map.set(card.id, card);
+        if (!card || typeof card !== "object" || !card.id) continue;
+        if (!includeDisabledMods && packOff(card.pack)) continue;
+        map.set(card.id, card);
       }
     }
-    // 模组卡按 modId 过滤；编辑器工程里的卡没有 modId，按所属卡包过滤
-    return [...map.values()].filter(
-      (card) => !disabledPacks.has(card.pack) && (!card.modId || !disabled.has(card.modId))
-    );
+    return [...map.values()];
   };
 
   const units = merge("units");
   const skills = merge("skills");
   repairDefaultContent(units, skills);
+  const disabledMods = modsRes.mods.filter((m) => packOff(m.packId || m.id));
   return {
     packs,
-    disabledModIds,
-    disabledPackIds,
+    disabledModIds: disabledMods.map((m) => m.id),
+    disabledPackIds: [...new Set(disabledMods.map((m) => m.packId || m.id))],
     units,
     skills,
     effects: merge("effects"),
@@ -990,7 +1072,7 @@ export async function importModFile(file) {
       return { ok: false, error: `保存到浏览器失败：${errText(err)}` };
     }
     clearModCache();
-    setModEnabled(mod.id, true);
+    setPackEnabled(mod.packId || mod.id, true, [mod.id]);
     return { ok: true, mod: { ...mod, enabled: true } };
   }
 
@@ -1012,7 +1094,7 @@ export async function importModFile(file) {
   map[fileName] = raw;
   writeLocalModsRaw(map);
   clearModCache();
-  setModEnabled(mod.id, true);
+  setPackEnabled(mod.packId || mod.id, true, [mod.id]);
   return { ok: true, mod };
 }
 
@@ -1028,9 +1110,68 @@ export async function removeLocalMod(id) {
   } catch {
     /* 不在 IndexedDB 里（旧 JSON 模组）就忽略 */
   }
-  setModEnabled(id, true);
   clearModCache();
   return true;
+}
+
+/** 删除同一个卡包的所有本地导入副本；返回被删掉的名字 */
+export async function removeLocalPacks(packId) {
+  const id = String(packId || "").trim();
+  if (!id) return [];
+  const res = await loadLocalMods({ force: true });
+  const names = [];
+  for (const mod of res.mods || []) {
+    if (!mod || (mod.packId || mod.id) !== id) continue;
+    await removeLocalMod(mod.id);
+    names.push(mod.name || mod.fileName || mod.id);
+  }
+  return names;
+}
+
+/**
+ * 强制把某个服务端卡包更新为服务器上当前的文件。
+ *
+ * 不做任何比较：不看包内 updatedAt、不按 id 找「服务端版本」、不比较缓存校验头，
+ * 直接重新下载 mods/<文件名> 并覆盖浏览器缓存。
+ * 本函数只负责「拿到服务端最新内容」；本地副本（编辑器 / 本地导入）由调用方按
+ * 用户确认后的“删除所有本地修改”流程处理。
+ *
+ * @returns {{ok: boolean, error?: string, mod?: object}}
+ */
+export async function forceUpdateServerPack(pack) {
+  if (!pack) return { ok: false, error: "没有卡包" };
+  if (pack.source !== "server") return { ok: false, error: "只有服务端卡包可以更新" };
+
+  let got;
+  try {
+    got = await readServerFile(`${MODS_DIR}/${encodeURIComponent(pack.fileName)}`);
+  } catch (err) {
+    return { ok: false, error: `重新下载失败：${errText(err)}` };
+  }
+
+  const record = {
+    name: pack.fileName,
+    bytes: got.bytes,
+    etag: got.etag,
+    lastModified: got.lastModified,
+    size: got.size,
+    fetchedAt: Date.now(),
+    version: SERVER_CACHE_VERSION,
+  };
+  let mod;
+  try {
+    mod = await makeServerMod(got.bytes, pack.fileName, serverStamp(record));
+  } catch (err) {
+    return { ok: false, error: `卡包内容读取失败：${errText(err)}` };
+  }
+  try {
+    await putServerRecord(record);
+  } catch {
+    /* 缓存写不进去也不影响本次更新 */
+  }
+  removedServerMods.delete(pack.fileName);
+  clearModCache();
+  return { ok: true, mod };
 }
 
 /** 导出用数据：优先原样输出，保证编辑器工程仍可导回编辑器 */
@@ -1077,6 +1218,101 @@ export async function buildModZipBytes(mod) {
     }
   }
   return buildModZip({ rootDir, json: mod.raw, readme: mod.readme, images, icons });
+}
+
+/** 卡 id 的包前缀替换：<old>_<type>_<key> → <new>_<type>_<key> */
+export function renamePackCardId(id, oldId, newId) {
+  if (typeof id !== "string" || !id) return id;
+  if (oldId && id.startsWith(`${oldId}_`)) return `${newId}${id.slice(oldId.length)}`;
+  const cut = id.indexOf("_");
+  return cut > 0 ? `${newId}${id.slice(cut)}` : id;
+}
+
+/**
+ * 复制一份卡包内容到新 id：
+ * 卡 id、卡上对其它卡 id 的引用（挂载 / 流程 / ui 常量）以及 pack 字段一起改。
+ * @returns {{clone: object, map: Map<string, string>}} map：旧卡 id → 新卡 id
+ */
+export function clonePackWithId(file, newId, newName = "") {
+  const safe = file && typeof file === "object" ? file : {};
+  const oldId = String(safe.id || "").trim();
+  const id = String(newId || "").trim();
+  const clone = structuredClone(safe);
+  const lists = ["units", "skills", "effects"];
+  const map = new Map();
+  for (const key of lists) {
+    const oldList = Array.isArray(safe[key]) ? safe[key] : [];
+    const newList = Array.isArray(clone[key]) ? clone[key] : [];
+    for (let i = 0; i < newList.length; i += 1) {
+      const oldCard = oldList[i];
+      if (!oldCard || typeof oldCard.id !== "string") continue;
+      map.set(oldCard.id, renamePackCardId(oldCard.id, oldId, id));
+    }
+  }
+  const walk = (value) => {
+    if (typeof value === "string") return map.get(value) || value;
+    if (Array.isArray(value)) return value.map(walk);
+    if (value && typeof value === "object") {
+      for (const key of Object.keys(value)) value[key] = walk(value[key]);
+      return value;
+    }
+    return value;
+  };
+  for (const key of lists) {
+    for (const card of clone[key] || []) {
+      if (!card || typeof card !== "object") continue;
+      const oldCardId = card.id;
+      walk(card);
+      if (oldCardId && map.has(oldCardId)) card.id = map.get(oldCardId);
+      card.pack = id;
+      card.packName = newName || id;
+    }
+  }
+  clone.id = id;
+  clone.name = newName || safe.name || id;
+  clone.updatedAt = new Date().toISOString();
+  return { clone, map };
+}
+
+/** 把一个卡包文件导出成 ZIP（卡面 / 图标按 pack / modId 现取，一并带上） */
+export async function exportPackFile(file, { packId = "", readme = "" } = {}) {
+  const safe = file && typeof file === "object" ? file : {};
+  const id = String(packId || safe.id || "mod").trim() || "mod";
+  const { bytes, warnings } = await makePackZip(safe, {
+    packId: id,
+    readme,
+    resolveImage: (card) => resolveCardImage(card),
+  });
+  return { blob: new Blob([bytes], { type: "application/zip" }), name: `${id}.zip`, warnings };
+}
+
+/**
+ * 另存为本地卡包：把内容复制到新 id，打包成本地 ZIP（含卡面 / 图标），默认停用。
+ * 不会影响原卡包；新卡包在「模组管理」里显示为「本地」。
+ */
+export async function savePackAsLocal(file, { newId, name = "", readme = "" } = {}) {
+  const safe = file && typeof file === "object" ? file : {};
+  const id = String(newId || "").trim();
+  if (!id) throw new Error("缺少新的卡包 id");
+  const { clone, map } = clonePackWithId(safe, id, name);
+  const oldByNew = new Map();
+  for (const key of ["units", "skills", "effects"]) {
+    for (const oldCard of safe[key] || []) {
+      if (!oldCard || typeof oldCard.id !== "string") continue;
+      const newCardId = map.get(oldCard.id);
+      if (newCardId) oldByNew.set(newCardId, oldCard);
+    }
+  }
+  const { bytes } = await makePackZip(clone, {
+    packId: id,
+    readme,
+    resolveImage: (card) => resolveCardImage(oldByNew.get(card && card.id) || card),
+  });
+  const fileName = zipFileNameOf(id);
+  await putZipRecord({ name: fileName, bytes, importedAt: Date.now() });
+  setPackEnabled(id, false);
+  clearModCache();
+  return { packId: id, fileName };
 }
 
 /**

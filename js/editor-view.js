@@ -31,6 +31,10 @@ import {
   defaultCardImageName,
   resolveCardImage,
   RESISTANCE_ATTRIBUTES,
+  INVINCIBLE_LEVELS,
+  INVINCIBLE_LABEL,
+  normalizeInvincible,
+  normalizeUnselectable,
   EFFECT_ATTR_BONUS_KEYS,
   effectPolarityOf,
   effectColorOf,
@@ -46,7 +50,14 @@ import {
   DRAFT_PACK_ID,
   DRAFT_PACK_NAME,
 } from "../engine/index.js";
-import { loadContentPacks, DEFAULT_PACK_ID, DEFAULT_PACK_NAME, EDITOR_PACK_ID, EDITOR_PACK_NAME } from "./mods.js";
+import {
+  loadContentPacks,
+  takeEditorPackRequest,
+  DEFAULT_PACK_ID,
+  DEFAULT_PACK_NAME,
+  EDITOR_PACK_ID,
+  EDITOR_PACK_NAME,
+} from "./mods.js";
 import { isZipBytes, unpackModZip } from "./mod-zip.js";
 import { applyPackImagesToCards, applyPackImagesToUnits, makePackZip } from "./pack-export.js";
 import { onDataCleared } from "./data-events.js";
@@ -147,26 +158,14 @@ function loadProject() {
 }
 
 /**
- * 把「默认包 + 已启用的模组」里的卡补进工程（按 id 去重，已有编辑不会被覆盖）。
- * 新模组启用后重新打开编辑器就能看到；删除过的卡记在 removed*Ids 里，不会被补回。
+ * 把模组里的卡补进工程（按 id 去重，已有编辑不会被覆盖）。
+ * 编辑器可以编辑所有卡包：停用的模组也会补进来（只影响编辑，不影响战斗 / 卡牌库）。
+ * 删除过的卡记在 removed*Ids 里，不会被补回。
  */
 async function hydrateFromPacks({ force = false } = {}) {
   const before = JSON.stringify(project);
   try {
-    const res = await loadContentPacks({ includeEditor: false, force });
-    // 停用模组后，工程里属于该模组的卡也移除
-    const disabledPacks = new Set(res.disabledPackIds || []);
-    if (disabledPacks.size) {
-      project.characters = project.characters.filter((ch) => !disabledPacks.has(ch.pack));
-      project.skills = project.skills.filter((s) => !disabledPacks.has(s.pack));
-      project.effects = project.effects.filter((e) => !disabledPacks.has(e.pack));
-      for (const ch of project.characters) {
-        ch.skillIds = (ch.skillIds || []).filter((id) => project.skills.some((s) => s.id === id));
-      }
-      for (const effect of project.effects) {
-        effect.skillIds = (effect.skillIds || []).filter((id) => project.skills.some((s) => s.id === id));
-      }
-    }
+    const res = await loadContentPacks({ includeEditor: false, force, includeDisabledMods: true });
     // 空工程只有一个未命名的占位角色，先把占位角色去掉，换成内容包里的角色
     const onlyBlank =
       project.characters.length === 1 &&
@@ -229,6 +228,20 @@ async function hydrateFromPacks({ force = false } = {}) {
     }
     for (const effect of project.effects || []) {
       effect.skillIds = (effect.skillIds || []).filter((id) => knownSkillIds.has(id));
+    }
+    // 新出现的来源卡包：把名字 / 版本 / 简介一并登记（已存在的包不覆盖，避免冲掉编辑过的信息）
+    if (!Array.isArray(project.packs)) project.packs = [];
+    for (const pack of res.packs || []) {
+      const id = pack && pack.packId;
+      if (!id || project.packs.some((entry) => entry && entry.id === id)) continue;
+      const version = Number(pack.version);
+      project.packs.push({
+        id,
+        name: pack.name || pack.packName || id,
+        version: Number.isFinite(version) && version > 0 ? version : 1,
+        author: "",
+        description: pack.description || "",
+      });
     }
     // 把内容包里的卡包登记进工程清单（否则卡包页 / 筛选看不到）
     normalizeProject(project);
@@ -1223,14 +1236,25 @@ function renderCharacter() {
   const SWITCH_IDS = {
     occupiesSlot: "f-occupy",
     countsAsUnit: "f-count",
-    invincible: "f-invincible",
     obtainable: "f-obtainable",
+    immuneNegative: "f-immune-neg",
+    immuneControl: "f-immune-control",
   };
   for (const [key, id] of Object.entries(SWITCH_IDS)) {
     const el = $("#" + id);
     // 旧工程没有 obtainable：没填过就按默认勾选
     const value = key === "obtainable" && ch.obtainable === undefined ? true : Boolean(ch[key]);
     if (el) el.checked = value;
+  }
+  const unselectableSel = $("#f-unselectable");
+  if (unselectableSel && document.activeElement !== unselectableSel) {
+    unselectableSel.value = normalizeUnselectable(ch.unselectable);
+  }
+  const invSel = $("#f-invincible");
+  if (invSel && document.activeElement !== invSel) {
+    const level = normalizeInvincible(ch.invincible);
+    invSel.value = level;
+    invSel.dataset.level = level;
   }
   const packSel = $("#f-pack");
   if (packSel && document.activeElement !== packSel) packSel.innerHTML = packOptionsHtml(ch.pack);
@@ -1338,6 +1362,7 @@ function renderEffectPanel() {
     )}
     <div class="chips">
       <label><input type="checkbox" data-effect-flag="unremovable" ${(e.flags || []).includes("unremovable") ? "checked" : ""} /> 不可解除（需勾选「强制移除」）</label>
+      <label><input type="checkbox" data-effect-flag="control" ${(e.flags || []).includes("control") ? "checked" : ""} /> 控制类效果（可被「免疫控制」挡下）</label>
       <label><input type="checkbox" data-effect-auto="1" ${e.autoConsume ? "checked" : ""} /> 自动消耗（每次执行完该效果的流程后消耗 1 层）</label>
     </div>
     ${
@@ -1520,6 +1545,7 @@ const TRIGGER_LABEL = {
   unitExit: "单位退场时",
   heal: "单位回复生命时",
   loseHp: "单位损失生命时",
+  hpChanged: "单位生命变动时",
   always: "始终",
 };
 
@@ -1602,7 +1628,7 @@ const FLOW_TEMPLATE_SLIME_BEAT = {
   name: "撞击",
   nodes: [
     { id: "targetSide1", type: "targetSide", options: { side: "enemy" }, pos: { x: 0, y: 190 } },
-    { id: "chooseUnit1", type: "chooseUnit", options: { multiple: false }, pos: { x: 230, y: 195 } },
+    { id: "chooseUnit1", type: "chooseUnit", options: { count: 1, mustFill: true }, pos: { x: 230, y: 195 } },
     { id: "trg1", type: "trigger", options: { event: "skillCastSelf", unitScope: "self" }, pos: { x: 165, y: 0 } },
     {
       id: "atk1",
@@ -3321,8 +3347,11 @@ const edit = {
     else if (["level", "baseHp", "baseAtk", "baseDef", "critRate", "critDamage", "speed"].includes(key)) {
       ch[key] = Number(value) || 0;
     } else if (key === "actionsPerTurn") {
-      ch.actionsPerTurn = Math.max(1, Math.floor(Number(value) || 1));
-    } else if (["occupiesSlot", "countsAsUnit", "invincible", "obtainable"].includes(key)) ch[key] = Boolean(value);
+      const n = Number(value);
+      ch.actionsPerTurn = Number.isFinite(n) ? Math.max(0, Math.min(99, Math.floor(n))) : 1;
+    } else if (["occupiesSlot", "countsAsUnit", "obtainable", "immuneNegative", "immuneControl"].includes(key)) ch[key] = Boolean(value);
+    else if (key === "unselectable") ch[key] = normalizeUnselectable(value);
+    else if (key === "invincible") ch[key] = normalizeInvincible(value);
     else if (["name", "id", "quality", "label", "description", "pack", "packName"].includes(key)) ch[key] = String(value ?? "");
     else throw new Error(`未知角色字段：${key}`);
     markDirty();
@@ -3397,6 +3426,132 @@ const edit = {
     if (id === undefined) return deleteCard("effect");
     const target = (project.effects || []).find((e) => e.id === id);
     return target ? deleteCard("effect", target) : { ok: false, error: `找不到效果：${id}` };
+  },
+  /**
+   * 删除编辑器工程里的一个自建卡包：连同该包的角色 / 技能 / 效果一起移除，
+   * 清空其他流程对它们的引用，并写入 removed*Ids，避免重新同步内容包时补回来。
+   * 默认包受保护，不允许删除。
+   */
+  deletePack(packId) {
+    const id = String(packId || "").trim();
+    if (!id) return { ok: false, error: "缺少卡包 id" };
+    if (id === DEFAULT_PACK_ID || id === "default") return { ok: false, error: "默认包不能删除" };
+    const pack = (project.packs || []).find((p) => p && p.id === id);
+    if (!pack) return { ok: false, error: `找不到卡包：${id}` };
+    const units = (project.characters || []).filter((c) => c && c.pack === id);
+    const skills = (project.skills || []).filter((s) => s && s.pack === id);
+    const effects = (project.effects || []).filter((e) => e && e.pack === id);
+    let cleared = 0;
+    for (const c of units) {
+      markRemoved("unit", c.id);
+      cleared += clearAllCardRefs(c.id);
+    }
+    for (const s of skills) {
+      markRemoved("skill", s.id);
+      cleared += clearAllCardRefs(s.id);
+    }
+    for (const e of effects) {
+      markRemoved("effect", e.id);
+      cleared += clearAllCardRefs(e.id);
+    }
+    const unitIds = new Set(units.map((c) => c.id));
+    const skillIds = new Set(skills.map((s) => s.id));
+    const effectIds = new Set(effects.map((e) => e.id));
+    project.characters = (project.characters || []).filter((c) => !unitIds.has(c.id));
+    project.skills = (project.skills || []).filter((s) => !skillIds.has(s.id));
+    project.effects = (project.effects || []).filter((e) => !effectIds.has(e.id));
+    project.packs = (project.packs || []).filter((p) => !p || p.id !== id);
+    // 清掉其他卡对已删技能的挂载引用
+    const knownSkills = new Set((project.skills || []).map((s) => s.id));
+    for (const c of project.characters || []) {
+      c.skillIds = (c.skillIds || []).filter((sid) => knownSkills.has(sid));
+    }
+    for (const e of project.effects || []) {
+      e.skillIds = (e.skillIds || []).filter((sid) => knownSkills.has(sid));
+    }
+    if (active.editPack === id) active.editPack = "all";
+    if (active.packId === id) active.packId = null;
+    if (active.tab === "skills" || active.tab === "effects") {
+      canvasState.selectedId = null;
+      active.triggerId = null;
+    }
+    if (!currentCharacter()) active.character = firstCardInPack(project.characters, active.editPack);
+    if (!currentSkill()) active.skill = firstCardInPack(project.skills, active.editPack);
+    if (!currentEffect()) active.effect = firstCardInPack(project.effects, active.editPack);
+    normalizeProject(project);
+    if (!project.characters.length) project.characters.push(createCharacter());
+    const saved = flushSave();
+    if (initialized) {
+      renderAll();
+      renderCardsList();
+    }
+    return {
+      ok: true,
+      id,
+      name: pack.name || id,
+      units: units.length,
+      skills: skills.length,
+      effects: effects.length,
+      cleared,
+      saved,
+    };
+  },
+  /**
+   * 丢弃某个卡包在本地的副本（用于「同步服务端最新版本」）：
+   * 与 deletePack 不同，不写 removed*Ids、不清流程里的 id 引用——
+   * 之后从服务端重新补回同名卡时还能对上，也可以再次在编辑器里编辑。
+   */
+  discardPack(packId, { allowDefault = false } = {}) {
+    const id = String(packId || "").trim();
+    if (!id) return { ok: false, error: "缺少卡包 id" };
+    if (!allowDefault && (id === DEFAULT_PACK_ID || id === "default")) {
+      return { ok: false, error: "默认包不能删除" };
+    }
+    const pack = (project.packs || []).find((p) => p && p.id === id);
+    if (!pack) return { ok: false, error: `找不到卡包：${id}` };
+    const units = (project.characters || []).filter((c) => c && c.pack === id);
+    const skills = (project.skills || []).filter((s) => s && s.pack === id);
+    const effects = (project.effects || []).filter((e) => e && e.pack === id);
+    const unitIds = new Set(units.map((c) => c.id));
+    const skillIds = new Set(skills.map((s) => s.id));
+    const effectIds = new Set(effects.map((e) => e.id));
+    project.characters = (project.characters || []).filter((c) => !unitIds.has(c.id));
+    project.skills = (project.skills || []).filter((s) => !skillIds.has(s.id));
+    project.effects = (project.effects || []).filter((e) => !effectIds.has(e.id));
+    project.packs = (project.packs || []).filter((p) => !p || p.id !== id);
+    // 只清掉「挂载」这种指向本包卡片的本地引用；流程里的 id 引用保留
+    const knownSkills = new Set((project.skills || []).map((s) => s.id));
+    for (const c of project.characters || []) {
+      c.skillIds = (c.skillIds || []).filter((sid) => knownSkills.has(sid));
+    }
+    for (const e of project.effects || []) {
+      e.skillIds = (e.skillIds || []).filter((sid) => knownSkills.has(sid));
+    }
+    if (active.editPack === id) active.editPack = "all";
+    if (active.packId === id) active.packId = null;
+    if (active.tab === "skills" || active.tab === "effects") {
+      canvasState.selectedId = null;
+      active.triggerId = null;
+    }
+    if (!currentCharacter()) active.character = firstCardInPack(project.characters, active.editPack);
+    if (!currentSkill()) active.skill = firstCardInPack(project.skills, active.editPack);
+    if (!currentEffect()) active.effect = firstCardInPack(project.effects, active.editPack);
+    normalizeProject(project);
+    if (!project.characters.length) project.characters.push(createCharacter());
+    const saved = flushSave();
+    if (initialized) {
+      renderAll();
+      renderCardsList();
+    }
+    return {
+      ok: true,
+      id,
+      name: pack.name || id,
+      units: units.length,
+      skills: skills.length,
+      effects: effects.length,
+      saved,
+    };
   },
   /** 修改技能字段（走和表单一样的入口） */
   setSkillField(key, value) {
@@ -3581,6 +3736,24 @@ export async function refreshEditorPacks({ force = false } = {}) {
   }
 }
 
+/**
+ * 消费「从模组管理点编辑」留下的卡包请求：切到那个卡包并选中它的第一张角色卡。
+ * 没有请求 / 卡包不存在时什么都不做。
+ */
+export function applyEditorPackRequest() {
+  const wanted = takeEditorPackRequest();
+  if (!wanted) return false;
+  if (!packsOfProject().some((p) => p && p.id === wanted)) return false;
+  active.editPack = wanted;
+  active.packId = wanted;
+  active.tab = "character";
+  const first = (project.characters || []).find((c) => (c.pack || DEFAULT_PACK) === wanted);
+  if (first) active.character = first.id;
+  switchTab("character");
+  renderAll();
+  return true;
+}
+
 export async function initEditor() {
   normalizeProject(project);
   if (!project.characters.length) project.characters.push(createCharacter());
@@ -3623,6 +3796,8 @@ export async function initEditor() {
   const res = await hydrateFromPacks({ force: freshProject });
   if (res.ok) {
     renderAll();
+    // 从模组管理点「编辑」进来的：直接切到那个卡包（没有就保持原样）
+    applyEditorPackRequest();
     if (res.changed) markDirty();
   }
 }
@@ -3745,12 +3920,17 @@ function unitCardToCharacter(card) {
     critRate: card.critRate,
     critDamage: card.critDamage,
     speed: card.speed,
-    actionsPerTurn: card.actionsPerTurn === undefined ? 1 : Math.max(1, Math.floor(Number(card.actionsPerTurn) || 1)),
+    actionsPerTurn: Number.isFinite(Number(card.actionsPerTurn))
+      ? Math.max(0, Math.min(99, Math.floor(Number(card.actionsPerTurn))))
+      : 1,
     label: card.label || "",
     description: card.description || "",
     occupiesSlot: card.occupiesSlot,
     countsAsUnit: card.countsAsUnit,
-    invincible: card.invincible,
+    unselectable: normalizeUnselectable(card.unselectable),
+    immuneNegative: Boolean(card.immuneNegative),
+    immuneControl: Boolean(card.immuneControl),
+    invincible: normalizeInvincible(card.invincible),
     // 旧卡包没有这个字段：undefined 时保持 createCharacter() 的默认（true）
     obtainable: card.obtainable === undefined ? ch.obtainable : Boolean(card.obtainable),
     image: card.image === null ? null : card.image || "",
@@ -4112,7 +4292,11 @@ function setupForms() {
   bind("f-crit", (el) => (ch().critRate = Number(el.value) || 0));
   bind("f-critdmg", (el) => (ch().critDamage = Number(el.value) || 0));
   bind("f-speed", (el) => (ch().speed = Number(el.value) || 0));
-  bind("f-actions", (el) => (ch().actionsPerTurn = Math.max(1, Math.floor(Number(el.value) || 1))));
+  bind("f-actions", (el) => {
+    const raw = String(el.value ?? "").trim();
+    const n = raw === "" ? NaN : Number(raw);
+    ch().actionsPerTurn = Number.isFinite(n) ? Math.max(0, Math.min(99, Math.floor(n))) : 1;
+  });
   bind("f-label", (el) => (ch().label = el.value));
   bind("f-intro", (el) => (ch().description = el.value));
   bind("f-image", (el) => {
@@ -4126,8 +4310,11 @@ function setupForms() {
   }
   bind("f-occupy", (el) => (ch().occupiesSlot = el.checked));
   bind("f-count", (el) => (ch().countsAsUnit = el.checked));
-  bind("f-invincible", (el) => (ch().invincible = el.checked));
+  bind("f-unselectable", (el) => (ch().unselectable = normalizeUnselectable(el.value)));
   bind("f-obtainable", (el) => (ch().obtainable = el.checked));
+  bind("f-immune-neg", (el) => (ch().immuneNegative = el.checked));
+  bind("f-immune-control", (el) => (ch().immuneControl = el.checked));
+  bind("f-invincible", (el) => (ch().invincible = normalizeInvincible(el.value)));
   $("#f-pack")?.addEventListener("change", (e) => {
     const card = currentCharacter();
     if (!card) return;
@@ -4199,9 +4386,11 @@ function setupForms() {
     active.character = project.characters[Number(e.target.value)] || null;
     renderAll();
   });
-  $("#ed-edit-pack")?.addEventListener("change", (e) => {
+  $("#ed-edit-pack")?.addEventListener("change", async (e) => {
     active.editPack = e.target.value || PACK_ALL;
     if (active.editPack !== PACK_ALL) active.packId = active.editPack;
+    // 重选编辑中卡包时也实时同步一次卡包列表：新导入 / 删除的模组立刻出现 / 消失
+    await refreshEditorPacks();
     // 三个标签的当前卡都切到同一个包；没有卡的标签显示为空
     ensureAllInPack();
     renderAll();

@@ -12,7 +12,7 @@
  *
  * 只做估算，不真的执行技能，不改战斗状态。
  */
-import { calculateDamage, normalizeEffects, skillNeedsPlayerTarget } from "../engine/index.js";
+import { calculateDamage, normalizeEffects, skillNeedsPlayerTarget, canSelectUnit } from "../engine/index.js";
 
 const EXEC_PORTS = new Set(["next", "body", "end", "true", "false"]);
 const EFFECT_NODES = new Set([
@@ -25,6 +25,8 @@ const EFFECT_NODES = new Set([
   "setHp",
   "skipTurn",
   "forceExit",
+  "refuseExit",
+  "transferAttack",
   "immuneDamage",
   "extraAction",
 ]);
@@ -38,7 +40,8 @@ export function chooseAISkill(battle, active, registry = null) {
   if (!battle || !active) return null;
   const pb = battle.publicBattle();
   const units = pb.units.filter((u) => u.state === "alive");
-  const enemies = units.filter((u) => u.side !== active.side);
+  // 按 AI 当前单位的阵营检查选中限制（不可被敌方 / 我方选中 / 不可选中）
+  const enemies = units.filter((u) => u.side !== active.side && canSelectUnit(u, active.side));
   if (!enemies.length) return null;
   const skills = battle
     .allSkillsOf(active)
@@ -193,12 +196,13 @@ function profileFlowSkill(battle, active, skill, units, registry) {
   const graph = buildGraph(skill.flow);
   const chooseNodes = [...graph.nodes.values()].filter((n) => n.type === "chooseUnit");
   const needsTarget = skillNeedsPlayerTarget(skill) || chooseNodes.length > 0;
-  const multi = chooseNodes.some((n) => n.options && n.options.multiple !== false);
+  const pickMax = (node) => Math.max(1, Math.floor(Number(node && node.options && node.options.count) || 1));
+  const multi = chooseNodes.some((n) => pickMax(n) > 1);
   const result = emptyProfile(needsTarget, multi);
   let bestControl = null;
   let bestDamage = null;
   let bestEffect = null;
-  const candidates = needsTarget && !multi ? units : [null];
+  const candidates = needsTarget && !multi ? units.filter((u) => canSelectUnit(u, active.side)) : [null];
 
   for (const candidate of candidates) {
     const scan = scanFlow(battle, active, graph, candidate, units);
@@ -356,7 +360,12 @@ function effectMetrics(
         }
       }
     } else if (node.type === "summon" || node.type === "summonChild") {
-      effect += 2 * mult;
+      // 召唤物按卡面强度估分：血量 / 攻击越高越值得，避免「召唤大招」被当成 0 收益
+      const unitId = String(node.options?.unitId || "").trim();
+      const card = unitId && registry ? registry.getUnit(unitId) : null;
+      const cardHp = Number(card?.baseHp) || 0;
+      const cardAtk = Number(card?.baseAtk) || 0;
+      effect += (2 + cardHp / 150 + cardAtk / 100) * mult;
     } else if (node.type === "extraAction") {
       effect += 2 * mult;
     } else if (node.type === "giveSkill") {
@@ -366,6 +375,8 @@ function effectMetrics(
     } else if (
       node.type === "removeEffect" ||
       node.type === "forceExit" ||
+      node.type === "refuseExit" ||
+      node.type === "transferAttack" ||
       node.type === "skipTurn" ||
       node.type === "immuneDamage"
     ) {
@@ -622,6 +633,10 @@ function evalEffectNumber(battle, graph, ctx, nodeId, depth) {
       }
       return unitStatValue(battle, unit, node.options?.field);
     }
+    case "setCount": {
+      const sid = source("set");
+      return sid ? resolveEffectTargets(graph, ctx, sid, depth + 1).length : 0;
+    }
     case "readVariable":
       return Number(ctx.vars.get(String(node.options?.name || ""))) || 0;
     default:
@@ -645,12 +660,12 @@ function resolveEffectTargets(graph, ctx, nodeId, depth) {
   if (!node) return [];
   const source = (port) => graph.inSource.get(`${node.id}.${port}`);
   const units = ctx.units || [];
-  const sideUnits = (side) => units.filter((u) => u.side === side);
+  const sideUnits = (side) => units.filter((u) => u.side === side && canSelectUnit(u, ctx.caster.side));
   switch (node.type) {
     case "targetSide":
       return sideUnits(node.options?.side === "ally" ? ctx.caster.side : other(ctx.caster.side));
     case "effectSourceSide": {
-      const includeUncounted = Boolean(node.options?.includeUncounted);
+      const includeUncounted = node.options?.includeUncounted !== false;
       return units.filter(
         (u) => u.side === ctx.caster.side && (includeUncounted || u.countsAsUnit)
       );
@@ -660,6 +675,9 @@ function resolveEffectTargets(graph, ctx, nodeId, depth) {
     case "selfUnit":
     case "triggerUnit":
       return [ctx.holder];
+    // 估算用：把「操作中的单位」当成当前正在结算的那个目标
+    case "actingUnit":
+      return ctx.contextUnit ? [ctx.contextUnit] : [ctx.holder];
     case "contextUnit":
       return ctx.contextUnit ? [ctx.contextUnit] : [];
     case "currentTarget":
@@ -667,8 +685,9 @@ function resolveEffectTargets(graph, ctx, nodeId, depth) {
     case "chooseUnit": {
       const range = resolveEffectTargets(graph, ctx, source("targets"), depth + 1);
       if (!range.length) return [];
-      if (node.options?.multiple === false) return [range[0]];
-      return range;
+      const max = Math.max(1, Math.floor(Number(node.options?.count) || 1));
+      if (max === 1) return [range[0]];
+      return range.slice(0, max);
     }
     case "setOp": {
       const a = resolveEffectTargets(graph, ctx, source("a"), depth + 1);
@@ -901,7 +920,7 @@ function resolveTargetsInner(graph, active, nodeId, candidate, units, depth) {
   const node = graph.nodes.get(nodeId);
   if (!node) return [];
   const source = (port) => graph.inSource.get(`${node.id}.${port}`);
-  const sideUnits = (side) => units.filter((u) => u.side === side);
+  const sideUnits = (side) => units.filter((u) => u.side === side && canSelectUnit(u, active.side));
   switch (node.type) {
     case "targetSide":
       return sideUnits(node.options?.side === "ally" ? active.side : other(active.side));
@@ -910,7 +929,7 @@ function resolveTargetsInner(graph, active, nodeId, candidate, units, depth) {
       const raw = sourceId ? resolveTargetsInner(graph, active, sourceId, candidate, units, depth + 1) : [];
       const ref = raw[0] || candidate || active;
       const faction = ref.faction || ref.side;
-      const includeUncounted = Boolean(node.options?.includeUncounted);
+      const includeUncounted = node.options?.includeUncounted !== false;
       return units.filter(
         (u) => (u.faction || u.side) === faction && (includeUncounted || u.countsAsUnit)
       );
@@ -918,11 +937,19 @@ function resolveTargetsInner(graph, active, nodeId, candidate, units, depth) {
     case "chooseUnit": {
       const range = resolveTargetsInner(graph, active, source("targets"), candidate, units, depth + 1);
       if (!range.length) return [];
-      if (node.options?.multiple === false) {
+      const max = Math.max(1, Math.floor(Number(node.options?.count) || 1));
+      if (max === 1) {
         if (!candidate) return [range[0]];
         return range.some((u) => u.uid === candidate.uid) ? [candidate] : [];
       }
-      return range;
+      // 多选：候选排在最前，剩下的按顺序补满（估算用）
+      const out = [];
+      if (candidate && range.some((u) => u.uid === candidate.uid)) out.push(candidate);
+      for (const u of range) {
+        if (out.length >= max) break;
+        if (!out.some((x) => x.uid === u.uid)) out.push(u);
+      }
+      return out;
     }
     case "selfUnit":
       return [active];
@@ -930,6 +957,8 @@ function resolveTargetsInner(graph, active, nodeId, candidate, units, depth) {
       return candidate ? [candidate] : sideUnits(other(active.side)).slice(0, 1);
     case "contextUnit":
       return candidate ? [candidate] : [];
+    case "actingUnit":
+      return candidate ? [candidate] : [active];
     case "triggerUnit":
       return [active];
     case "setOp": {
@@ -1008,6 +1037,10 @@ function evalNumber(battle, graph, active, nodeId, scopeUnit, units, depth = 0, 
     }
     case "selfData":
       return unitStatValue(battle, active, node.options?.field);
+    case "setCount": {
+      const sid = source("set");
+      return sid ? resolveTargets(graph, active, sid, scopeUnit, units).length : 0;
+    }
     case "unitData": {
       let u = scopeUnit || active;
       const targetSource = source("unit");

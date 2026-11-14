@@ -266,6 +266,8 @@ async function openEditor() {
   } else {
     // 模组可能刚被启用 / 停用：重新汇总一次卡包，但不重复绑定表单与画布
     await editorModule?.refreshEditorPacks?.();
+    // 从模组管理点「编辑」进来：切到指定卡包
+    editorModule?.applyEditorPackRequest?.();
   }
 }
 
@@ -385,12 +387,24 @@ function closeTraining() {
 }
 
 window.addEventListener("hashchange", () => {
-  if (location.hash !== "#editor") closeEditor();
-  if (location.hash !== "#library") closeLibrary();
-  if (location.hash !== "#mods") closeModManager();
-  if (location.hash !== "#settings") closeSettings();
-  if (location.hash !== "#training") closeTraining();
-  if (location.hash !== "#play") closeLocal();
+  // 页面已经打开过的直接忽略（菜单点击会先 open 再改 hash，不会重复打开）
+  const hidden = (sel) => {
+    const el = document.querySelector(sel);
+    return !el || el.hidden;
+  };
+  const hash = location.hash;
+  if (hash !== "#editor") closeEditor();
+  else if (hidden("#editor-page")) openEditor();
+  if (hash !== "#library") closeLibrary();
+  else if (hidden("#library-page")) openLibrary();
+  if (hash !== "#mods") closeModManager();
+  else if (hidden("#mod-page")) openModManager();
+  if (hash !== "#settings") closeSettings();
+  else if (hidden("#settings-page")) openSettings();
+  if (hash !== "#training") closeTraining();
+  else if (hidden("#training-page")) openTraining();
+  if (hash !== "#play") closeLocal();
+  else if (hidden("#play-page")) openLocal();
 });
 
 boot().catch((err) => {
