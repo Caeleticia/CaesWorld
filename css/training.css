@@ -984,8 +984,7 @@
   pointer-events: none;
 }
 
-/* 行动相关高亮 */
-.tbt-unit.is-acted { opacity: 0.52; filter: grayscale(0.55); }
+/* 行动相关高亮：行动过的单位不再整体变灰，只保留右上角的勾 */
 .tbt-unit.is-acted .tbt-card::after {
   content: "✓";
   position: absolute;
@@ -1101,23 +1100,59 @@
   gap: 3px;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 1px;
   font-size: 9.5px;
   line-height: 1.32;
   color: var(--ink-2);
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
 }
 .tbt-log-line {
+  flex: 0 0 auto;
   padding: 2px 5px;
   border-left: 2px solid var(--line-strong);
   background: rgba(247, 255, 255, 0.75);
   border-radius: 0 5px 5px 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .tbt-log-line.is-red { border-color: rgba(255, 107, 139, 0.8); }
 .tbt-log-line.is-blue { border-color: rgba(58, 165, 240, 0.8); }
 .tbt-log-line.is-sys { border-color: var(--accent-2); color: var(--ink); }
+.tbt-log-line.is-trigger {
+  border-color: #d9a400;
+  background: rgba(255, 249, 224, 0.88);
+  color: var(--ink);
+}
+.tbt-log-jump {
+  position: sticky;
+  bottom: 2px;
+  align-self: flex-end;
+  z-index: 1;
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--brand-deep);
+  border-radius: 999px;
+  background: var(--brand-strong);
+  box-shadow: 0 3px 8px rgba(23, 57, 60, 0.18);
+  color: var(--brand-ink);
+  font-family: var(--font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.3;
+  cursor: pointer;
+}
+.tbt-log-jump:hover { filter: brightness(1.04); }
+.tbt-log::-webkit-scrollbar,
+.tbt-log-view-body::-webkit-scrollbar { width: 4px; }
+.tbt-log::-webkit-scrollbar-thumb,
+.tbt-log-view-body::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--line-strong);
+}
 
 /* 竖屏：中间变成窄横条 */
 .tw-page[data-orient="portrait"] .tbt-center {
@@ -1125,6 +1160,7 @@
   align-items: center;
   gap: 6px;
   padding: 3px 6px;
+  max-height: 76px;
 }
 .tw-page[data-orient="portrait"] .tbt-turn {
   flex: none;
@@ -1134,9 +1170,8 @@
   padding: 2px 8px;
 }
 .tw-page[data-orient="portrait"] .tbt-turn b { font-size: 13px; }
-.tw-page[data-orient="portrait"] .tbt-log { font-size: 9px; }
-.tw-page[data-orient="portrait"] .tbt-log-line:not(:last-child) { display: none; }
-.tw-page[data-orient="portrait"] .tbt-log-line { flex: 1 1 auto; }
+.tw-page[data-orient="portrait"] .tbt-log { font-size: 9px; max-height: 64px; }
+.tw-page[data-orient="portrait"] .tbt-log-line { flex: 0 0 auto; }
 
 /* ---------------- 行动栏 ---------------- */
 .tbt-actions {
@@ -1553,8 +1588,69 @@
   color: var(--ink-2);
 }
 .tbt-result-stats b { display: block; font-size: 16px; color: var(--ink); }
-.tbt-result-actions { display: flex; gap: 8px; margin-top: 4px; }
-.tbt-result-actions .btn { padding: 8px 18px; }
+.tbt-result-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; width: 100%; margin-top: 4px; }
+.tbt-result-actions .btn { padding: 8px 14px; }
+
+/* 顶栏：战斗记录入口 */
+.tbt-log-open {
+  padding: 3px 10px;
+  font-size: 10px;
+}
+
+/* 战斗记录完整查看器 */
+.tbt-log-modal { z-index: 60; }
+.tbt-log-sheet { width: min(560px, 94%); height: min(78%, 640px); }
+.tbt-log-view-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 9px 11px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.tbt-log-view-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.tbt-log-view-time {
+  flex: none;
+  padding-top: 1px;
+  color: var(--ink-3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.tbt-log-view-text { min-width: 0; overflow-wrap: anywhere; }
+.tbt-log-view-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 8px 11px;
+  border-top: 1px solid var(--line);
+  background: linear-gradient(180deg, #f7ffff, #fff);
+}
+.tbt-log-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+.tbt-log-empty {
+  margin: 22px 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ink-3);
+}
 
 /* 竖屏：弹层更宽、字号略大 */
 .tw-page[data-orient="portrait"] .tbt-sheet { width: 94%; max-height: 84%; }
