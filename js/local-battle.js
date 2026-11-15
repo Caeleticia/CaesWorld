@@ -12,7 +12,6 @@
 import {
   createBattle,
   BATTLE_MODE,
-  ATTRIBUTE_INFO,
   EFFECT_POLARITY_LABEL,
   QUALITY_LABEL,
   effectPolarityOf,
@@ -30,8 +29,10 @@ import {
 } from "../engine/index.js";
 import { createStageScaler, STAGE_DESIGN } from "./training-stage.js";
 import { BattleFX } from "./battle-fx.js";
-import { chooseAISkill, chooseBestDeployCard } from "./battle-ai.js";
+import { chooseAISkill, chooseAIUnit, chooseBestDeployCard } from "./battle-ai.js";
 import { createBattleDetail } from "./battle-detail.js";
+import { createBattleLog } from "./battle-log.js";
+import { createBattleLogFormatter } from "./battle-log-format.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const escapeHtml = (s) =>
@@ -80,7 +81,6 @@ export function openLocalBattle({ registry, config, onExit }) {
     sleepers: new Map(),
     displayHp: new Map(),
     cardEls: new Map(),
-    log: [],
     statusSig: new Map(),
     effectBarSig: new Map(),
     resultShown: false,
@@ -92,6 +92,7 @@ export function openLocalBattle({ registry, config, onExit }) {
     refillBusy: false,
   };
 
+  let logTurn = 0;
   page.hidden = false;
   page.classList.remove("is-opening");
   void page.offsetWidth;
@@ -110,6 +111,7 @@ export function openLocalBattle({ registry, config, onExit }) {
     turnSide: $("#pb-turn-side"),
     turnHint: $("#pb-turn-hint"),
     log: $("#pb-log"),
+    logOpen: $("#pb-log-open"),
     actions: $("#pb-actions"),
     result: $("#pb-result"),
     detail: $("#pb-detail"),
@@ -206,6 +208,18 @@ export function openLocalBattle({ registry, config, onExit }) {
   const initialEvents = s.capture || [];
   s.capture = null;
 
+  /* ---------------- 战斗记录 ---------------- */
+  const battleLog = createBattleLog({
+    mode: "local",
+    modeLabel: "同屏对战",
+    title: `红方 ${config.red.length} 张 · 蓝方 ${config.blue.length} 张`,
+    container: refs.log,
+    stage: s.stage,
+    getTurn: () => s.battle?.publicBattle().turn || 0,
+  });
+  if (refs.logOpen) refs.logOpen.onclick = () => battleLog.openViewer();
+  const logFmt = createBattleLogFormatter({ registry, unitOf, sideName, fmt });
+
   /* ---------------- 角色详情 ---------------- */
   const setHandButtonsVisible = (visible) => {
     if (refs.redHand) refs.redHand.hidden = !visible;
@@ -253,6 +267,7 @@ export function openLocalBattle({ registry, config, onExit }) {
     clearTimers();
     detail?.close();
     s.deathPending.clear();
+    battleLog.destroy();
     s.fx?.destroy();
     s.scaler?.destroy();
     window.removeEventListener("hashchange", onHash);
@@ -960,28 +975,14 @@ export function openLocalBattle({ registry, config, onExit }) {
 
   /* ---------------- 日志 / 特效 ---------------- */
   function addLog(text, kind = "") {
-    s.log.push({ text, kind });
-    if (s.log.length > 30) s.log.shift();
-    if (!refs.log) return;
-    refs.log.innerHTML = s.log
-      .slice(-6)
-      .map((line) => `<div class="tbt-log-line ${line.kind}">${escapeHtml(line.text)}</div>`)
-      .join("");
+    battleLog.add(text, kind, logTurn);
   }
 
-  const attrName = (attr) => ATTRIBUTE_INFO[attr]?.label || "物理";
-
-  function logDamage(ev, attacker, target) {
+  /** 伤害日志：数值、属性、暴击、扣血前后都在 formatter 里 */
+  function logDamage(ev) {
+    const target = unitOf(ev.target);
     if (!target) return;
-    const cls = sideKey(target.side) === "red" ? "is-red" : "is-blue";
-    const amount = ev.finalDamage > 0 ? fmt(ev.finalDamage) : "免疫";
-    const from = attacker ? `[${attacker.side === "ally" ? "红" : "蓝"}]${attacker.name}` : "?";
-    addLog(
-      `${from} → [${target.side === "ally" ? "红" : "蓝"}]${target.name}  ${amount}${ev.crit ? "（暴击）" : ""}${
-        ev.isAdditionalDamage ? " · 附加" : ev.isTrueDamage ? " · 本源" : ` · ${attrName(ev.attribute)}`
-      }`,
-      cls
-    );
+    addLog(logFmt.damage(ev), sideKey(target.side) === "red" ? "is-red" : "is-blue");
   }
 
   function impactDamage(ev, hitRect, additional) {
@@ -1000,7 +1001,6 @@ export function openLocalBattle({ registry, config, onExit }) {
   }
 
   async function playDamage(ev) {
-    const attacker = unitOf(ev.attacker);
     const target = unitOf(ev.target);
     if (!target) {
       await sleep(60);
@@ -1018,14 +1018,13 @@ export function openLocalBattle({ registry, config, onExit }) {
     const hitRect = rectOf(ev.target) || tRect;
     impactDamage(ev, hitRect, additional);
     setDisplayHp(ev.target, ev.hpAfter);
-    logDamage(ev, attacker, target);
+    logDamage(ev);
     await sleep(additional ? 220 : ev.finalDamage > 0 ? 150 : 120);
   }
 
   async function playDamageGroup(list) {
     const entries = list.map((ev) => ({
       ev,
-      attacker: unitOf(ev.attacker),
       target: unitOf(ev.target),
       aRect: rectOf(ev.attacker),
       tRect: rectOf(ev.target),
@@ -1047,7 +1046,7 @@ export function openLocalBattle({ registry, config, onExit }) {
       const hitRect = rectOf(ev.target) || e.tRect;
       impactDamage(ev, hitRect, e.additional);
       setDisplayHp(ev.target, ev.hpAfter);
-      logDamage(ev, e.attacker, e.target);
+      logDamage(ev);
       if (e.additional) anyAdditional = true;
       if (ev.finalDamage > 0) anyPositive = true;
     }
@@ -1060,10 +1059,11 @@ export function openLocalBattle({ registry, config, onExit }) {
     const rect = rectOf(ev.unit);
     if (rect) {
       s.fx.aura(rect, { kind: "heal" });
-      s.fx.floatText(rect, `+${fmt(ev.amount)}`, { kind: "heal" });
+      const amount = Number(ev.amount) || 0;
+      s.fx.floatText(rect, amount >= 0 ? `+${fmt(amount)}` : `-${fmt(-amount)}`, { kind: "heal" });
     }
     setDisplayHp(ev.unit, ev.hpAfter);
-    addLog(`${unit.name} 回复 ${fmt(ev.amount)} 生命`, sideKey(unit.side) === "red" ? "is-red" : "is-blue");
+    addLog(logFmt.heal(ev), sideKey(unit.side) === "red" ? "is-red" : "is-blue");
     await sleep(240);
   }
 
@@ -1079,6 +1079,7 @@ export function openLocalBattle({ registry, config, onExit }) {
     const side = ev.side;
     const card = s.registry.getUnit(ev.cardId);
     if (!refs.refillLayer || !card || s.destroyed) return;
+    addLog(`${sideName(side)}补牌「${card.name || card.id}」`, sideKey(side) === "red" ? "is-red" : "is-blue");
     s.refillBusy = true;
     const quality = card.quality || "white";
     const special = quality === "gold" || quality === "rainbow";
@@ -1176,8 +1177,14 @@ export function openLocalBattle({ registry, config, onExit }) {
     for (let i = 0; i < events.length; i += 1) {
       if (playedDamage.has(i)) continue;
       const ev = events[i];
+      const eventTurn = Number(ev.turn);
+      if (Number.isFinite(eventTurn) && eventTurn > 0) logTurn = Math.floor(eventTurn);
       if (s.destroyed) return;
       switch (ev.type) {
+        case "battle:start":
+          addLog("战斗开始", "is-sys");
+          await sleep(80);
+          break;
         case "round:start": {
           addLog(`—— 第 ${ev.turn} 回合 ——`, "is-sys");
           updateHeader();
@@ -1193,9 +1200,16 @@ export function openLocalBattle({ registry, config, onExit }) {
         case "summon": {
           syncUnits();
           const unit = unitOf(ev.unit);
+          const parent = ev.parent ? unitOf(ev.parent) : null;
           const rect = rectOf(ev.unit);
           if (rect) s.fx.aura(rect, { kind: "enter" });
-          if (unit) addLog(`${unit.name} 上场（${sideName(unit.side)}）`, sideKey(unit.side) === "red" ? "is-red" : "is-blue");
+          if (unit) {
+            const causeText = parent ? ` · 来自 ${parent.name}` : ev.cause === "play" ? " · 手牌上场" : "";
+            addLog(
+              `${unit.name} 上场（${sideName(unit.side)}${causeText}）`,
+              sideKey(unit.side) === "red" ? "is-red" : "is-blue"
+            );
+          }
           await sleep(180);
           break;
         }
@@ -1229,6 +1243,7 @@ export function openLocalBattle({ registry, config, onExit }) {
           break;
         }
         case "deploy:done": {
+          addLog(`${sideName(ev.side)}布阵完成`, "is-sys");
           syncUnits();
           await sleep(80);
           break;
@@ -1242,8 +1257,19 @@ export function openLocalBattle({ registry, config, onExit }) {
         }
         case "skill": {
           const caster = unitOf(ev.caster);
-          addLog(`${caster ? caster.name : "?"} 使用「${ev.skillName}」`, caster && sideKey(caster.side) === "red" ? "is-red" : "is-blue");
+          addLog(logFmt.skill(ev), caster && sideKey(caster.side) === "red" ? "is-red" : "is-blue");
           await sleep(150);
+          break;
+        }
+        case "target": {
+          const owner = unitOf(ev.owner);
+          addLog(logFmt.target(ev), owner && sideKey(owner.side) === "red" ? "is-red" : "is-blue");
+          await sleep(40);
+          break;
+        }
+        case "trigger": {
+          addLog(logFmt.trigger(ev), "is-trigger");
+          await sleep(40);
           break;
         }
         case "damage": {
@@ -1263,17 +1289,29 @@ export function openLocalBattle({ registry, config, onExit }) {
           const unit = unitOf(ev.unit);
           const rect = rectOf(ev.unit);
           if (rect) s.fx.aura(rect, { kind: "buff" });
-          if (unit) addLog(`${unit.name} 获得「${ev.buff?.label || "效果"}」`, "is-sys");
+          if (unit) addLog(logFmt.buffAdded(ev), sideKey(unit.side) === "red" ? "is-red" : "is-blue");
           syncUnits();
           await sleep(110);
           break;
         }
+        case "buff:expired":
+        case "buff:removed": {
+          const unit = unitOf(ev.unit);
+          if (unit) {
+            addLog(
+              ev.type === "buff:expired" ? logFmt.buffExpired(ev) : logFmt.buffRemoved(ev),
+              "is-sys"
+            );
+          }
+          syncUnits();
+          await sleep(50);
+          break;
+        }
         case "effect:added": {
           const unit = unitOf(ev.unit);
-          const def = s.registry.getEffect(ev.effect);
           const rect = rectOf(ev.unit);
           if (rect) s.fx.aura(rect, { kind: "buff" });
-          if (unit) addLog(`${unit.name} 获得「${def?.name || ev.effect}」`, "is-sys");
+          if (unit) addLog(logFmt.effectAdded(ev), "is-sys");
           syncUnits();
           // 效果挂载的技能随效果获得 / 消失，行动栏立刻刷新
           renderActions();
@@ -1281,9 +1319,16 @@ export function openLocalBattle({ registry, config, onExit }) {
           break;
         }
         case "effect:removed": {
+          const unit = unitOf(ev.unit);
+          if (unit) addLog(logFmt.effectRemoved(ev), "is-sys");
           syncUnits();
           renderActions();
-          await sleep(60);
+          await sleep(70);
+          break;
+        }
+        case "effect:immune": {
+          addLog(logFmt.effectImmune(ev), "is-sys");
+          await sleep(50);
           break;
         }
         case "death": {
@@ -1296,7 +1341,13 @@ export function openLocalBattle({ registry, config, onExit }) {
             s.statusSig.delete(ev.unit);
             setTimeout(() => wrap.remove(), 340);
           }
-          if (unit) addLog(`${unit.name} 退场`, sideKey(unit.side) === "red" ? "is-red" : "is-blue");
+          if (unit) {
+            const killer = ev.by ? unitOf(ev.by) : null;
+            addLog(
+              `${unit.name} 退场${killer ? `（被 ${killer.name} 击杀）` : ""}`,
+              sideKey(unit.side) === "red" ? "is-red" : "is-blue"
+            );
+          }
           await sleep(260);
           break;
         }
@@ -1308,7 +1359,12 @@ export function openLocalBattle({ registry, config, onExit }) {
             s.cardEls.delete(ev.unit);
             setTimeout(() => wrap.remove(), 340);
           }
-          if (unit) addLog(`${unit.name} 离场`, "is-sys");
+          if (unit) {
+            const causeText =
+              ev.cause === "force" ? " · 强制退场" : ev.cause === "parent-exit" ? " · 随父单位退场" : "";
+            const by = ev.by ? unitOf(ev.by) : null;
+            addLog(`${unit.name} 离场${causeText}${by ? `（来源：${by.name}）` : ""}`, "is-sys");
+          }
           await sleep(180);
           break;
         }
@@ -1320,7 +1376,12 @@ export function openLocalBattle({ registry, config, onExit }) {
         }
         case "exit:refused": {
           const unit = unitOf(ev.unit);
-          if (unit) addLog(`${unit.name} 拒绝退场并回血`, "is-sys");
+          if (unit) {
+            addLog(
+              `${unit.name} 拒绝退场${ev.mode === "to" ? `，保留 ${fmt(ev.value)} 点生命` : "并回满生命"}`,
+              "is-sys"
+            );
+          }
           await sleep(200);
           break;
         }
@@ -1335,19 +1396,22 @@ export function openLocalBattle({ registry, config, onExit }) {
           addLog(`流程提示：${msg}`, "is-sys");
           break;
         }
+        case "action:skip": {
+          const unit = unitOf(ev.activeId);
+          if (unit) addLog(`${unit.name} 本次行动被跳过`, "is-sys");
+          break;
+        }
         case "turn:start":
         case "turn:end":
         case "round:end":
         case "attack":
         case "hp:lost":
         case "immune":
-        case "buff:expired":
-        case "buff:removed":
         case "action:start":
-        case "action:skip":
-        case "battle:start":
           break;
         case "skill:granted": {
+          const unit = unitOf(ev.unit);
+          if (unit) addLog(logFmt.skillGranted(ev), sideKey(unit.side) === "red" ? "is-red" : "is-blue");
           syncUnits();
           renderActions();
           break;
@@ -1356,6 +1420,7 @@ export function openLocalBattle({ registry, config, onExit }) {
           break;
       }
     }
+    logTurn = 0;
   }
 
   /* ---------------- 行动 / 人机 ---------------- */
@@ -1514,12 +1579,8 @@ export function openLocalBattle({ registry, config, onExit }) {
       await aiFillField(side);
       const pbAfter = s.battle.publicBattle();
       if (pbAfter.status !== "running") return;
-      const candidates = pbAfter.units.filter(
-        (u) => u.side === side && u.state === "alive" && (Number(u.actionsLeft) || 0) > 0
-      );
-      if (!candidates.length) return;
-      candidates.sort((a, b) => b.atk - a.atk);
-      const pick = Math.random() < 0.7 ? candidates[0] : candidates[Math.floor(Math.random() * candidates.length)];
+      const pick = chooseAIUnit(s.battle, side, s.registry, 0.7);
+      if (!pick) return;
       const selectEvents = take(() => s.battle.selectUnit(pick.uid));
       await playEvents(selectEvents);
       if (s.destroyed) return;
@@ -1572,6 +1633,14 @@ export function openLocalBattle({ registry, config, onExit }) {
         : pb.endReason === "draw"
           ? "双方同时全灭"
           : "一方场上单位全部退场且没有手牌";
+    battleLog.finish({
+      winner: pb.winner,
+      winnerText: title,
+      reason,
+      turn: pb.turn,
+      aliveRed,
+      aliveBlue,
+    });
     refs.result.innerHTML = `
       <div class="tbt-sheet" role="dialog" aria-modal="true" aria-label="战斗结果">
         <div class="tbt-result-body">
@@ -1583,6 +1652,8 @@ export function openLocalBattle({ registry, config, onExit }) {
             <span>蓝方场上<b>${aliveBlue}</b></span>
           </div>
           <div class="tbt-result-actions">
+            <button class="btn" type="button" data-view-log>查看战报</button>
+            <button class="btn" type="button" data-export-log>导出战报</button>
             <button class="btn" type="button" data-again>再来一局</button>
             <button class="btn primary" type="button" data-back-config>返回配置</button>
           </div>
@@ -1590,6 +1661,15 @@ export function openLocalBattle({ registry, config, onExit }) {
       </div>`;
     refs.result.hidden = false;
     updateHandButtonsVisible();
+    refs.result.querySelector("[data-view-log]")?.addEventListener("click", () => battleLog.openViewer());
+    const exportBtn = refs.result.querySelector("[data-export-log]");
+    exportBtn?.addEventListener("click", () => {
+      const out = battleLog.exportCurrent();
+      exportBtn.textContent = out.empty ? "暂无记录" : out.ok ? "已导出 ✓" : out.copied ? "已复制 ✓" : "导出失败";
+      setTimeout(() => {
+        if (exportBtn.isConnected) exportBtn.textContent = "导出战报";
+      }, 1800);
+    });
     refs.result.querySelector("[data-again]")?.addEventListener("click", restart);
     refs.result.querySelector("[data-back-config]")?.addEventListener("click", closeToConfig);
   }

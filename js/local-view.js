@@ -98,7 +98,7 @@ function defaultConfig() {
     refillEnabled: true,
     refillEvery: 3,
     refillCount: 2,
-    allowSameName: true,
+    allowSameName: false,
     redAI: false,
     blueAI: false,
     banned: [],
@@ -141,7 +141,7 @@ function loadConfig() {
   out.refillEnabled = data.refillEnabled !== false;
   out.refillEvery = clamp(Math.round(Number(data.refillEvery) || 3), 1, 99);
   out.refillCount = clamp(Math.round(Number(data.refillCount) || 2), 0, MAX_REFILL);
-  out.allowSameName = data.allowSameName !== false;
+  out.allowSameName = Boolean(data.allowSameName);
   out.redAI = Boolean(data.redAI);
   out.blueAI = Boolean(data.blueAI);
   out.banned = [...new Set(sanitizeList(data.banned))];

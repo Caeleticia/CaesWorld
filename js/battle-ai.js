@@ -13,6 +13,39 @@
  * 只做估算，不真的执行技能，不改战斗状态。
  */
 import { calculateDamage, normalizeEffects, skillNeedsPlayerTarget, canSelectUnit } from "../engine/index.js";
+import { chooseStrongAISkill, chooseStrongAIUnit, chooseStrongDeployCard } from "./battle-ai-strong.js";
+
+/* ---------------- 人机智商 ---------------- */
+export const AI_LEVELS = Object.freeze(["weak", "strong"]);
+export const AI_LEVEL_LABELS = Object.freeze({ weak: "弱（旧版）", strong: "强（新版）" });
+const AI_LEVEL_KEY = "caeworld:ai:level:v1";
+const isBrowser = typeof window !== "undefined" && typeof document !== "undefined";
+const hasStorage = typeof localStorage !== "undefined";
+function readStoredAILevel() {
+  try {
+    const v = localStorage.getItem(AI_LEVEL_KEY);
+    return AI_LEVELS.includes(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+// 浏览器默认新版强 AI；Node 工具默认旧版，保持既有基准可复现。
+let currentAILevel = readStoredAILevel() || (isBrowser && hasStorage ? "strong" : "weak");
+/** 当前人机智商：weak（旧版）/ strong（新版）。 */
+export function getAILevel() {
+  return currentAILevel;
+}
+/** 设置人机智商；localStorage 不可用时只改内存。 */
+export function setAILevel(level) {
+  if (!AI_LEVELS.includes(level)) return currentAILevel;
+  currentAILevel = level;
+  try {
+    localStorage.setItem(AI_LEVEL_KEY, level);
+  } catch {
+    /* file:// / 隐私模式：只保留内存设置 */
+  }
+  return currentAILevel;
+}
 
 const EXEC_PORTS = new Set(["next", "body", "end", "true", "false"]);
 const EFFECT_NODES = new Set([
@@ -36,7 +69,7 @@ const EFFECT_NODES = new Set([
  * @param {object} active 当前行动单位（内部单位对象）
  * @returns {{index:number, targetUid:string|null, damage:number, effectScore:number}|null}
  */
-export function chooseAISkill(battle, active, registry = null) {
+export function chooseWeakAISkill(battle, active, registry = null) {
   if (!battle || !active) return null;
   const pb = battle.publicBattle();
   const units = pb.units.filter((u) => u.state === "alive");
@@ -52,6 +85,14 @@ export function chooseAISkill(battle, active, registry = null) {
         (!battle.skillStateOf || battle.skillStateOf(active, x.skill).available)
     );
   if (!skills.length) return null;
+
+  // 不共戴天：200% 精神 AoE 会打「除自己以外」的所有单位。
+  // 有队友时使用等于自杀（日志里一次自伤 11,116）；把它当「单挂输出」，
+  // 只有场上没有其他友方单位时才允许出手。
+  if (active.cardId === "study_unit_bgdt") {
+    const allies = units.filter((u) => u.side === active.side && u.uid !== active.uid);
+    if (allies.length > 0) return null;
+  }
 
   // 控制、伤害、效果放到同一把尺子上比较：
   // 1 点控制 ≈ CONTROL_WEIGHT 点伤害，避免「有控制就永远无视击杀」。
@@ -83,6 +124,33 @@ export function chooseAISkill(battle, active, registry = null) {
   }
 
   return best || fallback;
+}
+
+/**
+ * 出招入口：按设置分发到旧版弱 AI 或新版强 AI。
+ * 强 AI 不认识的卡 / 技能会回退到旧版评分。
+ */
+export function chooseAISkill(battle, active, registry = null) {
+  if (getAILevel() === "strong") {
+    return chooseStrongAISkill(battle, active, registry, chooseWeakAISkill);
+  }
+  return chooseWeakAISkill(battle, active, registry);
+}
+
+/**
+ * 选人入口：旧版按攻击力（72% 最高），新版按机制优先级。
+ * @returns {object|null} public unit
+ */
+export function chooseAIUnit(battle, side, registry = null, topChance = 0.72) {
+  if (!battle) return null;
+  if (getAILevel() === "strong") return chooseStrongAIUnit(battle, side, registry);
+  const pb = battle.publicBattle();
+  const candidates = pb.units.filter(
+    (u) => u.side === side && u.state === "alive" && (Number(u.actionsLeft) || 0) > 0
+  );
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.atk - a.atk);
+  return Math.random() < topChance ? candidates[0] : candidates[Math.floor(Math.random() * candidates.length)];
 }
 
 const QUALITY_SCORE = { white: 0, blue: 50, gold: 140, rainbow: 240 };
@@ -123,7 +191,7 @@ const FLOW_ACTION_NODES = new Set([
  * 场上为空时更偏向能站住的血量。
  * @returns {number} 手牌下标；没有可上场牌时返回 -1
  */
-export function chooseBestDeployCard(battle, registry, side) {
+function chooseWeakDeployCard(battle, registry, side) {
   if (!battle || !registry) return -1;
   const pb = battle.publicBattle();
   if (pb.phase === "finished" || pb.status !== "running") return -1;
@@ -131,9 +199,12 @@ export function chooseBestDeployCard(battle, registry, side) {
   if (!battle.canDeploy(side)) return -1;
   const field = pb.units.filter((u) => u.side === side && u.state === "alive");
   if (field.filter((u) => u.countsAsUnit).length >= pb.maxUnits) return -1;
+  // 不共戴天是「单挂输出」：它在场时不再补队友；有队友时也不部署它。
+  const soloOnField = field.some((u) => u.cardId === "study_unit_bgdt");
+  if (soloOnField) return -1;
   const hand = pb.hand?.[side] || [];
   if (!hand.length) return -1;
-  const allowSameName = pb.local?.allowSameName !== false;
+  const allowSameName = pb.allowSameName !== false;
   const fieldNames = new Set(field.map((u) => u.name));
   let best = { index: -1, score: -Infinity };
   for (let i = 0; i < hand.length; i += 1) {
@@ -141,10 +212,19 @@ export function chooseBestDeployCard(battle, registry, side) {
     if (!card) continue;
     const name = card.name || card.id;
     if (!allowSameName && fieldNames.has(name)) continue;
+    if (card.id === "study_unit_bgdt" && field.length > 0) continue;
     const score = deployScore(card, registry, field);
     if (score > best.score) best = { index: i, score };
   }
   return best.index;
+}
+
+/** 上牌入口：按设置分发。 */
+export function chooseBestDeployCard(battle, registry, side) {
+  if (getAILevel() === "strong") {
+    return chooseStrongDeployCard(battle, registry, side, chooseWeakDeployCard);
+  }
+  return chooseWeakDeployCard(battle, registry, side);
 }
 
 function deployScore(card, registry, field) {
@@ -335,7 +415,10 @@ function effectMetrics(
       let validTargets = def && !def.stackable
         ? targets.filter((t) => !(t.effects || []).some((e) => e.id === effectId))
         : targets;
-      if (def?.polarity === "negative") validTargets = validTargets.filter((t) => t.side !== active.side);
+      if (def?.polarity === "negative") {
+        // 免疫负面的单位（小伊卡等）会被 attachEffect 直接拒绝，估算时也跳过
+        validTargets = validTargets.filter((t) => t.side !== active.side && !t.immuneNegative);
+      }
       // 同一次技能里已经会被直接伤害打死的目标，挂效果没有收益
       validTargets = validTargets.filter((t) => remainingHp(t) > 0);
       if (!validTargets.length) continue;

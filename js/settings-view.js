@@ -15,6 +15,7 @@ import {
 } from "./browser-cache.js";
 import { clearModCache, restoreServerMods } from "./mods.js";
 import { notifyDataCleared } from "./data-events.js";
+import { AI_LEVEL_LABELS, getAILevel, setAILevel } from "./battle-ai.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -51,7 +52,7 @@ const ACTIONS = {
   },
   all: {
     title: "清除所有浏览器数据",
-    desc: "删除本站在浏览器里保存的编辑器工程、本地模组、卡组设置、图片与卡包缓存。服务器上的文件不会被动到。此操作不可撤销。",
+    desc: "删除本站在浏览器里保存的编辑器工程、本地模组、人机智商、卡组设置、图片与卡包缓存。服务器上的文件不会被动到。此操作不可撤销。",
     ok: "确认清除",
   },
 };
@@ -71,6 +72,11 @@ export function initSettings() {
       location.hash = "#menu";
     });
     $("#settings-clear")?.addEventListener("click", () => openConfirm("all"));
+    $("#settings-ai-level")?.addEventListener("change", (e) => {
+      const next = setAILevel(e.target.value);
+      syncAILevel();
+      setStatus(`人机智商已切换为「${AI_LEVEL_LABELS[next] || next}」`, "ok");
+    });
     document.querySelectorAll("[data-clear]").forEach((btn) => {
       btn.addEventListener("click", () => openConfirm(btn.dataset.clear));
     });
@@ -95,7 +101,16 @@ export function initSettings() {
   closeConfirm();
   setBusy(false);
   setStatus("");
+  syncAILevel();
   refreshUsage();
+}
+
+function syncAILevel() {
+  const select = $("#settings-ai-level");
+  const level = getAILevel();
+  if (select) select.value = level;
+  const tip = $("#settings-ai-level-tip");
+  if (tip) tip.textContent = `当前：${AI_LEVEL_LABELS[level] || level}`;
 }
 
 function setStatus(text, kind = "") {
