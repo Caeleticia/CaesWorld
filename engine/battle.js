@@ -48,6 +48,10 @@ export const BATTLE_EVENT = Object.freeze({
   ACTION_SKIP: "action:skip",
   ACTION_POINTS: "action:points",
   SKILL: "skill",
+  /** 「选择单位」积木 / 技能自动索敌最终指定的目标 */
+  TARGET: "target",
+  /** 效果 / 被动技能的事件触发真正开始执行 */
+  TRIGGER: "trigger",
   ATTACK: "attack",
   /** 「转移攻击」把这次伤害从原目标改到了另一个单位 */
   ATTACK_TRANSFERRED: "attack:transferred",
@@ -153,7 +157,7 @@ const nextUid = () => `battle:${++seq}`;
  * @param {boolean} [setup.refillEnabled] 是否补牌（默认 true）
  * @param {number} [setup.refillEvery] 补牌间隔回合（默认 3）
  * @param {number} [setup.refillCount] 每次补牌数（默认 2）
- * @param {boolean} [setup.allowSameName] 是否允许同名角色（默认 true）
+ * @param {boolean} [setup.allowSameName] 是否允许同名角色（默认 false；普通部署校验同名，史论转化等召唤不校验）
  */
 export function createBattle(setup) {
   const {
@@ -173,7 +177,7 @@ export function createBattle(setup) {
     refillEnabled = true,
     refillEvery = 3,
     refillCount = 2,
-    allowSameName = true,
+    allowSameName = false,
   } = setup || {};
 
   if (!registry) throw new Error("createBattle 需要 registry");
@@ -265,6 +269,8 @@ export function createBattle(setup) {
     current: { skillUnit: null, curTargets: [], flowOwner: null },
     /** local 模式：手牌（单位卡 id，可重复） */
     hand: localMode ? { ally: [], enemy: [] } : { ally: [], enemy: [] },
+    /** 普通部署是否允许同名（默认 false；召唤/转化不受此限制） */
+    allowSameName: Boolean(allowSameName),
     /** local 模式：初始抽牌 / 补牌设置 */
     local: localMode
       ? {
@@ -602,6 +608,7 @@ export function createBattle(setup) {
       layer.sourceFaction = factionOf(extra.source);
     }
     // 层数计数默认关闭：关闭时永远只有 1 层；开启时按「层数上限」叠加（0 = 无上限）
+    const beforeStacks = layer.stacks;
     const stackable = Boolean(def.stackable);
     const rawCap = Number(def.maxStacks);
     const cap = Number.isFinite(rawCap) ? Math.max(0, Math.floor(rawCap)) : 1;
@@ -619,11 +626,14 @@ export function createBattle(setup) {
       effect: eid,
       stacks: layer.stacks,
       layers: add,
+      gained: Math.max(0, layer.stacks - beforeStacks),
       source: extra.source ? extra.source.uid : null,
       sourceFaction: layer.sourceFaction || null,
     });
-    // 只有「第一次获得该效果」才算一次获得；重复附加只刷新层数
-    if (isNew) emit("unitEnter", [u]);
+    // 注意：附加效果不是「单位入场」。旧实现会在首次附加效果时广播 unitEnter，
+    // 导致「入场时」被动（月茧 / 御驾亲征等）在效果重建时重复触发（月茧刷新）。
+    // 改用独立的 effectAttached 事件；没有监听者的旧卡包不受影响。
+    if (isNew) emit("effectAttached", [u], { cause: "effect", effect: eid });
     emit("dataUpdate", [u]);
     return layer;
   }
@@ -995,9 +1005,10 @@ export function createBattle(setup) {
   }
 
   /* ================= 流程运行环境 ================= */
-  function flowEnv(owner, effect, frame) {
+  function flowEnv(owner, effect, frame, meta = {}) {
     // 正在广播的事件：优先用调用方给的那一帧（runFlow 可能嵌套多层事件）
     const current = frame || (emitStack.length ? emitStack[emitStack.length - 1] : null);
+    const skillId = meta.skillId || (current && current.info && current.info.skillId) || null;
     let triggerUnit = owner;
     if (current && current.targets && current.targets.length) {
       triggerUnit = current.targets.find((t) => t && t.key === owner.key) || current.targets[0];
@@ -1023,6 +1034,39 @@ export function createBattle(setup) {
       broadcast: (id, content) => {
         pendingBroadcasts.push({ id: String(id ?? ""), content: String(content ?? "") });
       },
+      /**
+       * 触发器真正开始执行时通知引擎写一条详细日志。
+       * 「始终」只在 dataUpdate 上触发，属于被动重算，不写进战报，避免刷屏。
+       */
+      onTriggerRun: (scopeUnit, triggerNode) => {
+        if (!effect) return; // 技能主动施放：已有「使用技能」日志
+        const eventType = current ? current.type : null;
+        if (!eventType || eventType === "dataUpdate") return;
+        if (triggerNode && triggerNode.options && triggerNode.options.event === "always") return;
+        log(BATTLE_EVENT.TRIGGER, {
+          unit: owner.uid,
+          effect: effect.id,
+          effectName:
+            effect.name ||
+            (registry.getEffect(effect.id) || {}).name ||
+            (registry.getSkill(effect.id) || {}).name ||
+            effect.id,
+          source: effect.__member
+            ? "member"
+            : effect.passiveSkill === true
+              ? "passive"
+              : effect.passiveSkill === false
+                ? "activeSkill"
+                : "effect",
+          event: eventType,
+          targets: current && current.targets ? current.targets.filter(Boolean).map((t) => t.uid) : [],
+          scopeUnit: scopeUnit ? scopeUnit.uid : null,
+          blockId: triggerNode ? triggerNode.id : null,
+          broadcast: current && current.info ? current.info.broadcast || null : null,
+          cause: current && current.info ? current.info.cause || null : null,
+          skillId,
+        });
+      },
       context: { unit: null },
       interrupted: false,
       rng,
@@ -1035,7 +1079,14 @@ export function createBattle(setup) {
       effectSource: effectSourceOf,
       effectSourceFaction: effectSourceFactionOf,
       currentTarget: () => prevSkillTargets.slice(),
-      pickForPlayer: (cands, opts = {}) => playerChoose(cands, { ...opts, fromSide: opts.fromSide ?? (owner ? owner.side : "ally") }),
+      pickForPlayer: (cands, opts = {}) =>
+        playerChoose(cands, {
+          ...opts,
+          fromSide: opts.fromSide ?? (owner ? owner.side : "ally"),
+          owner,
+          effectId: effect ? effect.id : null,
+          skillId,
+        }),
       /** 开一个新的「攻击动作」批次；同一次攻击积木的多目标命中共用它 */
       newAttackGroup: () => ++attackGroupSeq,
       /** 「额外行动」积木：增加目标本回合剩余可动次数 */
@@ -1180,6 +1231,16 @@ export function createBattle(setup) {
         if (out.length >= need) break;
         if (!out.some((x) => x.key === u.key)) out.push(u);
       }
+    }
+    if (out.length) {
+      log(BATTLE_EVENT.TARGET, {
+        owner: opts.owner ? opts.owner.uid : null,
+        effectId: opts.effectId || null,
+        skillId: opts.skillId || null,
+        targets: out.map((u) => u.uid),
+        max,
+        required,
+      });
     }
     return out;
   }
@@ -1530,7 +1591,7 @@ export function createBattle(setup) {
     }
     // 同屏对战「允许同名角色」时：从手牌上场的卡被击败后回到牌组，之后还能再抽到；
     // 召唤物（fromDeck=false）不回流。
-    if (dying && localMode && state.local && state.local.allowSameName !== false && u.fromDeck) {
+    if (dying && localMode && state.allowSameName !== false && u.fromDeck) {
       const deck = state.decks[u.side];
       if (Array.isArray(deck)) deck.push(u.cardId);
     }
@@ -1742,6 +1803,12 @@ export function createBattle(setup) {
         log(BATTLE_EVENT.FLOW_ERROR, { reason: `牌组里有未知单位卡：${cardId}`, side });
         continue;
       }
+      const card = registry.getUnit(cardId);
+      // 普通部署校验同名；召唤（史论转化等）走 summonUnits，不受这里限制。
+      if (!state.allowSameName && card && livingOf(side).some((u) => u.name === (card.name || card.id))) {
+        log(BATTLE_EVENT.FLOW_ERROR, { reason: `同名角色已在场：${card.name || card.id}`, side });
+        continue;
+      }
       const unit = spawnCard({ unitId: cardId, side, markActed: false, cause: "deploy" });
       if (!unit) {
         deck.unshift(cardId);
@@ -1771,7 +1838,7 @@ export function createBattle(setup) {
         deck.splice(i, 1);
       }
     }
-    const allowSameName = !state.local || state.local.allowSameName !== false;
+    const allowSameName = state.allowSameName !== false;
     /** 不允许同名时：该方场上 / 手牌已有的角色名不能再被抽到 */
     const blockedNames = new Set();
     if (!allowSameName) {
@@ -1845,7 +1912,7 @@ export function createBattle(setup) {
     const cardId = hand[idx];
     const card = registry.getUnit(cardId);
     if (!card) return null;
-    if (!state.local.allowSameName && livingOf(side).some((u) => u.name === (card.name || card.id))) return null;
+    if (!state.allowSameName && livingOf(side).some((u) => u.name === (card.name || card.id))) return null;
     const unit = spawnCard({ unitId: cardId, side, markActed: false, cause: "play" });
     if (!unit) return null;
     hand.splice(idx, 1);
@@ -1994,7 +2061,11 @@ export function createBattle(setup) {
       const expired = A.buffs.filter(buffExpired);
       if (expired.length) {
         A.buffs = A.buffs.filter((b) => !expired.includes(b));
-        log(BATTLE_EVENT.BUFF_EXPIRED, { unit: A.uid, buffs: expired.map((b) => b.uid) });
+        log(BATTLE_EVENT.BUFF_EXPIRED, {
+          unit: A.uid,
+          buffs: expired.map((b) => b.uid),
+          buffList: expired.map((b) => ({ uid: b.uid, label: b.label, duration: b.duration })),
+        });
       }
     }
     log(BATTLE_EVENT.TURN_END, { activeId: A ? A.uid : null, actionSeq: state.actionSeq });
@@ -2210,7 +2281,11 @@ export function createBattle(setup) {
       const expired = A.buffs.filter(buffExpired);
       if (expired.length) {
         A.buffs = A.buffs.filter((b) => !expired.includes(b));
-        log(BATTLE_EVENT.BUFF_EXPIRED, { unit: A.uid, buffs: expired.map((b) => b.uid) });
+        log(BATTLE_EVENT.BUFF_EXPIRED, {
+          unit: A.uid,
+          buffs: expired.map((b) => b.uid),
+          buffList: expired.map((b) => ({ uid: b.uid, label: b.label, duration: b.duration })),
+        });
       }
     }
     if (A) A.actionsLeft = 0;
@@ -2397,10 +2472,18 @@ export function createBattle(setup) {
         // 没有指定目标时，技能默认把最近的敌方单位作为「当前目标」（与数据式技能一致）
         if (!prevSkillTargets.length) {
           const autoTarget = selectTarget(state.units, otherSide(A.side), { fromSide: A.side });
-          if (autoTarget) prevSkillTargets = [autoTarget];
+          if (autoTarget) {
+            prevSkillTargets = [autoTarget];
+            log(BATTLE_EVENT.TARGET, {
+              owner: A.uid,
+              skillId: skill.id,
+              targets: [autoTarget.uid],
+              auto: true,
+            });
+          }
         }
         for (const trigger of startTriggers) {
-          const env = flowEnv(A, null);
+          const env = flowEnv(A, null, null, { skillId: skill.id });
           // 每个触发可以单独选「自己」指谁
           if (trigger.options && trigger.options.unitScope === "target") {
             const cur = prevSkillTargets[0];
@@ -2490,7 +2573,14 @@ export function createBattle(setup) {
     const list = Array.isArray(tags) ? tags : [tags];
     const removed = u.buffs.filter((b) => list.some((t) => hasTag(b, t)));
     u.buffs = u.buffs.filter((b) => !removed.includes(b));
-    if (removed.length) log(BATTLE_EVENT.BUFF_REMOVED, { unit: u.uid, tags: list, removed: removed.map((b) => b.uid) });
+    if (removed.length) {
+      log(BATTLE_EVENT.BUFF_REMOVED, {
+        unit: u.uid,
+        tags: list,
+        removed: removed.map((b) => b.uid),
+        removedBuffs: removed.map((b) => ({ uid: b.uid, label: b.label, duration: b.duration })),
+      });
+    }
     return removed.length;
   }
 
@@ -2563,6 +2653,7 @@ export function createBattle(setup) {
       maxUnits: state.maxUnits,
       acted: state.units.filter((u) => isAlive(u) && (Number(u.actionsLeft) || 0) <= 0).map((u) => u.uid),
       invincibleSides: state.invincibleSides.slice(),
+      allowSameName: state.allowSameName,
       decks: { ally: (state.decks.ally || []).length, enemy: (state.decks.enemy || []).length },
       ...(localMode
         ? {

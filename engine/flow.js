@@ -684,6 +684,7 @@ export function runFlow(prepared, env, opts = {}) {
             };
             if (hasCondition && !condOf(node, "condition", scope)) continue;
             ran += 1;
+            if (env.onTriggerRun) env.onTriggerRun(u, node, scope);
             go(nextId("next"), scope);
           }
           if (!ran) triggerBlocked = true;
@@ -707,6 +708,7 @@ export function runFlow(prepared, env, opts = {}) {
           return;
         }
         independentRuns += 1;
+        if (env.onTriggerRun) env.onTriggerRun(selfOf(local) || null, node, local);
         go(nextId("next"));
         return;
       }
