@@ -395,10 +395,32 @@
     </header>
     <section class="subpage-body">
       <p class="mod-hint">
-        这里只清除当前站点在浏览器里保存的数据；服务器上的 <code>mods/</code>、<code>data/</code>、<code>assets/</code> 文件不会被删除。
+        这里可以调整人机智商；下方的本地数据清除只会动当前站点在浏览器里保存的内容，
+        服务器上的 <code>mods/</code>、<code>data/</code>、<code>assets/</code> 文件不会被删除。
         可以按类别单独清除，也可以一次清空全部。
       </p>
       <div class="settings-list">
+        <article class="settings-card">
+          <h2>对战</h2>
+          <p>人机智商只影响训练场 / 同屏对战里的 AI，不会修改卡牌数值。旧版弱 AI 会保留，随时可以切回。</p>
+
+          <div class="settings-rows">
+            <div class="settings-row">
+              <div class="settings-row-main">
+                <b>人机智商</b>
+                <p>强（新版）会按角色机制选人、集火高价值目标、让历史学者承诺转化，并避免不共戴天误伤队友；弱（旧版）是原来的行为。</p>
+                <span class="settings-usage" id="settings-ai-level-tip">当前：强（新版）</span>
+              </div>
+              <label class="settings-select">
+                <select id="settings-ai-level" aria-label="人机智商">
+                  <option value="strong">强（新版）</option>
+                  <option value="weak">弱（旧版）</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        </article>
+
         <article class="settings-card">
           <h2>浏览器本地数据</h2>
           <p>卡面等资源在第一次用到之后才会缓存，不会在首次打开时全部下载。</p>
@@ -463,7 +485,7 @@
       <div class="ed-modal-box" role="dialog" aria-modal="true" aria-labelledby="settings-confirm-title">
         <h2 id="settings-confirm-title">清除所有浏览器数据</h2>
         <p class="muted" id="settings-confirm-desc">
-          将删除本站在浏览器里保存的编辑器工程、本地模组、训练场 / 同屏设置和缓存；服务器上的文件不会被动到。此操作不可撤销。
+          将删除本站在浏览器里保存的编辑器工程、本地模组、人机智商、训练场 / 同屏设置和缓存；服务器上的文件不会被动到。此操作不可撤销。
         </p>
         <div class="ed-modal-actions">
           <button class="btn small" id="settings-confirm-cancel" type="button">取消</button>
@@ -519,6 +541,7 @@
       <header class="tw-topbar tbt-topbar">
         <button class="btn small" id="battle-back" type="button">← 返回配置</button>
         <div class="tw-title">训练对战 <span class="tw-sub">第 <b id="tb-round">1</b> 回合</span></div>
+        <button class="btn small tbt-log-open" id="tb-log-open" type="button" title="查看 / 导出本场战斗记录">战报</button>
         <div class="tbt-status" id="tb-status" data-side="red">准备中</div>
       </header>
 
@@ -661,6 +684,7 @@
       <header class="tw-topbar tbt-topbar">
         <button class="btn small" id="pb-back" type="button">← 返回配置</button>
         <div class="tw-title">同屏对战 <span class="tw-sub">第 <b id="pb-round">1</b> 回合</span></div>
+        <button class="btn small tbt-log-open" id="pb-log-open" type="button" title="查看 / 导出本场战斗记录">战报</button>
         <div class="tbt-status" id="pb-status" data-side="red">准备中</div>
       </header>
 
