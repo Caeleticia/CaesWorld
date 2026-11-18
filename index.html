@@ -143,8 +143,8 @@
             </label>
           </div>
           <div class="form-row">
-            <label class="form-check"><input id="f-occupy" type="checkbox" /> 占位</label>
-            <label class="form-check" title="不勾选 = 不计入阵营单位数量上限；仍可被选中、仍参与胜负判定"><input id="f-count" type="checkbox" /> 计入数量上限</label>
+            <label class="form-check" title="勾选 = 占用一个格子，并计入「场上单位数量上限」；不勾选 = 可叠格、不占数量名额"><input id="f-occupy" type="checkbox" /> 占位（计入数量上限）</label>
+            <label class="form-check" title="勾选 = 计入「剩余单位判定」（胜负按计数单位结算）；不勾选 = 在场也不算剩余单位，仍可被选中、仍参与索敌"><input id="f-count" type="checkbox" /> 计入剩余单位</label>
             <label class="form-check" title="默认勾选。目前只是标记，还没有玩法用到"><input id="f-obtainable" type="checkbox" /> 可获取</label>
             <label class="form-check" title="附加负面效果时直接拒绝（不触发该效果的入场）"><input id="f-immune-neg" type="checkbox" /> 免疫负面效果</label>
             <label class="form-check" title="附加带「控制类」标记的效果时直接拒绝"><input id="f-immune-control" type="checkbox" /> 免疫控制效果</label>
@@ -517,8 +517,8 @@
       <!-- 下方设置区（左）+ 开始对战（右） -->
       <footer class="tcfg-settings">
         <div class="tset-grid">
-          <label class="tset"><span>场上最多单位</span>
-            <input id="set-max-units" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" aria-label="场上最多单位数" />
+          <label class="tset" title="只统计占位单位；不占位单位不占名额"><span>场上最多单位</span>
+            <input id="set-max-units" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" aria-label="占位单位上限" />
           </label>
           <label class="tset"><input id="set-red-inv" type="checkbox" aria-label="红方无敌" /><span>红方无敌</span></label>
           <label class="tset"><input id="set-blue-inv" type="checkbox" aria-label="蓝方无敌" /><span>蓝方无敌</span></label>
@@ -643,8 +643,8 @@
           <header class="tcfg-head"><h2>设置</h2></header>
           <div class="pcfg-settings-body">
             <div class="pcfg-set-group">
-              <label class="tset"><span>场上最多单位</span>
-                <input id="pcfg-max" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" />
+              <label class="tset" title="只统计占位单位；不占位单位不占名额"><span>场上最多单位</span>
+                <input id="pcfg-max" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" aria-label="占位单位上限" />
               </label>
             </div>
             <div class="pcfg-set-group">
