@@ -625,7 +625,28 @@ path.link[data-type="any"] { stroke: #7d9fa1; }
 path.link[data-flow="1"] { stroke: #8aa1a4; }
 g.link-group:hover path.link[data-flow="1"],
 g.link-group:hover path.link[data-type] { stroke: #ff6b8b; stroke-width: 4; }
+/* 框选 / 多选：选中的连线加粗变红 */
+g.link-group.is-selected path.link { stroke: #ff6b8b; stroke-width: 4; }
 path.drag-line { stroke: #ff6b8b; stroke-width: 2.5; stroke-dasharray: 6 5; fill: none; pointer-events: none; }
+
+/* 框选矩形 */
+.selection-box {
+  position: absolute;
+  border: 1.5px dashed var(--accent-blue);
+  background: rgba(58, 165, 240, 0.14);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 4;
+}
+.selection-box[hidden] { display: none; }
+.blocks-canvas.is-select-mode { cursor: crosshair; }
+.blocks-canvas.is-select-mode .block { cursor: grab; }
+.blocks-canvas.is-select-mode .block:active { cursor: grabbing; }
+#btn-marquee.is-active {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #fff;
+}
 
 .erase-cursor {
   display: none;
@@ -846,6 +867,55 @@ path.drag-line { stroke: #ff6b8b; stroke-width: 2.5; stroke-dasharray: 6 5; fill
   line-height: 1.35;
 }
 .opt-hint { font-size: 10px; color: var(--ink-3); }
+/* 高级选项默认折叠：攻击积木的跳字颜色等不常用设置放这里 */
+.opt-advanced {
+  border-top: 1px dashed var(--line);
+  padding-top: 4px;
+  margin-top: 2px;
+}
+.opt-advanced > summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--ink-3);
+  padding: 1px 0;
+  user-select: none;
+}
+.opt-advanced[open] > summary { color: var(--ink-2); margin-bottom: 4px; }
+.opt-advanced .opt { margin-top: 4px; }
+.opt.opt-color input[type="color"] {
+  width: 100%;
+  height: 26px;
+  padding: 1px;
+  cursor: pointer;
+}
+.opt.opt-gradient .opt-grad-preview {
+  display: block;
+  height: 10px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  grid-column: 1 / -1;
+}
+.opt.opt-image .opt-image-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+}
+.opt.opt-image input[type="file"] {
+  width: auto;
+  max-width: 100%;
+  font-size: 10px;
+  padding: 2px;
+}
+.opt.opt-image .opt-image-preview {
+  width: 54px;
+  height: 34px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.6);
+}
 
 .block-sides { display: flex; flex-direction: column; gap: 4px; padding: 0 0 8px; }
 .side-row {
