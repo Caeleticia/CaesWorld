@@ -754,9 +754,11 @@ export function openLocalBattle({ registry, config, onExit }) {
           : "";
         const pickText = !info.needsTarget
           ? "直接施放"
-          : info.max > 1
-            ? `选择至多 ${info.max} 个目标`
-            : "手动选择目标";
+          : info.dynamicCount
+            ? "选择目标（数量随流程）"
+            : info.max > 1
+              ? `选择至多 ${info.max} 个目标`
+              : "手动选择目标";
         const label = st.available ? `${pickText}${useText}` : st.reason;
         return `<button class="tbt-skill ${s.pending?.index === i ? "is-targeting" : ""}" type="button" data-skill="${i}" ${st.available ? "" : "disabled"}>
                <div class="tbt-skill-main">${
@@ -786,17 +788,18 @@ export function openLocalBattle({ registry, config, onExit }) {
           .units.filter((u) => u.state === "alive" && (s.pending.candidates || []).includes(u.uid)).length
       : 0;
     const needCount = Math.min(pickMax, candidateCount);
+    const pickLimit = Math.max(1, Math.min(pickMax, candidateCount || 1));
     const canConfirm = pickedUids.length > 0 && (!pickRequired || pickedUids.length >= needCount);
     const confirmButton =
       s.pending && pickMax > 1
         ? `<button class="tbt-skill is-confirm" type="button" data-confirm ${canConfirm ? "" : "disabled"}>
-             <b>释放技能</b><span>已选 ${pickedUids.length} / ${pickMax}${pickRequired ? "（必须选满）" : "（可以少选）"}</span>
+             <b>释放技能</b><span>已选 ${pickedUids.length} / ${pickLimit}${pickRequired ? "（必须选满）" : "（可以少选）"}</span>
            </button>`
         : "";
     const targetTip = s.pending
       ? `<div class="tbt-act-hint"><b>选择目标</b> · ${
           candidateCount ? "点击高亮的候选单位" : "这次没有可选目标，直接释放"
-        }${pickMax > 1 ? `（最多 ${pickMax} 个${pickRequired ? "，必须选满" : "，可以少选"}）` : ""}</div>`
+        }${pickLimit > 1 ? `（最多 ${pickLimit} 个${pickRequired ? "，必须选满" : "，可以少选"}）` : ""}</div>`
       : `<div class="tbt-act-hint">选择一个技能，或结束行动；剩余可动 ${Number(active.actionsLeft) || 0} 次</div>`;
     el.innerHTML = `
       <div class="tbt-act-head">
@@ -994,10 +997,17 @@ export function openLocalBattle({ registry, config, onExit }) {
   function impactDamage(ev, hitRect, additional) {
     if (!hitRect) return;
     const immune = ev.finalDamage <= 0 || ev.targetInvincible || ev.immune;
-    if (additional) s.fx.impact(hitRect, { attribute: ev.attribute });
-    else s.fx.explode(hitRect, { attribute: ev.attribute });
+    const fxStyle = {
+      attribute: ev.attribute,
+      color: ev.color || undefined,
+      texture: ev.texture || "",
+      fixedTexture: Boolean(ev.fixedTexture),
+    };
+    if (additional) s.fx.impact(hitRect, fxStyle);
+    else s.fx.explode(hitRect, fxStyle);
     s.fx.floatText(hitRect, immune ? "免疫" : fmt(ev.finalDamage), {
       attribute: ev.attribute,
+      color: ev.color || undefined,
       crit: Boolean(ev.crit),
       kind: immune ? "mute" : "damage",
       size: additional ? 20 : undefined,
@@ -1016,7 +1026,12 @@ export function openLocalBattle({ registry, config, onExit }) {
     const tRect = rectOf(ev.target);
     const additional = Boolean(ev.isAdditionalDamage);
     if (!additional && aRect && tRect && !s.destroyed) {
-      await s.fx.launch(aRect, tRect, { attribute: ev.attribute });
+      await s.fx.launch(aRect, tRect, {
+        attribute: ev.attribute,
+        color: ev.color || undefined,
+        texture: ev.texture || "",
+        fixedTexture: Boolean(ev.fixedTexture),
+      });
     } else {
       await sleep(additional ? 90 : 160);
     }
@@ -1039,7 +1054,15 @@ export function openLocalBattle({ registry, config, onExit }) {
     const launches = [];
     for (const e of entries) {
       if (!e.target || e.additional || !e.aRect || !e.tRect || s.destroyed) continue;
-      launches.push(s.fx.launch(e.aRect, e.tRect, { attribute: e.ev.attribute, arriveIn: 0.32 }));
+      launches.push(
+        s.fx.launch(e.aRect, e.tRect, {
+          attribute: e.ev.attribute,
+          color: e.ev.color || undefined,
+          texture: e.ev.texture || "",
+          fixedTexture: Boolean(e.ev.fixedTexture),
+          arriveIn: 0.32,
+        })
+      );
     }
     if (launches.length) await Promise.all(launches);
     else await sleep(entries.some((e) => e.additional) ? 90 : 160);
@@ -1769,21 +1792,22 @@ export function openLocalBattle({ registry, config, onExit }) {
       executeSkill(index, null);
       return;
     }
-    // 候选集来自流程里「选择单位」积木接到的目标集，而不是固定「敌方全体」
-    let candidates = [];
+    // 候选集 / 数量上限来自流程里「选择单位」积木的 targets / count 输入，而不是固定「敌方全体」
+    let plan = null;
     try {
-      candidates = s.battle.skillTargetCandidates(active.uid, skill) || [];
+      plan = s.battle.skillTargetPlan(active.uid, skill);
     } catch {
-      candidates = [];
+      plan = null;
     }
+    const candidates = plan?.candidates || [];
     if (!candidates.length) {
       executeSkill(index, null);
       return;
     }
     s.pending = {
       index,
-      max: Math.max(1, info.max),
-      required: Boolean(info.required),
+      max: Math.max(1, Number(plan?.max) || info.max),
+      required: Boolean(plan ? plan.required : info.required),
       picked: [],
       candidates: candidates.map((u) => u.uid),
     };

@@ -49,15 +49,65 @@ function hexToHsl(hex) {
 const hsl = (h, s, l, a = 1) =>
   `hsla(${((h % 360) + 360) % 360}, ${clamp(s, 0, 100)}%, ${clamp(l, 0, 100)}%, ${clamp(a, 0, 1)})`;
 
-/** 属性 / 自定义颜色 → HSL */
+const HEX_RE = /^#[0-9a-f]{6}$/i;
+const hexList = (spec) => (Array.isArray(spec) ? spec.filter((x) => typeof x === "string" && HEX_RE.test(x)) : []);
+
+function hexToRgb(hex) {
+  const h = String(hex || "#9E9E9E").replace("#", "");
+  return {
+    r: parseInt(h.slice(0, 2), 16) || 0,
+    g: parseInt(h.slice(2, 4), 16) || 0,
+    b: parseInt(h.slice(4, 6), 16) || 0,
+  };
+}
+
+/** 多级渐变：按 t（0..1）在颜色停靠点之间做 RGB 插值 */
+function hexAt(stops, t) {
+  const list = stops && stops.length ? stops : ["#9E9E9E"];
+  if (list.length === 1) return list[0];
+  const x = clamp(Number(t) || 0, 0, 1) * (list.length - 1);
+  const i = Math.min(list.length - 2, Math.floor(x));
+  const f = x - i;
+  const a = hexToRgb(list[i]);
+  const b = hexToRgb(list[i + 1]);
+  const c = (k) => Math.round(a[k] + (b[k] - a[k]) * f);
+  const hex = (n) => n.toString(16).padStart(2, "0");
+  return `#${hex(c("r"))}${hex(c("g"))}${hex(c("b"))}`;
+}
+
+/** 属性 / 自定义颜色 / 多级渐变 → HSL（带 stops 时粒子会按 t 取样） */
 function colorOf(spec) {
   if (spec && typeof spec === "object" && Number.isFinite(spec.h)) return spec;
+  const stops = hexList(spec);
+  if (stops.length) {
+    const base = hexToHsl(hexAt(stops, 0.5));
+    return { ...base, stops };
+  }
   if (typeof spec === "string" && spec.startsWith("#")) return hexToHsl(spec);
   const info = ATTRIBUTE_INFO[spec] || ATTRIBUTE_INFO.physical;
   return hexToHsl(info.upper);
 }
 
+/** 粒子 / 爆炸按渐变位置取一个颜色；单色时原样返回 */
+function sampleColor(color, t) {
+  if (color && Array.isArray(color.stops) && color.stops.length > 1) {
+    return hexToHsl(hexAt(color.stops, t));
+  }
+  return color;
+}
+
+/** 跳字用的上下两色（多级渐变时取首尾；绘制时仍按完整 stops 渐变） */
 function attrPair(spec) {
+  const stops = hexList(spec);
+  if (stops.length) {
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    if (stops.length === 1) {
+      const c = hexToHsl(first);
+      return { upper: first, lower: hsl(c.h, c.s, Math.max(10, c.l - 22)), stops };
+    }
+    return { upper: first, lower: last, stops };
+  }
   if (typeof spec === "string" && ATTRIBUTE_INFO[spec]) {
     // ATTRIBUTE_INFO 里是不带 # 的十六进制，canvas 需要 #rrggbb
     return { upper: `#${ATTRIBUTE_INFO[spec].upper}`, lower: `#${ATTRIBUTE_INFO[spec].lower}` };
@@ -66,7 +116,7 @@ function attrPair(spec) {
     const c = hexToHsl(spec);
     return { upper: spec, lower: hsl(c.h, c.s, Math.max(10, c.l - 22)) };
   }
-  return { upper: ATTRIBUTE_INFO.physical.upper, lower: ATTRIBUTE_INFO.physical.lower };
+  return { upper: `#${ATTRIBUTE_INFO.physical.upper}`, lower: `#${ATTRIBUTE_INFO.physical.lower}` };
 }
 
 const centerOf = (rect) => ({ x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 });
@@ -84,6 +134,10 @@ export class BattleFX {
     this.particles = [];
     this.texts = [];
     this.auras = [];
+    /** 底图缓存：url → { img, loaded, failed } */
+    this.textures = new Map();
+    /** canvas pattern 缓存：url|fixed|尺寸 → CanvasPattern */
+    this.patterns = new Map();
     this.raf = 0;
     this.last = 0;
     this.destroyed = false;
@@ -111,6 +165,68 @@ export class BattleFX {
     this.canvas.style.height = `${h}px`;
     this.ratio = ratio;
     this.ctx.setTransform(bw / w, 0, 0, bh / h, 0, 0);
+    this.patterns.clear();
+  }
+
+  /* ---------------- 底图纹理 ---------------- */
+  _textureRecord(url) {
+    if (!url || typeof Image === "undefined") return null;
+    let rec = this.textures.get(url);
+    if (!rec) {
+      const img = new Image();
+      rec = { img, loaded: false, failed: false };
+      img.onload = () => {
+        rec.loaded = true;
+        this._ensureLoop();
+      };
+      img.onerror = () => {
+        rec.failed = true;
+      };
+      img.src = url;
+      this.textures.set(url, rec);
+    }
+    return rec.loaded ? rec : null;
+  }
+
+  /**
+   * 取一张底图对应的 pattern。
+   *  fixed=true：图片铺满整个舞台并固定在画面坐标（不随特效移动）；
+   *  fixed=false：图片跟着每个特效走，由调用方按特效位置设置 pattern 偏移。
+   */
+  _texturePattern(url, fixed) {
+    const rec = this._textureRecord(url);
+    if (!rec || !this.ctx) return null;
+    const key = `${url}\u0000${fixed ? "fixed" : "local"}\u0000${fixed ? `${this.w}x${this.h}` : "raw"}`;
+    let pattern = this.patterns.get(key);
+    if (!pattern) {
+      let source = rec.img;
+      if (fixed) {
+        // 固定底图铺满舞台：把图片拉伸到设计尺寸，pattern 原点固定在 (0,0)
+        const off = document.createElement("canvas");
+        off.width = Math.max(1, Math.round(this.w));
+        off.height = Math.max(1, Math.round(this.h));
+        const octx = off.getContext("2d");
+        octx.drawImage(rec.img, 0, 0, off.width, off.height);
+        source = off;
+      }
+      pattern = this.ctx.createPattern(source, "no-repeat");
+      if (!pattern) return null;
+      this.patterns.set(key, pattern);
+    }
+    return { pattern, rec, fixed };
+  }
+
+  /** 局部底图：把 pattern 平移到特效中心（固定底图不移动） */
+  _placePattern(tex, x, y) {
+    if (!tex || tex.fixed || typeof tex.pattern.setTransform !== "function") return tex?.pattern || null;
+    const w = tex.rec.img.naturalWidth || tex.rec.img.width || 1;
+    const h = tex.rec.img.naturalHeight || tex.rec.img.height || 1;
+    try {
+      tex.pattern.setTransform({ a: 1, b: 0, c: 0, d: 1, e: x - w / 2, f: y - h / 2 });
+    } catch {
+      // 老浏览器不支持 pattern.setTransform 时退化为固定图案，不让绘制中断
+    }
+    return tex.pattern;
   }
 
   clear() {
@@ -224,13 +340,19 @@ export class BattleFX {
     ctx.globalCompositeOperation = "source-over";
     for (const p of this.particles) {
       ctx.globalAlpha = clamp(p.alpha, 0, 1);
-      ctx.fillStyle = hsl(p.h, p.s, p.l);
+      const tex = p.texture ? this._texturePattern(p.texture, p.fixedTexture) : null;
+      ctx.fillStyle = tex ? this._placePattern(tex, p.x, p.y) : hsl(p.h, p.s, p.l);
       if (p.shape === "square") {
-        ctx.save();
-        ctx.translate(p.x, p.y);
-        ctx.rotate(p.spin);
-        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
-        ctx.restore();
+        if (tex) {
+          // 底图已经按画布坐标定位，方形不能再叠加自身旋转 / 平移
+          ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+        } else {
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.spin);
+          ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+          ctx.restore();
+        }
       } else {
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size, 0, TAU);
@@ -250,7 +372,9 @@ export class BattleFX {
   /**
    * @param {{x:number,y:number,w:number,h:number}} from 发射者卡牌矩形（舞台坐标）
    * @param {{x:number,y:number,w:number,h:number}} to 目标卡牌矩形
-   * @param {{attribute?:string,color?:string,onHit?:Function,arriveIn?:number}} [opts]
+   * @param {{attribute?:string,color?:string|string[],texture?:string,fixedTexture?:boolean,onHit?:Function,arriveIn?:number}} [opts]
+   *   color: #rrggbb 单色，或颜色数组（多级渐变）；
+   *   texture / fixedTexture: 底图与固定底图；
    *   arriveIn: 统一的命中时间（秒）。群攻用它让多枚飞弹同时到达；不传则按距离算。
    * @returns {Promise<void>} 命中时 resolve
    */
@@ -277,6 +401,8 @@ export class BattleFX {
       const x0 = a.x + dx * startPad;
       const y0 = a.y + dy * startPad;
       const color = colorOf(opts.color || opts.attribute);
+      const texture = typeof opts.texture === "string" ? opts.texture : "";
+      const fixedTexture = Boolean(opts.fixedTexture);
       const travel = Math.max(1, dist - startPad);
       const accel = clamp(dist * 1.1, 140, 520);
       const syncIn = Number(opts.arriveIn);
@@ -301,6 +427,8 @@ export class BattleFX {
         tHit,
         speed: v0,
         color,
+        texture,
+        fixedTexture,
         size: 7,
         trailTimer: 0,
         settled: false,
@@ -321,7 +449,7 @@ export class BattleFX {
   }
 
   _spawnTrail(b) {
-    const base = b.color;
+    const base = sampleColor(b.color, Math.random());
     const h = base.h + rand(-12, 12);
     const s = clamp(base.s + rand(-6, 8), 10, 100);
     const l = clamp(base.l + rand(-10, 8), 18, 82);
@@ -345,6 +473,8 @@ export class BattleFX {
       h,
       s,
       l,
+      texture: b.texture,
+      fixedTexture: b.fixedTexture,
       spin: rand(0, TAU),
       spinSpeed: rand(-6, 6),
       shape: "dot",
@@ -356,7 +486,12 @@ export class BattleFX {
     b.settled = true;
     if (b.timer) clearTimeout(b.timer);
     const color = b.color;
-    this._spawnExplosion(b.x, b.y, color, { count: 15, power: 1 });
+    this._spawnExplosion(b.x, b.y, color, {
+      count: 15,
+      power: 1,
+      texture: b.texture,
+      fixedTexture: b.fixedTexture,
+    });
     if (typeof b.onHit === "function") {
       try {
         b.onHit();
@@ -370,16 +505,35 @@ export class BattleFX {
   _drawBullet(b) {
     const ctx = this.ctx;
     const c = b.color;
+    const radius = b.size * 1.9;
     ctx.save();
+    const tex = b.texture ? this._texturePattern(b.texture, b.fixedTexture) : null;
+    if (tex) {
+      // 底图模式：用飞弹圆形当遮罩，显示底图在当前位置的像素；固定底图时图案不动
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, radius, 0, TAU);
+      ctx.clip();
+      ctx.fillStyle = this._placePattern(tex, b.x, b.y);
+      ctx.fillRect(b.x - radius, b.y - radius, radius * 2, radius * 2);
+      ctx.restore();
+      return;
+    }
     ctx.shadowColor = hsl(c.h, c.s, Math.max(15, c.l - 18), 0.85);
     ctx.shadowBlur = 10;
-    const g = ctx.createRadialGradient(b.x - b.dx * 1.5, b.y - b.dy * 1.5, 0.5, b.x, b.y, b.size * 1.9);
-    g.addColorStop(0, hsl(c.h, Math.min(100, c.s + 8), Math.min(96, c.l + 26), 1));
-    g.addColorStop(0.55, hsl(c.h, c.s, c.l, 0.98));
-    g.addColorStop(1, hsl(c.h, c.s, Math.max(18, c.l - 24), 0.15));
+    let g;
+    if (Array.isArray(c.stops) && c.stops.length > 1) {
+      // 多级渐变：按停靠点整条铺开
+      g = ctx.createRadialGradient(b.x - b.dx * 1.5, b.y - b.dy * 1.5, 0.5, b.x, b.y, radius);
+      c.stops.forEach((stop, i) => g.addColorStop(i / (c.stops.length - 1), stop));
+    } else {
+      g = ctx.createRadialGradient(b.x - b.dx * 1.5, b.y - b.dy * 1.5, 0.5, b.x, b.y, radius);
+      g.addColorStop(0, hsl(c.h, Math.min(100, c.s + 8), Math.min(96, c.l + 26), 1));
+      g.addColorStop(0.55, hsl(c.h, c.s, c.l, 0.98));
+      g.addColorStop(1, hsl(c.h, c.s, Math.max(18, c.l - 24), 0.15));
+    }
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(b.x, b.y, b.size * 1.9, 0, TAU);
+    ctx.arc(b.x, b.y, radius, 0, TAU);
     ctx.fill();
     ctx.restore();
   }
@@ -392,14 +546,17 @@ export class BattleFX {
     this._spawnExplosion(p.x, p.y, color, {
       count: opts.count ?? 15,
       power: opts.power ?? 1,
+      texture: typeof opts.texture === "string" ? opts.texture : "",
+      fixedTexture: Boolean(opts.fixedTexture),
     });
     this._ensureLoop();
   }
 
-  _spawnExplosion(x, y, color, { count = 15, power = 1 } = {}) {
+  _spawnExplosion(x, y, color, { count = 15, power = 1, texture = "", fixedTexture = false } = {}) {
     for (let i = 0; i < count; i += 1) {
       const dir = rand(0, TAU);
       const spd = rand(60, 330) * power;
+      const c = sampleColor(color, Math.random());
       this.particles.push({
         x,
         y,
@@ -410,9 +567,11 @@ export class BattleFX {
         alpha: rand(0.85, 1),
         fade: rand(1.1, 1.9),
         size: rand(2, 4.6) * Math.min(1.4, power),
-        h: color.h + rand(-16, 16),
-        s: clamp(color.s + rand(-10, 12), 15, 100),
-        l: clamp(color.l + rand(-14, 16), 16, 88),
+        h: c.h + rand(-16, 16),
+        s: clamp(c.s + rand(-10, 12), 15, 100),
+        l: clamp(c.l + rand(-14, 16), 16, 88),
+        texture,
+        fixedTexture,
         spin: rand(0, TAU),
         spinSpeed: rand(-8, 8),
         shape: Math.random() < 0.22 ? "square" : "dot",
@@ -434,6 +593,8 @@ export class BattleFX {
         h: color.h,
         s: color.s,
         l: Math.min(88, color.l + 18),
+        texture,
+        fixedTexture,
         spin: 0,
         spinSpeed: 0,
         shape: "dot",
@@ -446,11 +607,13 @@ export class BattleFX {
    * 没有飞弹：卡面上直接收拢一圈碎屑 + 一次冲击环，读起来像「侵蚀」而不是「打一拳」，
    * 这样和普通攻击的飞弹/爆开在画面上分得开。
    * @param {{x:number,y:number,w:number,h:number}} rect 目标卡牌矩形
-   * @param {{attribute?:string,color?:string}} [opts]
+   * @param {{attribute?:string,color?:string|string[],texture?:string,fixedTexture?:boolean}} [opts]
    */
   impact(rect, opts = {}) {
     if (this.destroyed || this.hidden || !rect) return;
-    const c = colorOf(opts.color || opts.attribute);
+    const baseColor = colorOf(opts.color || opts.attribute);
+    const texture = typeof opts.texture === "string" ? opts.texture : "";
+    const fixedTexture = Boolean(opts.fixedTexture);
     const cx = rect.x + rect.w / 2;
     const cy = rect.y + rect.h / 2;
     const radius = Math.max(rect.w, rect.h) * 0.5;
@@ -460,6 +623,7 @@ export class BattleFX {
       const start = radius * rand(0.85, 1.25);
       const life = rand(0.26, 0.42);
       const spd = start / life;
+      const c = sampleColor(baseColor, Math.random());
       this.particles.push({
         x: cx + Math.cos(ang) * start,
         y: cy + Math.sin(ang) * start,
@@ -473,6 +637,8 @@ export class BattleFX {
         h: c.h + rand(-8, 8),
         s: clamp(c.s + rand(-6, 6), 20, 100),
         l: Math.min(90, c.l + 12),
+        texture,
+        fixedTexture,
         spin: rand(0, TAU),
         spinSpeed: rand(-6, 6),
         shape: Math.random() < 0.3 ? "square" : "dot",
@@ -484,7 +650,9 @@ export class BattleFX {
       y: cy,
       w: rect.w,
       h: rect.h,
-      color: c,
+      color: sampleColor(baseColor, 0.5),
+      texture,
+      fixedTexture,
       t: 0,
       life: 0.46,
       size: Math.max(rect.w, rect.h) * 0.92,
@@ -594,6 +762,10 @@ export class BattleFX {
       text: String(text),
       upper: kind === "heal" ? "#8CF0B4" : kind === "mute" ? "#A9C2C3" : pair.upper,
       lower: kind === "heal" ? "#2E9E5B" : kind === "mute" ? "#7D9FA1" : pair.lower,
+      stops:
+        kind === "damage" && Array.isArray(pair.stops) && pair.stops.length > 1
+          ? pair.stops
+          : null,
       crit: Boolean(opts.crit),
       size: opts.size || (opts.crit ? 30 : 23),
       /** 数字下方的小标签（如「附加」），用来区分伤害类型 */
@@ -631,8 +803,12 @@ export class BattleFX {
     ctx.strokeText(t.text, 0, 0);
 
     const g = ctx.createLinearGradient(0, -t.size * 0.62, 0, t.size * 0.62);
-    g.addColorStop(0, t.upper);
-    g.addColorStop(1, t.lower);
+    if (Array.isArray(t.stops) && t.stops.length > 1) {
+      t.stops.forEach((stop, i) => g.addColorStop(i / (t.stops.length - 1), stop));
+    } else {
+      g.addColorStop(0, t.upper);
+      g.addColorStop(1, t.lower);
+    }
     ctx.fillStyle = g;
     ctx.fillText(t.text, 0, 0);
 

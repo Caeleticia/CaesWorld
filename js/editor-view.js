@@ -1625,12 +1625,20 @@ const clampZoomPercent = (percent) => Math.min(ZOOM_MAX_PERCENT, Math.max(ZOOM_M
 
 const canvasState = {
   view: { x: 40, y: 40, zoom: ZOOM_BASE },
-  /** 画布交互模式：pan = 拖拽画布，cut = 切割连线（由工具条滑钮切换） */
+  /** 画布交互模式：pan = 拖拽画布，cut = 切割连线，select = 框选积木 / 连线 */
   mode: "pan",
   drag: null,
   pan: null,
   link: null,
+  /** 主选中的积木（兼容旧逻辑；多选时是最后点中的一块） */
   selectedId: null,
+  /** 框选 / 多选：选中的积木 id 与连线 id */
+  selectedIds: new Set(),
+  selectedLinkIds: new Set(),
+  /** 框选矩形：{ pointerId, startX, startY, x, y, moved, additive } */
+  marquee: null,
+  /** 复制剪贴板：{ nodes: [...], links: [...] }（只在内存中，跨流程可用） */
+  clipboard: null,
   /** 切割状态：{ pointerId, lastX, lastY }；非空即表示正在切割连线 */
   erase: null,
   nodeEls: new Map(),
@@ -1694,17 +1702,25 @@ function endEraseMode() {
   setEraseHint(false);
 }
 
-/** 切换画布交互模式：pan = 拖拽画布，cut = 切割连线 */
+/** 切换画布交互模式：pan = 拖拽画布，cut = 切割连线，select = 框选 */
 function setCanvasMode(mode) {
-  canvasState.mode = mode === "cut" ? "cut" : "pan";
+  canvasState.mode = mode === "cut" ? "cut" : mode === "select" ? "select" : "pan";
   const cut = canvasState.mode === "cut";
+  const selecting = canvasState.mode === "select";
   canvasEl()?.classList.toggle("is-cut-mode", cut);
+  canvasEl()?.classList.toggle("is-select-mode", selecting);
   const input = $("#canvas-mode");
   if (input) {
     input.checked = cut;
     input.closest(".canvas-mode")?.classList.toggle("is-cut", cut);
   }
+  const marqueeBtn = $("#btn-marquee");
+  if (marqueeBtn) {
+    marqueeBtn.classList.toggle("is-active", selecting);
+    marqueeBtn.setAttribute("aria-pressed", selecting ? "true" : "false");
+  }
   if (!cut) endEraseMode();
+  if (!selecting) cancelMarquee();
 }
 
 /** 进入切割状态：之后拖动只擦线、不平移画布 */
@@ -1755,6 +1771,94 @@ function toWorld(clientX, clientY) {
   };
 }
 
+/* ---------------------------- 框选 ---------------------------- */
+function showSelectionBox(clientX, clientY) {
+  const box = $("#selection-box");
+  const canvas = canvasEl();
+  if (!box || !canvas) return;
+  const m = canvasState.marquee;
+  if (!m) return;
+  const rect = canvas.getBoundingClientRect();
+  const left = Math.min(m.startX, clientX) - rect.left;
+  const top = Math.min(m.startY, clientY) - rect.top;
+  box.hidden = false;
+  box.style.left = `${left}px`;
+  box.style.top = `${top}px`;
+  box.style.width = `${Math.abs(clientX - m.startX)}px`;
+  box.style.height = `${Math.abs(clientY - m.startY)}px`;
+}
+
+function cancelMarquee() {
+  canvasState.marquee = null;
+  const box = $("#selection-box");
+  if (box) box.hidden = true;
+}
+
+/** 世界坐标矩形内命中的积木 / 连线 */
+function selectionInRect(rect) {
+  const flow = currentFlow();
+  if (!flow) return { nodes: [], links: [] };
+  const nodes = [];
+  for (const node of flow.nodes) {
+    const el = canvasState.nodeEls.get(node.id);
+    if (!el) continue;
+    const w = el.offsetWidth || 0;
+    const h = el.offsetHeight || 0;
+    const x = Number(node.pos?.x) || 0;
+    const y = Number(node.pos?.y) || 0;
+    if (x < rect.right && x + w > rect.left && y < rect.bottom && y + h > rect.top) nodes.push(node.id);
+  }
+  const links = [];
+  for (const link of flow.links || []) {
+    const id = linkId(link);
+    const samples = canvasState.linkSamples.get(id);
+    if (!samples) continue;
+    if (samples.some((p) => p.x >= rect.left && p.x <= rect.right && p.y >= rect.top && p.y <= rect.bottom)) {
+      links.push(id);
+    }
+  }
+  return { nodes, links };
+}
+
+function beginMarquee(e) {
+  if (e.cancelable) e.preventDefault();
+  canvasEl().setPointerCapture(e.pointerId);
+  canvasState.pan = null;
+  canvasState.marquee = {
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    moved: false,
+    additive: e.shiftKey || e.ctrlKey || e.metaKey,
+    baseNodes: [...canvasState.selectedIds],
+    baseLinks: [...canvasState.selectedLinkIds],
+  };
+  showSelectionBox(e.clientX, e.clientY);
+}
+
+function updateMarquee(e) {
+  const m = canvasState.marquee;
+  if (!m || e.pointerId !== m.pointerId) return;
+  if (Math.abs(e.clientX - m.startX) + Math.abs(e.clientY - m.startY) > 3) m.moved = true;
+  showSelectionBox(e.clientX, e.clientY);
+  if (!m.moved) return;
+  const a = toWorld(Math.min(m.startX, e.clientX), Math.min(m.startY, e.clientY));
+  const b = toWorld(Math.max(m.startX, e.clientX), Math.max(m.startY, e.clientY));
+  const rect = { left: a.x, top: a.y, right: b.x, bottom: b.y };
+  const hit = selectionInRect(rect);
+  const nodes = m.additive ? new Set([...m.baseNodes, ...hit.nodes]) : new Set(hit.nodes);
+  const links = m.additive ? new Set([...m.baseLinks, ...hit.links]) : new Set(hit.links);
+  selectMany(nodes, links, nodes.size ? [...nodes][nodes.size - 1] : null);
+}
+
+function finishMarquee(e) {
+  const m = canvasState.marquee;
+  if (!m || (e && e.pointerId !== m.pointerId)) return;
+  if (!m.moved && !m.additive) clearSelection();
+  cancelMarquee();
+}
+
+
 function syncWorld() {
   const world = worldEl();
   if (!world) return;
@@ -1781,6 +1885,18 @@ function renderFlow() {
   const world = worldEl();
   if (!world) return;
   const flow = currentFlow();
+  // 切技能 / 触发或删卡后，丢掉已经不在当前流程里的选择，避免复制 / 删除到旧 id
+  if (flow) {
+    const nodeIds = new Set(flow.nodes.map((n) => n.id));
+    canvasState.selectedIds = new Set([...canvasState.selectedIds].filter((id) => nodeIds.has(id)));
+    const linkIds = new Set((flow.links || []).map((l) => linkId(l)));
+    canvasState.selectedLinkIds = new Set([...canvasState.selectedLinkIds].filter((id) => linkIds.has(id)));
+    if (canvasState.selectedId && !nodeIds.has(canvasState.selectedId)) canvasState.selectedId = null;
+  } else {
+    canvasState.selectedIds.clear();
+    canvasState.selectedLinkIds.clear();
+    canvasState.selectedId = null;
+  }
   const templateBtn = $("#btn-template");
   if (templateBtn) {
     templateBtn.hidden = active.tab !== "skills";
@@ -1812,6 +1928,7 @@ function renderFlow() {
   }
   if (!flow) {
     syncWorld();
+    updateSelectionUI();
     return;
   }
 
@@ -1821,6 +1938,7 @@ function renderFlow() {
     if (path) svg.appendChild(path);
   }
   syncWorld();
+  updateSelectionUI();
   validateFlow();
   renderJson();
 }
@@ -1886,7 +2004,7 @@ function renderBlock(node, flow) {
   el.style.left = `${node.pos.x}px`;
   el.style.top = `${node.pos.y}px`;
   el.style.setProperty("--block-color", def.color);
-  if (canvasState.selectedId === node.id) el.classList.add("is-selected");
+  if (canvasState.selectedIds.has(node.id) || canvasState.selectedId === node.id) el.classList.add("is-selected");
 
   const inPorts = dataInputPorts(node, flow);
   const outPorts = def.ports.filter(
@@ -1935,25 +2053,79 @@ function portHtml(port, dir, label) {
   } title="${escapeHtml(label || DATA_TYPE_LABEL[port.type] || port.id)}"></span>`;
 }
 
+/** 解析「多级渐变」输入：逗号 / 空格分隔的 #rrggbb，最多 8 个 */
+function parseColorStops(raw) {
+  return String(raw || "")
+    .split(/[\s,，]+/)
+    .map((x) => x.trim())
+    .filter((x) => /^#[0-9a-f]{6}$/i.test(x))
+    .slice(0, 8);
+}
+
+function optionControlHtml(o, opts) {
+  if (o.control === "select") {
+    return `<label class="opt"><span>${escapeHtml(o.label || o.key)}</span><select data-option="${o.key}">${(o.options || [])
+      .map((x) => `<option value="${escapeHtml(x.value)}" ${String(x.value) === String(opts[o.key]) ? "selected" : ""}>${escapeHtml(x.label)}</option>`)
+      .join("")}</select></label>`;
+  }
+  if (o.control === "checkbox") {
+    return `<label class="opt opt-check"><input type="checkbox" data-option="${o.key}" ${opts[o.key] ? "checked" : ""}/><span>${escapeHtml(o.label || o.key)}</span></label>`;
+  }
+  if (o.control === "number") {
+    return `<label class="opt"><span>${escapeHtml(o.label || o.key)}</span><input type="number" data-option="${o.key}" value="${escapeHtml(opts[o.key] ?? "")}"/></label>`;
+  }
+  if (o.control === "color") {
+    const raw = String(opts[o.key] ?? "");
+    const value = /^#[0-9a-f]{6}$/i.test(raw) ? raw : o.default || "#ffffff";
+    return `<label class="opt opt-color"><span>${escapeHtml(o.label || o.key)}</span><input type="color" data-option="${o.key}" value="${escapeHtml(
+      value
+    )}"/></label>`;
+  }
+  if (o.control === "gradient") {
+    const raw = String(opts[o.key] ?? "");
+    const stops = parseColorStops(raw);
+    const preview = stops.length ? stops.join(", ") : "transparent, transparent";
+    return `<label class="opt opt-gradient"><span>${escapeHtml(o.label || o.key)}</span><input type="text" data-option="${o.key}" value="${escapeHtml(
+      raw
+    )}" placeholder="#ff6b8b, #ffb020, #3aa5f0"/><span class="opt-grad-preview" style="background:linear-gradient(90deg, ${escapeHtml(
+      preview
+    )})"></span></label>`;
+  }
+  if (o.control === "image") {
+    const raw = String(opts[o.key] ?? "").trim();
+    return `<label class="opt opt-image"><span>${escapeHtml(o.label || o.key)}</span>
+      <input type="text" data-option="${o.key}" value="${escapeHtml(raw)}" placeholder="images/fx.png 或 data:..."/>
+      <span class="opt-image-row">
+        <input type="file" accept="image/*" data-fx-image="${o.key}" aria-label="上传底图"/>
+        ${raw ? `<img class="opt-image-preview" src="${escapeHtml(raw)}" alt="" />` : ""}
+      </span>
+    </label>`;
+  }
+  if (o.control === "text") {
+    return `<label class="opt"><span>${escapeHtml(o.label || o.key)}</span><input type="text" data-option="${o.key}" value="${escapeHtml(
+      opts[o.key] ?? ""
+    )}" placeholder="键入字符串"/></label>`;
+  }
+  return "";
+}
+
 function optionsHtml(node) {
   const def = blockDef(node.type);
   const opts = node.options || {};
   let html = "";
+  let advanced = "";
+  const advancedOpen = (def.options || []).some(
+    (o) => o.advanced && o.showIf && Object.entries(o.showIf).every(([k, v]) => String(opts[k]) === String(v))
+  );
   for (const o of def.options || []) {
     if (o.showIf && !Object.entries(o.showIf).every(([k, v]) => String(opts[k]) === String(v))) continue;
-    if (o.control === "select") {
-      html += `<label class="opt"><span>${escapeHtml(o.label || o.key)}</span><select data-option="${o.key}">${(o.options || [])
-        .map((x) => `<option value="${escapeHtml(x.value)}" ${String(x.value) === String(opts[o.key]) ? "selected" : ""}>${escapeHtml(x.label)}</option>`)
-        .join("")}</select></label>`;
-    } else if (o.control === "checkbox") {
-      html += `<label class="opt opt-check"><input type="checkbox" data-option="${o.key}" ${opts[o.key] ? "checked" : ""}/><span>${escapeHtml(o.label || o.key)}</span></label>`;
-    } else if (o.control === "number") {
-      html += `<label class="opt"><span>${escapeHtml(o.label || o.key)}</span><input type="number" data-option="${o.key}" value="${escapeHtml(opts[o.key] ?? "")}"/></label>`;
-    } else if (o.control === "text") {
-      html += `<label class="opt"><span>${escapeHtml(o.label || o.key)}</span><input type="text" data-option="${o.key}" value="${escapeHtml(
-        opts[o.key] ?? ""
-      )}" placeholder="键入字符串"/></label>`;
-    }
+    const control = optionControlHtml(o, opts);
+    if (!control) continue;
+    if (o.advanced) advanced += control;
+    else html += control;
+  }
+  if (advanced) {
+    html += `<details class="opt-advanced"${advancedOpen ? " open" : ""}><summary>高级</summary>${advanced}</details>`;
   }
   const constKeys = {
     summon: ["unitId"],
@@ -2087,6 +2259,8 @@ function redrawLinks() {
     const path = makeLinkPath(link);
     if (path) svg.appendChild(path);
   }
+  // 连线 DOM 重建后把选中样式补回去（拖动 / 擦除 / 连线变更都会走这里）
+  applySelectionClasses();
 }
 
 /* ---------------------------- 积木操作 ---------------------------- */
@@ -2150,29 +2324,182 @@ function addBlock(type) {
   refreshFlowView();
 }
 
-function selectNode(id) {
-  canvasState.selectedId = id;
-  $$(".block").forEach((el) => el.classList.toggle("is-selected", el.dataset.id === id));
+/** 选中状态变化后刷新积木 / 连线的选中样式与工具按钮 */
+/** 只刷选中样式（连线 DOM 重建 / 拖动时用，不碰工具按钮） */
+function applySelectionClasses() {
+  const box = worldEl();
+  if (box) {
+    for (const g of box.querySelectorAll("g.link-group")) {
+      g.classList.toggle("is-selected", canvasState.selectedLinkIds.has(g.dataset.link));
+    }
+  }
+  for (const [id, el] of canvasState.nodeEls) {
+    el.classList.toggle("is-selected", canvasState.selectedIds.has(id));
+  }
+}
+
+/** 选中状态变化后刷新积木 / 连线的选中样式与工具按钮 */
+function updateSelectionUI() {
+  applySelectionClasses();
   const del = $("#btn-delete-block");
-  if (del) del.disabled = !id;
+  if (del) del.disabled = canvasState.selectedIds.size + canvasState.selectedLinkIds.size === 0;
+  const copy = $("#btn-copy-blocks");
+  if (copy) copy.disabled = canvasState.selectedIds.size === 0;
+  const paste = $("#btn-paste-blocks");
+  if (paste) paste.disabled = !(canvasState.clipboard && canvasState.clipboard.nodes.length);
+}
+
+function clearSelection() {
+  canvasState.selectedIds.clear();
+  canvasState.selectedLinkIds.clear();
+  canvasState.selectedId = null;
+  updateSelectionUI();
+}
+
+/**
+ * 选中单块积木。additive = 追加 / 取消（Shift / Ctrl 点击）。
+ * 传 null 清除全部选择；additive = Shift / Ctrl 追加或取消。
+ */
+function selectNode(id, opts = {}) {
+  const additive = Boolean(opts.additive);
+  if (!id) {
+    clearSelection();
+    return;
+  }
+  if (!additive) {
+    canvasState.selectedIds.clear();
+    canvasState.selectedLinkIds.clear();
+  }
+  if (additive && canvasState.selectedIds.has(id)) canvasState.selectedIds.delete(id);
+  else canvasState.selectedIds.add(id);
+  canvasState.selectedId = canvasState.selectedIds.has(id) ? id : null;
+  updateSelectionUI();
+}
+
+/** 选中 / 取消一条连线（框选模式里点击连线） */
+function selectLink(id, additive = false) {
+  if (!id) return;
+  if (!additive) {
+    canvasState.selectedIds.clear();
+    canvasState.selectedLinkIds.clear();
+  }
+  if (additive && canvasState.selectedLinkIds.has(id)) canvasState.selectedLinkIds.delete(id);
+  else canvasState.selectedLinkIds.add(id);
+  canvasState.selectedId = null;
+  updateSelectionUI();
+}
+
+/** 框选 / 粘贴后设置多选；primary 是主选中积木（可为空） */
+function selectMany(nodeIds, linkIds = [], primary = null) {
+  canvasState.selectedIds = new Set(nodeIds);
+  canvasState.selectedLinkIds = new Set(linkIds);
+  canvasState.selectedId = primary || (canvasState.selectedIds.size ? [...canvasState.selectedIds][0] : null);
+  updateSelectionUI();
 }
 
 function deleteSelected() {
   const flow = currentFlow();
-  const id = canvasState.selectedId;
-  if (!flow || !id) return;
-  flow.nodes = flow.nodes.filter((n) => n.id !== id);
-  flow.links = (flow.links || []).filter((l) => l.from !== id && l.to !== id);
+  if (!flow) return;
+  const nodeIds = new Set(canvasState.selectedIds);
+  const linkIds = new Set(canvasState.selectedLinkIds);
+  if (!nodeIds.size && !linkIds.size) return;
+  // 选中的连线、以及挂在被删积木上的连线，一起删除
+  flow.links = (flow.links || []).filter(
+    (l) => !linkIds.has(linkId(l)) && !nodeIds.has(l.from) && !nodeIds.has(l.to)
+  );
+  flow.nodes = flow.nodes.filter((n) => !nodeIds.has(n.id));
   if (active.tab === "effects") {
     const card = currentEffect();
-    card.triggers = (card.triggers || []).filter((t) => t.block.id !== id);
-    if (card.flows) delete card.flows[id];
-    if (active.triggerId === id) active.triggerId = card.triggers[0] ? card.triggers[0].block.id : null;
-    renderEffectPanel();
+    const removedTriggers = (card.triggers || []).filter((t) => nodeIds.has(t.block.id)).map((t) => t.block.id);
+    card.triggers = (card.triggers || []).filter((t) => !nodeIds.has(t.block.id));
+    for (const triggerId of removedTriggers) if (card.flows) delete card.flows[triggerId];
+    if (removedTriggers.includes(active.triggerId)) {
+      active.triggerId = card.triggers[0] ? card.triggers[0].block.id : null;
+    }
+    if (removedTriggers.length) renderEffectPanel();
   }
-  selectNode(null);
+  clearSelection();
   markDirty();
   refreshFlowView();
+  setStatus(`已删除 ${nodeIds.size} 块积木 / ${linkIds.size} 条连线`, "ok");
+}
+
+/** 复制选中的积木和它们之间的连线（连线要两端都选中） */
+function copySelected() {
+  const flow = currentFlow();
+  if (!flow) return;
+  const nodeIds = new Set(canvasState.selectedIds);
+  if (!nodeIds.size) {
+    setStatus("先框选或点选要复制的积木", "bad");
+    return;
+  }
+  const isEffect = active.tab === "effects";
+  const nodes = flow.nodes
+    .filter((n) => nodeIds.has(n.id) && !(isEffect && n.type === "trigger"))
+    .map((n) => clone(n));
+  if (!nodes.length) {
+    setStatus("效果流程里的「触发」不能复制；请框选其它积木", "bad");
+    return;
+  }
+  const copied = new Set(nodes.map((n) => n.id));
+  const links = (flow.links || [])
+    .filter((l) => copied.has(l.from) && copied.has(l.to))
+    .map((l) => clone(l));
+  canvasState.clipboard = { nodes, links };
+  updateSelectionUI();
+  setStatus(`已复制 ${nodes.length} 块积木 / ${links.length} 条连线`, "ok");
+}
+
+/** 把剪贴板内容粘贴到当前流程（新 id、偏移一点，粘贴后自动选中） */
+function pasteClipboard() {
+  const flow = currentFlow();
+  if (!flow) {
+    setStatus("先选择一个技能 / 效果流程，再粘贴", "bad");
+    return;
+  }
+  const cb = canvasState.clipboard;
+  if (!cb || !cb.nodes.length) {
+    setStatus("剪贴板里还没有积木，先框选并复制", "bad");
+    return;
+  }
+  const isEffect = active.tab === "effects";
+  const used = new Set(flow.nodes.map((n) => n.id));
+  const idMap = new Map();
+  const newIds = [];
+  const OFFSET = 44;
+  for (const src of cb.nodes) {
+    if (isEffect && src.type === "trigger") continue;
+    const id = uniqueFlowNodeId(src.id, used);
+    used.add(id);
+    idMap.set(src.id, id);
+    const pos = src.pos && Number.isFinite(src.pos.x) && Number.isFinite(src.pos.y) ? src.pos : { x: 60, y: 60 };
+    flow.nodes.push({
+      ...clone(src),
+      id,
+      pos: { x: pos.x + OFFSET, y: pos.y + OFFSET },
+    });
+    newIds.push(id);
+  }
+  if (!newIds.length) {
+    setStatus("剪贴板里只有「触发」，不能粘贴到效果流程", "bad");
+    return;
+  }
+  const newLinkIds = [];
+  for (const src of cb.links) {
+    const from = idMap.get(src.from);
+    const to = idMap.get(src.to);
+    if (!from || !to) continue;
+    const link = { from, port: src.port, to, portTo: src.portTo };
+    link.id = linkId(link);
+    flow.links.push(link);
+    newLinkIds.push(link.id);
+  }
+  selectMany(newIds, newLinkIds, newIds[newIds.length - 1]);
+  markDirty();
+  refreshFlowView();
+  setStatus(`已粘贴 ${newIds.length} 块积木 / ${newLinkIds.length} 条连线`, "ok");
+  // refreshFlowView 会重建 DOM，选中样式在重绘后再刷一次
+  updateSelectionUI();
 }
 
 function findInputPort(flow, node, portId) {
@@ -2234,6 +2561,29 @@ function refreshFlowView() {
 }
 
 /* ---------------------------- 指针事件 ---------------------------- */
+/** 画布快捷键：Ctrl/Cmd+C 复制、Ctrl/Cmd+V 粘贴、Delete/Backspace 删除选中 */
+function onCanvasKeyDown(e) {
+  const page = $("#editor-page");
+  if (!page || page.hidden) return;
+  const t = e.target;
+  if (t && t.closest && t.closest("input, textarea, select, [contenteditable='true']")) return;
+  const meta = e.ctrlKey || e.metaKey;
+  if (meta && !e.altKey && e.key.toLowerCase() === "c") {
+    e.preventDefault();
+    copySelected();
+    return;
+  }
+  if (meta && !e.altKey && e.key.toLowerCase() === "v") {
+    e.preventDefault();
+    pasteClipboard();
+    return;
+  }
+  if (!meta && (e.key === "Delete" || e.key === "Backspace")) {
+    e.preventDefault();
+    deleteSelected();
+  }
+}
+
 function setupCanvas() {
   const el = canvasEl();
   if (!el) return;
@@ -2262,11 +2612,16 @@ function setupCanvas() {
   bind("#btn-locate", locateNearestBlock);
   bind("#btn-tidy", tidyFlow);
   bind("#btn-template", insertSlimeBeatTemplate);
+  bind("#btn-marquee", () => setCanvasMode(canvasState.mode === "select" ? "pan" : "select"));
+  bind("#btn-copy-blocks", copySelected);
+  bind("#btn-paste-blocks", pasteClipboard);
   const modeInput = $("#canvas-mode");
   if (modeInput) {
     modeInput.addEventListener("change", () => setCanvasMode(modeInput.checked ? "cut" : "pan"));
   }
   setCanvasMode(canvasState.mode);
+  updateSelectionUI();
+  window.addEventListener("keydown", onCanvasKeyDown);
   bind("#btn-zoom-in", () => zoomBy(1.15));
   bind("#btn-zoom-out", () => zoomBy(1 / 1.15));
   const zoomInput = $("#zoom-label");
@@ -2574,12 +2929,13 @@ function insertSlimeBeatTemplate() {
 
 function onPointerDown(e) {
   if (e.button === 2) return;
-  // 切割 / 平移期间忽略后续手指，保证一次只处理一个手势
-  if (canvasState.erase || canvasState.pan) return;
+  // 切割 / 平移 / 框选期间忽略后续手指，保证一次只处理一个手势
+  if (canvasState.erase || canvasState.pan || canvasState.marquee) return;
   canvasState.lastXY = { x: e.clientX, y: e.clientY };
   const portEl = e.target.closest(".port");
   const blockEl = e.target.closest(".block");
   const pathEl = e.target.closest("path.link, path.link-hit");
+  const additive = e.shiftKey || e.ctrlKey || e.metaKey;
 
   if (portEl && blockEl && portEl.dataset.dir === "out") {
     e.preventDefault();
@@ -2588,8 +2944,12 @@ function onPointerDown(e) {
     canvasEl().setPointerCapture(e.pointerId);
     return;
   }
-  // 按在连线上和按在空白处遵循同一套手势：由滑钮决定平移还是切割
+  // 框选模式下点连线 = 选中连线；其它模式按滑钮决定平移 / 切割
   if (pathEl) {
+    if (canvasState.mode === "select") {
+      selectLink(pathEl.dataset.link, additive);
+      return;
+    }
     beginCanvasGesture(e);
     return;
   }
@@ -2601,9 +2961,21 @@ function onPointerDown(e) {
     return;
   }
   if (blockEl) {
-    selectNode(blockEl.dataset.id);
-    canvasState.drag = { id: blockEl.dataset.id, x: e.clientX, y: e.clientY, moved: false };
+    const id = blockEl.dataset.id;
+    // 框选模式：拖动已选中的积木 = 平移整组；点未选中的积木 = 先替换选择
+    if (canvasState.mode === "select" && canvasState.selectedIds.has(id)) {
+      canvasState.selectedId = id;
+      updateSelectionUI();
+    } else {
+      selectNode(id, { additive: canvasState.mode === "select" && additive });
+    }
+    const ids = canvasState.selectedIds.has(id) ? [...canvasState.selectedIds] : [id];
+    canvasState.drag = { id, ids, x: e.clientX, y: e.clientY, moved: false };
     canvasEl().setPointerCapture(e.pointerId);
+    return;
+  }
+  if (canvasState.mode === "select") {
+    beginMarquee(e);
     return;
   }
   beginCanvasGesture(e);
@@ -2711,6 +3083,11 @@ function eraseAtPointer(e) {
 }
 
 function onPointerMove(e) {
+  // 框选：拖出矩形，实时高亮命中的积木 / 连线
+  if (canvasState.marquee) {
+    updateMarquee(e);
+    return;
+  }
   // 切割模式：只擦线，不平移画布
   if (canvasState.erase) {
     if (e.pointerId === canvasState.erase.pointerId) eraseAtPointer(e);
@@ -2722,11 +3099,13 @@ function onPointerMove(e) {
   }
   if (canvasState.drag) {
     const flow = currentFlow();
-    const node = flow && flow.nodes.find((n) => n.id === canvasState.drag.id);
     const dx = (e.clientX - canvasState.drag.x) / canvasState.view.zoom;
     const dy = (e.clientY - canvasState.drag.y) / canvasState.view.zoom;
     if (Math.abs(dx) + Math.abs(dy) > 0.5) canvasState.drag.moved = true;
-    if (node) {
+    const ids = canvasState.drag.ids && canvasState.drag.ids.length ? canvasState.drag.ids : [canvasState.drag.id];
+    for (const id of ids) {
+      const node = flow && flow.nodes.find((n) => n.id === id);
+      if (!node) continue;
       node.pos.x += dx;
       node.pos.y += dy;
       const el = canvasState.nodeEls.get(node.id);
@@ -2734,8 +3113,8 @@ function onPointerMove(e) {
         el.style.left = `${node.pos.x}px`;
         el.style.top = `${node.pos.y}px`;
       }
-      redrawLinks();
     }
+    if (flow) redrawLinks();
     canvasState.drag.x = e.clientX;
     canvasState.drag.y = e.clientY;
     return;
@@ -2756,10 +3135,22 @@ function onPointerUp(e) {
   // 只处理发起当前画布手势的那根手指，别被第二根手指提前结束
   const gestureId = canvasState.erase
     ? canvasState.erase.pointerId
-    : canvasState.pan
-      ? canvasState.pan.pointerId
-      : null;
+    : canvasState.marquee
+      ? canvasState.marquee.pointerId
+      : canvasState.pan
+        ? canvasState.pan.pointerId
+        : null;
   if (gestureId !== null && e.pointerId !== gestureId) return;
+
+  if (canvasState.marquee) {
+    finishMarquee(e);
+    try {
+      if (canvasEl().hasPointerCapture?.(e.pointerId)) canvasEl().releasePointerCapture(e.pointerId);
+    } catch {
+      /* 某些浏览器在指针已释放时会抛错，忽略 */
+    }
+    return;
+  }
 
   if (canvasState.erase) {
     endEraseMode();
@@ -2806,11 +3197,35 @@ function onBlockOptionChange(e) {
   const node = flow && flow.nodes.find((n) => n.id === nodeEl.dataset.id);
   if (!node) return;
   let changed = false;
+  if (e.target.dataset.fxImage) {
+    if (e.type !== "change") return;
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const key = e.target.dataset.fxImage;
+    const reader = new FileReader();
+    reader.onload = () => {
+      node.options = node.options || {};
+      node.options[key] = String(reader.result || "");
+      markDirty();
+      renderJson();
+      renderFlow();
+      setStatus("底图已内嵌到积木（data URL）", "ok");
+    };
+    reader.readAsDataURL(file);
+    return;
+  }
   if (e.target.dataset.option) {
     const key = e.target.dataset.option;
     node.options = node.options || {};
     node.options[key] = e.target.type === "checkbox" ? e.target.checked : e.target.type === "number" ? Number(e.target.value) : e.target.value;
     changed = true;
+    if (key === "colorStops") {
+      const preview = nodeEl.querySelector(".opt-grad-preview");
+      if (preview) {
+        const stops = parseColorStops(e.target.value);
+        preview.style.background = `linear-gradient(90deg, ${stops.length ? stops.join(", ") : "transparent, transparent"})`;
+      }
+    }
     if (node.type === "trigger" && key === "event") {
       // 切走「接收到广播」时，清掉两个广播输出口上的连线，避免留下看不见的悬空连线
       if (node.options.event !== "broadcast") {
@@ -2842,7 +3257,13 @@ function onBlockOptionChange(e) {
     if (node.type === "math" && e.target.dataset.option === "operator") pruneMathInputs(flow, node);
     if (node.type === "declareVariable" && e.target.dataset.option === "type") pruneVariableValue(flow, node);
     renderJson();
-    if (e.target.tagName === "SELECT") renderFlow();
+    // select 会改变输入口；带 showIf 的选项（如攻击积木的「自定义跳字颜色」）会改变可见控件
+    const optKey = e.target.dataset.option;
+    const def = blockDef(node.type);
+    const togglesAdvanced = Boolean(
+      optKey && (def.options || []).some((o) => o.advanced && o.showIf && Object.prototype.hasOwnProperty.call(o.showIf, optKey))
+    );
+    if (e.target.tagName === "SELECT" || togglesAdvanced) renderFlow();
   }
 }
 
@@ -3273,11 +3694,11 @@ function deleteCard(kind, target) {
     active.character = firstCardInPack(project.characters, active.editPack);
   } else if (kind === "skill") {
     active.skill = firstCardInPack(project.skills, active.editPack);
-    canvasState.selectedId = null;
+    clearSelection();
   } else {
     active.effect = firstCardInPack(project.effects, active.editPack);
     active.triggerId = null;
-    canvasState.selectedId = null;
+    clearSelection();
   }
 
   markDirty();
@@ -3526,7 +3947,7 @@ const edit = {
     if (active.editPack === id) active.editPack = "all";
     if (active.packId === id) active.packId = null;
     if (active.tab === "skills" || active.tab === "effects") {
-      canvasState.selectedId = null;
+      clearSelection();
       active.triggerId = null;
     }
     if (!currentCharacter()) active.character = firstCardInPack(project.characters, active.editPack);
@@ -3584,7 +4005,7 @@ const edit = {
     if (active.editPack === id) active.editPack = "all";
     if (active.packId === id) active.packId = null;
     if (active.tab === "skills" || active.tab === "effects") {
-      canvasState.selectedId = null;
+      clearSelection();
       active.triggerId = null;
     }
     if (!currentCharacter()) active.character = firstCardInPack(project.characters, active.editPack);
@@ -3701,7 +4122,7 @@ const edit = {
     return Boolean((flow.links || []).some((l) => l.from === from && l.port === port && l.to === to && l.portTo === portTo));
   },
   deleteBlock(id) {
-    canvasState.selectedId = id;
+    selectNode(id);
     deleteSelected();
   },
   /** 立即保存 + 返回当前流程 JSON / 完整工程 */

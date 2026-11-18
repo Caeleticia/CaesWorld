@@ -82,6 +82,7 @@ const refs = {
   deckCount: {},
   savedList: {},
   maxUnits: null,
+  sameName: null,
   startHint: null,
   startBtn: null,
   seg: null,
@@ -93,6 +94,7 @@ function defaultConfig() {
   return {
     v: 1,
     maxUnits: 4,
+    allowSameName: false,
     redInvincible: false,
     blueInvincible: false,
     redAI: false,
@@ -124,7 +126,7 @@ function loadConfig() {
   if (!data || typeof data !== "object") return { config: fallback, stored: false };
   const out = fallback;
   out.maxUnits = clamp(Math.round(Number(data.maxUnits) || 4), 1, MAX_FIELD);
-  for (const key of ["redInvincible", "blueInvincible", "redAI", "blueAI"]) {
+  for (const key of ["allowSameName", "redInvincible", "blueInvincible", "redAI", "blueAI"]) {
     if (typeof data[key] === "boolean") out[key] = data[key];
   }
   for (const side of SIDES) {
@@ -317,6 +319,7 @@ async function refreshLibrary({ force = false } = {}) {
 function cacheRefs() {
   refs.cols = $("#tcfg-cols");
   refs.maxUnits = $("#set-max-units");
+  refs.sameName = $("#set-same-name");
   refs.startHint = $("#tstart-hint");
   refs.startBtn = $("#btn-start-battle");
   refs.seg = $("#training-seg");
@@ -537,6 +540,7 @@ function renderSaved(side) {
 function syncSettings() {
   if (refs.maxUnits) refs.maxUnits.value = String(config.maxUnits);
   const map = {
+    allowSameName: $("#set-same-name"),
     redInvincible: $("#set-red-inv"),
     blueInvincible: $("#set-blue-inv"),
     redAI: $("#set-red-ai"),
@@ -641,6 +645,7 @@ function bindEvents() {
     renderStartHint();
   });
   const checks = [
+    ["allowSameName", "#set-same-name"],
     ["redInvincible", "#set-red-inv"],
     ["blueInvincible", "#set-blue-inv"],
     ["redAI", "#set-red-ai"],
@@ -868,6 +873,7 @@ async function startMatch() {
   }
   const snapshot = {
     maxUnits: config.maxUnits,
+    allowSameName: Boolean(config.allowSameName),
     red: config.red.slice(),
     blue: config.blue.slice(),
     redInvincible: Boolean(config.redInvincible),
