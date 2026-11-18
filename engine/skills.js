@@ -167,27 +167,34 @@ export function skillNeedsPlayerTarget(skill) {
 
 /**
  * 战斗界面选目标时需要知道的参数：
- *   max      最多可选几个（「选择单位」积木的「最多可选」，默认 1）
+ *   max      最多可选几个（「选择单位」积木的「最多可选」，默认 1；接数值线时以运行时为准）
  *   required 必须选满（勾了「必须选满」）
  *   needsTarget 是否要玩家点选
+ *   dynamicCount 「最多可选」是否接了数值线（是则积木上的常量只是兜底）
  * @param {object} skill
- * @returns {{needsTarget: boolean, max: number, required: boolean}}
+ * @returns {{needsTarget: boolean, max: number, required: boolean, dynamicCount: boolean}}
  */
 export function skillTargetPickInfo(skill) {
-  if (!skill || typeof skill !== "object") return { needsTarget: false, max: 1, required: false };
+  if (!skill || typeof skill !== "object") {
+    return { needsTarget: false, max: 1, required: false, dynamicCount: false };
+  }
   const nodes = skill.flow && Array.isArray(skill.flow.nodes) ? skill.flow.nodes : [];
+  const links = skill.flow && Array.isArray(skill.flow.links) ? skill.flow.links : [];
   const chooses = nodes.filter((n) => n && n.type === "chooseUnit");
   let max = 1;
   let required = false;
+  let dynamicCount = false;
   for (const n of chooses) {
     const o = n.options || {};
     const c = Math.max(1, Math.floor(Number(o.count) || 1));
     if (c > max) max = c;
     if (o.mustFill) required = true;
+    if (links.some((l) => l && l.to === n.id && l.portTo === "count")) dynamicCount = true;
   }
   return {
     needsTarget: Boolean(skill.requiresTarget) || chooses.length > 0,
     max,
     required,
+    dynamicCount,
   };
 }

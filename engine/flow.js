@@ -541,10 +541,13 @@ export function runFlow(prepared, env, opts = {}) {
       }
       case "chooseUnit": {
         // 最多可选多少个（默认 1）；mustFill = 必须选满，否则可以少选几个直接放
+        // 「最多可选」可以接数值线：接了按运行时数值，没接用积木上的常量
         const pick = () => {
           const raw = valueOf(node, "targets", local);
           const list = raw ? toList(raw) : null;
-          const max = Math.max(1, Math.floor(num(o.count) || 1));
+          const countRaw = valueOf(node, "count", local);
+          // 与积木常量一致：1..99（低于 1 按 1）
+          const max = Math.min(99, Math.max(1, Math.floor(num(countRaw) || 1)));
           // 预览（战斗界面在玩家点选前求候选集）：只收集候选，不真的问玩家
           if (typeof opts.pickCollector === "function") {
             opts.pickCollector(list ? list.slice() : [], {
@@ -726,6 +729,25 @@ export function runFlow(prepared, env, opts = {}) {
         const targets = unitList(valueOf(node, "targets", local));
         const additional = Boolean(o.additional);
         const ignoreReduction = Boolean(o.ignoreReduction);
+        // 自定义特效颜色：#rrggbb 单色，或逗号分隔的多级渐变（数组）
+        const colorStops = str(o.colorStops)
+          .split(/[\s,，]+/)
+          .map((x) => x.trim().toLowerCase())
+          .filter((x) => /^#[0-9a-f]{6}$/.test(x))
+          .slice(0, 8);
+        const singleColor = str(o.damageColor).toLowerCase();
+        const color = !o.customColor
+          ? ""
+          : colorStops.length > 1
+            ? colorStops
+            : colorStops.length === 1
+              ? colorStops[0]
+              : /^#[0-9a-f]{6}$/.test(singleColor)
+                ? singleColor
+                : "";
+        // 底图：fixedTexture = 图片固定在画面坐标，不随特效移动
+        const texture = str(o.effectImage).trim();
+        const fixedTexture = Boolean(o.fixedTexture);
         // 同一个「攻击」积木的多目标结算 = 一次攻击动作（同时命中）；
         // 循环体里的每一轮会各自开新批次，所以仍然是依次攻击。
         const attackGroup = env.newAttackGroup ? env.newAttackGroup() : null;
@@ -746,6 +768,9 @@ export function runFlow(prepared, env, opts = {}) {
             additional,
             ignoreReduction,
             attackGroup,
+            color,
+            texture,
+            fixedTexture,
           });
           if (rec) {
             hits.push(t);

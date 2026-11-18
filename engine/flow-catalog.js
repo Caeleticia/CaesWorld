@@ -302,8 +302,45 @@ export function buildFlowCatalog(ctx = {}) {
         control: "checkbox",
         default: false,
       },
+      {
+        key: "customColor",
+        label: "自定义特效颜色（含跳字）",
+        control: "checkbox",
+        default: false,
+        advanced: true,
+      },
+      {
+        key: "damageColor",
+        label: "单色（默认按属性）",
+        control: "color",
+        default: "#d6d6d6",
+        advanced: true,
+        showIf: { customColor: true },
+      },
+      {
+        key: "colorStops",
+        label: "多级渐变（逗号分隔，覆盖单色）",
+        control: "gradient",
+        default: "",
+        advanced: true,
+        showIf: { customColor: true },
+      },
+      {
+        key: "effectImage",
+        label: "底图（路径 / URL / 上传）",
+        control: "image",
+        default: "",
+        advanced: true,
+      },
+      {
+        key: "fixedTexture",
+        label: "固定底图（不随特效移动，按屏幕位置取图）",
+        control: "checkbox",
+        default: false,
+        advanced: true,
+      },
     ],
-    note: "「无视减免」只跳过目标侧的防御 / 抗性 / 易伤，攻击方加成与暴击照常；「附加伤害」不吃任何加成、不看任何减免、不暴击，也不触发「单位攻击时」。目标集里有多个单位时，它们属于同一次攻击动作，命中同时结算；要依次攻击请把「攻击」放进遍历 / 次数 / 条件循环。「伤害来源」留空就是流程拥有者自己；持续伤害可以接到「效果的施加者」，让击杀归属 / 日志记到施加者头上。属性选「本源」时伤害无视一切减免与「免疫伤害」，但仍算一次受击（会触发「单位受击时」）。",
+    note: "「无视减免」只跳过目标侧的防御 / 抗性 / 易伤，攻击方加成与暴击照常；「附加伤害」不吃任何加成、不看任何减免、不暴击，也不触发「单位攻击时」。目标集里有多个单位时，它们属于同一次攻击动作，命中同时结算；要依次攻击请把「攻击」放进遍历 / 次数 / 条件循环。「伤害来源」留空就是流程拥有者自己；持续伤害可以接到「效果的施加者」，让击杀归属 / 日志记到施加者头上。属性选「本源」时伤害无视一切减免与「免疫伤害」，但仍算一次受击（会触发「单位受击时」）。「高级」里的自定义颜色会同时影响飞弹 / 爆炸 / 冲击 / 粒子 / 跳字：单色用「单色」，填了「多级渐变」时按颜色顺序插值（逗号分隔，如 #ff6b8b, #ffb020, #3aa5f0）；不勾自定义颜色时按伤害属性默认色。「底图」会让特效改用图片纹理；勾「固定底图」时图片固定在画面坐标上不随特效移动，特效在不同位置会显示底图对应位置的像素，并按特效透明度叠加（相当于把原特效色的渲染部分替换成底图）。",
   });
   def({
     kind: "heal",
@@ -801,14 +838,15 @@ export function buildFlowCatalog(ctx = {}) {
     subtitle: "由玩家在战斗中指定单位",
     ports: [
       { id: "targets", label: "目标集（可选范围）", direction: "in", type: "targetset" },
+      { id: "count", label: "最多可选（可接数值）", direction: "in", type: "number" },
       { id: "set", direction: "out", type: "targetset" },
     ],
     options: [
-      { key: "count", label: "最多可选", control: "number", default: 1, min: 1, max: 99 },
+      { key: "count", label: "最多可选（未接线时）", control: "number", default: 1, min: 1, max: 99 },
       { key: "mustFill", label: "必须选满", control: "checkbox", default: false },
       { key: "eachTime", label: "每次重选（执行到这块就重选一次）", control: "checkbox", default: false },
     ],
-    note: "流程里放了「选择单位」的技能，战斗界面会先让玩家点选目标再释放；界面只会高亮「目标集」输入接到的候选单位（可以是我方 / 自己，不再固定为敌方全体），点其他单位只会打开详情。「最多可选」是这次能让玩家点几个（默认 1），不勾「必须选满」时可以少选几个直接放。默认同一次施放里只问一次（循环里也只问一次）；勾「每次重选」后，流程每执行到这个积木都重新让玩家选（适合循环里逐个选人）。全体攻击 / 固定目标的技能不需要放它。候选集里带进来的单位仍会按施放者阵营检查选中限制。",
+    note: "流程里放了「选择单位」的技能，战斗界面会先让玩家点选目标再释放；界面只会高亮「目标集」输入接到的候选单位（可以是我方 / 自己，不再固定为敌方全体），点其他单位只会打开详情。「最多可选」是这次能让玩家点几个（默认 1）：接一条数值线时按运行时数值决定（每次执行 / 重选时重新求值，低于 1 按 1、最高 99），没接线时用积木上填的常量；战斗界面会在点选前按同一个数值限制高亮与确认。不勾「必须选满」时可以少选几个直接放。默认同一次施放里只问一次（循环里也只问一次）；勾「每次重选」后，流程每执行到这个积木都重新让玩家选（适合循环里逐个选人）。全体攻击 / 固定目标的技能不需要放它。候选集里带进来的单位仍会按施放者阵营检查选中限制。",
   });
   def({
     kind: "setOp",

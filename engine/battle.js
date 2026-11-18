@@ -1101,6 +1101,9 @@ export function createBattle(setup) {
           value,
           attribute,
           cause: "flow",
+          color: extra && extra.color ? extra.color : null,
+          texture: extra && extra.texture ? String(extra.texture) : "",
+          fixedTexture: Boolean(extra && extra.fixedTexture),
           ignoreReduction: Boolean(extra && extra.ignoreReduction),
           additional: Boolean(extra && extra.additional),
           attackGroup: extra && extra.attackGroup,
@@ -1246,31 +1249,42 @@ export function createBattle(setup) {
   }
 
   /**
-   * 「这个技能会让玩家从哪些单位里选？」——给战斗界面在点选前锁定候选集。
-   * 用流程预览求值「选择单位」积木的 targets 输入；预览里所有会改变战斗状态的
+   * 「这个技能会让玩家从哪些单位里选、最多选几个？」——给战斗界面在点选前锁定候选集与数量上限。
+   * 用流程预览求值「选择单位」积木的 targets / count 输入；预览里所有会改变战斗状态的
    * env 动作都被替换成空操作，也不会消耗战斗随机序列。
    * @param {object|string} unitRef 施放者
    * @param {object} skill 技能（需要带 flow）
-   * @returns {object[]} publicUnit 数组
+   * @returns {{candidates: object[], max: number, required: boolean}} candidates 为 publicUnit 数组
    */
-  function skillTargetCandidates(unitRef, skill) {
+  function skillTargetPlan(unitRef, skill) {
+    const plan = { candidates: [], max: 1, required: false };
     const owner = getUnit(unitRef);
-    if (!owner || !isAlive(owner) || !skill || typeof skill !== "object") return [];
+    if (!owner || !isAlive(owner) || !skill || typeof skill !== "object") return plan;
     const found = [];
     const add = (u) => {
       if (!u || !isAlive(u) || !canSelectUnit(u, owner.side)) return;
       if (!found.some((x) => x.key === u.key)) found.push(u);
     };
     const nodes = skill.flow && Array.isArray(skill.flow.nodes) ? skill.flow.nodes : [];
+    // 没接数据线时的常量（也是预览失败时的兜底）
+    for (const n of nodes) {
+      if (!n || n.type !== "chooseUnit") continue;
+      const c = Math.max(1, Math.floor(Number(n.options && n.options.count) || 1));
+      if (c > plan.max) plan.max = c;
+      if (n.options && n.options.mustFill) plan.required = true;
+    }
     const hasChoose = nodes.some((n) => n && n.type === "chooseUnit");
     if (!hasChoose) {
       // 旧数据式技能：只给了 requiresTarget，没有「选择单位」积木 → 默认敌方
       if (skill.requiresTarget) for (const u of listSide(otherSide(owner.side))) add(u);
-      return found.map(publicUnit);
+      plan.candidates = found.map(publicUnit);
+      return plan;
     }
     const prepared = preparedFlowOf(skill.flow);
-    if (!prepared || !prepared.ok) return [];
+    if (!prepared || !prepared.ok) return plan;
     let sawPick = false;
+    let observedMax = 1;
+    let observedRequired = false;
     const allTriggers = [...prepared.nodes.values()].filter((n) => n && n.type === "trigger");
     const castTriggers = allTriggers.filter(
       (n) => n.options && (n.options.event === "skillCastSelf" || n.options.event === "skillCast")
@@ -1312,8 +1326,10 @@ export function createBattle(setup) {
       try {
         runFlow(prepared, env, {
           triggerNode: trigger.id,
-          pickCollector: (list) => {
+          pickCollector: (list, meta = {}) => {
             sawPick = true;
+            observedMax = Math.max(observedMax, Math.max(1, Math.floor(Number(meta.max) || 1)));
+            if (meta.required) observedRequired = true;
             for (const u of list) add(u);
           },
         });
@@ -1321,13 +1337,22 @@ export function createBattle(setup) {
         // 预览失败不影响实际释放：界面退化为不限制候选，由实际流程的 playerChoose 再过滤
       }
     }
-    if (!sawPick) {
+    if (sawPick) {
+      plan.max = observedMax;
+      plan.required = observedRequired;
+    } else {
       // 预览没能走到「选择单位」（循环里依赖伤害等无法预览的状态）：
       // 退化成「所有当前可选中单位」，至少不会让玩家完全点不了我方单位。
       // 真正的候选过滤仍由释放时的 playerChoose 完成。
       for (const u of livingUnits()) add(u);
     }
-    return found.map(publicUnit);
+    plan.candidates = found.map(publicUnit);
+    return plan;
+  }
+
+  /** 兼容旧调用：只要候选集 */
+  function skillTargetCandidates(unitRef, skill) {
+    return skillTargetPlan(unitRef, skill).candidates;
   }
 
   function unitDataOf(u, field, opts = {}) {
@@ -1497,6 +1522,9 @@ export function createBattle(setup) {
         target: B.uid,
         skillId: p.skillId || null,
         cause: p.cause || "direct",
+        color: p.color || null,
+        texture: p.texture || "",
+        fixedTexture: Boolean(p.fixedTexture),
         ...result,
         finalDamage: 0,
         aborted: true,
@@ -1528,6 +1556,9 @@ export function createBattle(setup) {
       target: B.uid,
       skillId: p.skillId || null,
       cause: p.cause || "direct",
+      color: p.color || null,
+      texture: p.texture || "",
+      fixedTexture: Boolean(p.fixedTexture),
       ...result,
       finalDamage: final,
       immune,
@@ -2909,6 +2940,8 @@ export function createBattle(setup) {
     skillStateOf,
     /** 「选择单位」积木的候选集预览：战斗界面据此只让点击给定集合里的单位 */
     skillTargetCandidates,
+    /** 候选集 + 本次最多可选数量（count 可接数值线） */
+    skillTargetPlan,
     /** 增加 / 扣减单位本回合剩余可动次数（额外行动） */
     addActions,
     resetActions,
