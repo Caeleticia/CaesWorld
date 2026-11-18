@@ -227,12 +227,15 @@
               <button class="btn tiny" id="btn-locate" type="button" title="把视角移动到离视口中心最近的积木">定位</button>
               <button class="btn tiny" id="btn-tidy" type="button" title="自动整理积木位置">整理</button>
               <button class="btn tiny" id="btn-template" type="button" title="插入模板：撞击（默认史莱姆）" hidden>模板</button>
+              <button class="btn tiny" id="btn-marquee" type="button" aria-pressed="false" title="框选积木与连线：拖空白处拉框，拖动已选积木可整组平移">框选</button>
               <label class="canvas-mode" title="滑钮切换：拖拽画布 / 切割连线">
                 <span data-mode="pan">拖拽</span>
                 <input type="checkbox" id="canvas-mode" role="switch" aria-label="切换拖拽画布或切割连线" />
                 <span data-mode="cut">切割</span>
               </label>
-              <button class="btn tiny danger" id="btn-delete-block" type="button" disabled>删除积木</button>
+              <button class="btn tiny" id="btn-copy-blocks" type="button" title="复制选中的积木和它们之间的连线" disabled>复制</button>
+              <button class="btn tiny" id="btn-paste-blocks" type="button" title="把剪贴板里的积木粘贴到当前流程" disabled>粘贴</button>
+              <button class="btn tiny danger" id="btn-delete-block" type="button" disabled>删除选中</button>
               <button class="btn tiny danger" id="btn-clear-flow" type="button">清空</button>
             </div>
           </div>
@@ -243,6 +246,7 @@
                 <div class="blocks-world" id="blocks-world"></div>
                 <div class="erase-cursor" id="erase-cursor"></div>
                 <div class="erase-hint" id="erase-hint" hidden>切割模式 · 拖过连线删除（松手退出）</div>
+                <div class="selection-box" id="selection-box" hidden></div>
                 <div class="flow-empty" id="flow-empty"></div>
               </div>
             </div>
@@ -520,6 +524,7 @@
           <label class="tset" title="只统计占位单位；不占位单位不占名额"><span>场上最多单位</span>
             <input id="set-max-units" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" aria-label="占位单位上限" />
           </label>
+          <label class="tset" title="勾选后同名单位可以同时上场；不勾则同名单位只能有一个"><input id="set-same-name" type="checkbox" aria-label="允许上场同名单位" /><span>允许上场同名单位</span></label>
           <label class="tset"><input id="set-red-inv" type="checkbox" aria-label="红方无敌" /><span>红方无敌</span></label>
           <label class="tset"><input id="set-blue-inv" type="checkbox" aria-label="蓝方无敌" /><span>蓝方无敌</span></label>
           <label class="tset"><input id="set-red-ai" type="checkbox" aria-label="人机红方" /><span>人机红方</span></label>
@@ -660,7 +665,7 @@
               </label>
             </div>
             <div class="pcfg-set-group">
-              <label class="tset"><input id="pcfg-samename" type="checkbox" checked /><span>允许同名角色</span></label>
+              <label class="tset" title="勾选后同名单位可以同时上场；不勾则同名单位只能有一个"><input id="pcfg-samename" type="checkbox" checked /><span>允许上场同名单位</span></label>
             </div>
             <div class="pcfg-set-group pcfg-set-group--two">
               <label class="tset"><input id="pcfg-red-ai" type="checkbox" /><span>人机红方</span></label>
