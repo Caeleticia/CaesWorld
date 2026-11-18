@@ -483,7 +483,7 @@ export function chooseStrongDeployCard(battle, registry, side, fallback = null) 
   if (pb.localDeploy && pb.localDeploy.side !== side) return -1;
   if (!battle.canDeploy(side)) return -1;
   const field = pb.units.filter((u) => u.side === side && u.state === "alive");
-  if (field.filter((u) => u.countsAsUnit).length >= pb.maxUnits) return -1;
+  const occupied = field.filter((u) => u.occupiesSlot).length;
   // 不共戴天在场时不再补队友；有队友时也不上它。
   if (field.some((u) => u.cardId === "study_unit_bgdt")) return -1;
   const hand = pb.hand?.[side] || [];
@@ -495,6 +495,8 @@ export function chooseStrongDeployCard(battle, registry, side, fallback = null) 
   for (let i = 0; i < hand.length; i += 1) {
     const card = registry.getUnit(hand[i]);
     if (!card) continue;
+    // 占位已满时只有不占位的牌还能继续上
+    if (card.occupiesSlot !== false && occupied >= pb.maxUnits) continue;
     const name = card.name || card.id;
     if (!allowSameName && fieldNames.has(name)) continue;
     if (card.id === "study_unit_bgdt" && field.length > 0) continue;

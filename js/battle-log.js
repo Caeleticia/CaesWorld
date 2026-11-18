@@ -390,7 +390,7 @@ export function createBattleLog({
     }
     if (info.turn) lines.push(`回合：${info.turn}`);
     if (info.aliveRed !== undefined && info.aliveBlue !== undefined) {
-      lines.push(`场上：红方 ${info.aliveRed} · 蓝方 ${info.aliveBlue}`);
+      lines.push(`剩余单位：红方 ${info.aliveRed} · 蓝方 ${info.aliveBlue}`);
     }
     lines.push(`记录：${list.length} 条`, "");
     for (const entry of list) {

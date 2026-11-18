@@ -198,7 +198,7 @@ function chooseWeakDeployCard(battle, registry, side) {
   if (pb.localDeploy && pb.localDeploy.side !== side) return -1;
   if (!battle.canDeploy(side)) return -1;
   const field = pb.units.filter((u) => u.side === side && u.state === "alive");
-  if (field.filter((u) => u.countsAsUnit).length >= pb.maxUnits) return -1;
+  const occupied = field.filter((u) => u.occupiesSlot).length;
   // 不共戴天是「单挂输出」：它在场时不再补队友；有队友时也不部署它。
   const soloOnField = field.some((u) => u.cardId === "study_unit_bgdt");
   if (soloOnField) return -1;
@@ -210,6 +210,8 @@ function chooseWeakDeployCard(battle, registry, side) {
   for (let i = 0; i < hand.length; i += 1) {
     const card = registry.getUnit(hand[i]);
     if (!card) continue;
+    // 占位已满时只有不占位的牌还能继续上
+    if (card.occupiesSlot !== false && occupied >= pb.maxUnits) continue;
     const name = card.name || card.id;
     if (!allowSameName && fieldNames.has(name)) continue;
     if (card.id === "study_unit_bgdt" && field.length > 0) continue;

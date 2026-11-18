@@ -32,7 +32,6 @@ import {
   skillTargetPickInfo,
   INVINCIBLE_LABEL,
   normalizeInvincible,
-  canSelectUnit,
 } from "../engine/index.js";
 import { createStageScaler, STAGE_DESIGN } from "./training-stage.js";
 import { BattleFX } from "./battle-fx.js";
@@ -393,14 +392,8 @@ export function openBattle({ registry, config, onExit }) {
     wrap.classList.toggle("is-active", s.battle.state.activeId === pub.uid);
     wrap.classList.toggle("is-selectable", canPickUnit(pub));
     wrap.classList.toggle("is-invincible", Boolean(pub.invincible));
-    const active = activeUnit();
-    const targetable =
-      !s.busy &&
-      s.pending &&
-      active &&
-      pub.side !== active.side &&
-      pub.state === "alive" &&
-      canSelectUnit(pub, active.side);
+    const candidateUids = (s.pending && s.pending.candidates) || [];
+    const targetable = !s.busy && s.pending && pub.state === "alive" && candidateUids.includes(pub.uid);
     wrap.classList.toggle("is-targetable", Boolean(targetable));
     wrap.classList.toggle("is-picked", Boolean(s.pending && (s.pending.picked || []).includes(pub.uid)));
 
@@ -763,10 +756,12 @@ export function openBattle({ registry, config, onExit }) {
     const pickMax = s.pending ? Math.max(1, Number(s.pending.max) || 1) : 1;
     const pickRequired = Boolean(s.pending && s.pending.required);
     const pickedUids = (s.pending && s.pending.picked) || [];
-    const foeCount = s.battle
-      .publicBattle()
-      .units.filter((u) => u.side !== active.side && u.state === "alive" && canSelectUnit(u, active.side)).length;
-    const needCount = Math.min(pickMax, foeCount);
+    const candidateCount = s.pending
+      ? s.battle
+          .publicBattle()
+          .units.filter((u) => u.state === "alive" && (s.pending.candidates || []).includes(u.uid)).length
+      : 0;
+    const needCount = Math.min(pickMax, candidateCount);
     const canConfirm = pickedUids.length > 0 && (!pickRequired || pickedUids.length >= needCount);
     const confirmButton =
       s.pending && pickMax > 1
@@ -775,9 +770,9 @@ export function openBattle({ registry, config, onExit }) {
            </button>`
         : "";
     const targetTip = s.pending
-      ? `<div class="tbt-act-hint"><b>选择目标</b> · 点击${sideName(
-          active.side === "ally" ? "enemy" : "ally"
-        )}单位${pickMax > 1 ? `（最多 ${pickMax} 个${pickRequired ? "，必须选满" : "，可以少选"}）` : ""}</div>`
+      ? `<div class="tbt-act-hint"><b>选择目标</b> · ${
+          candidateCount ? "点击高亮的候选单位" : "这次没有可选目标，直接释放"
+        }${pickMax > 1 ? `（最多 ${pickMax} 个${pickRequired ? "，必须选满" : "，可以少选"}）` : ""}</div>`
       : `<div class="tbt-act-hint">选择一个技能，或结束行动；剩余可动 ${Number(active.actionsLeft) || 0} 次</div>`;
     el.innerHTML = `
       <div class="tbt-act-head">
@@ -1587,14 +1582,14 @@ export function openBattle({ registry, config, onExit }) {
     const pb = s.battle.publicBattle();
     const title = pb.winner === "ally" ? "红方胜利" : pb.winner === "enemy" ? "蓝方胜利" : "平局";
     const cls = pb.winner === "ally" ? "is-red" : pb.winner === "enemy" ? "is-blue" : "is-draw";
-    const aliveRed = pb.units.filter((u) => u.side === "ally" && u.state === "alive").length;
-    const aliveBlue = pb.units.filter((u) => u.side === "enemy" && u.state === "alive").length;
+    const aliveRed = pb.units.filter((u) => u.side === "ally" && u.state === "alive" && u.countsAsUnit).length;
+    const aliveBlue = pb.units.filter((u) => u.side === "enemy" && u.state === "alive" && u.countsAsUnit).length;
     const reason =
       pb.endReason === "max-cycles"
         ? `达到回合上限（第 ${pb.turn} 回合）`
         : pb.endReason === "draw"
-          ? "双方同时全灭"
-          : "一方场上单位全部退场";
+          ? "双方剩余单位同时归零"
+          : "一方剩余单位归零";
     battleLog.finish({
       winner: pb.winner,
       winnerText: title,
@@ -1610,8 +1605,8 @@ export function openBattle({ registry, config, onExit }) {
           <p class="tbt-result-sub">${reason}</p>
           <div class="tbt-result-stats">
             <span>回合<b>${pb.turn}</b></span>
-            <span>红方场上<b>${aliveRed}</b></span>
-            <span>蓝方场上<b>${aliveBlue}</b></span>
+            <span>红方剩余单位<b>${aliveRed}</b></span>
+            <span>蓝方剩余单位<b>${aliveBlue}</b></span>
           </div>
           <div class="tbt-result-actions">
             <button class="btn" type="button" data-view-log>查看战报</button>
@@ -1652,8 +1647,9 @@ export function openBattle({ registry, config, onExit }) {
     const pb = s.battle.publicBattle();
     const pub = pb.units.find((u) => u.uid === uid);
     if (s.pending) {
-      const active = activeUnit();
-      if (pub && active && pub.side !== active.side && pub.state === "alive" && canSelectUnit(pub, active.side)) {
+      // 只认「选择单位」积木给出的候选集：可能是敌方，也可能是我方 / 自己
+      const candidates = s.pending.candidates || [];
+      if (pub && pub.state === "alive" && candidates.includes(uid)) {
         // 只能选 1 个：点谁打谁；能选多个：点一下选中 / 再点取消
         if (Math.max(1, Number(s.pending.max) || 1) <= 1) {
           executeSkill(s.pending.index, uid);
@@ -1665,7 +1661,7 @@ export function openBattle({ registry, config, onExit }) {
         else if (picked.length < s.pending.max) picked.push(uid);
         refreshAll();
       } else {
-        // 不在当前可选目标范围 → 打开详情
+        // 不在本次候选集里 → 打开详情
         openDetail(uid);
       }
       return;
@@ -1726,15 +1722,24 @@ export function openBattle({ registry, config, onExit }) {
       executeSkill(index, null);
       return;
     }
-    // 需要选目标的技能：即使只有一个敌人，也由玩家手动点选目标
-    const enemies = s.battle
-      .publicBattle()
-      .units.filter((u) => u.side !== active.side && u.state === "alive" && canSelectUnit(u, active.side));
-    if (!enemies.length) {
+    // 候选集来自流程里「选择单位」积木接到的目标集，而不是固定「敌方全体」
+    let candidates = [];
+    try {
+      candidates = s.battle.skillTargetCandidates(active.uid, skill) || [];
+    } catch {
+      candidates = [];
+    }
+    if (!candidates.length) {
       executeSkill(index, null);
       return;
     }
-    s.pending = { index, max: Math.max(1, info.max), required: Boolean(info.required), picked: [] };
+    s.pending = {
+      index,
+      max: Math.max(1, info.max),
+      required: Boolean(info.required),
+      picked: [],
+      candidates: candidates.map((u) => u.uid),
+    };
     refreshAll();
   }
 

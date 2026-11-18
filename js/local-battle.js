@@ -2,10 +2,10 @@
  * local-battle.js —— 游玩 / 同屏：战斗界面
  *
  * 战斗逻辑在 engine/battle.js 的 local 模式：
- *   · 初始抽牌进手牌，双方依次布阵（至少 1 个，最多场上上限）
- *   · 场上单位少于上限时，点虚线格从手牌补上场
+ *   · 初始抽牌进手牌，双方依次布阵（至少 1 个，占位最多到数量上限）
+ *   · 场上占位单位少于上限时，点虚线格从手牌补上场（不占位单位不占名额）
  *   · 每经过设定回合，双方交替补牌（牌背 → 翻面 → 飞入手牌按钮）
- *   · 场上全灭但还有手牌时，立刻要求补上场；手上没有牌则失败
+ *   · 剩余单位（计数单位）归零但还有手牌时，立刻要求补上场；没有牌则失败
  *
  * 本文件只负责表现与交互：卡牌、手牌、布阵、补牌动画、行动栏、特效。
  */
@@ -25,7 +25,6 @@ import {
   skillTargetPickInfo,
   INVINCIBLE_LABEL,
   normalizeInvincible,
-  canSelectUnit,
 } from "../engine/index.js";
 import { createStageScaler, STAGE_DESIGN } from "./training-stage.js";
 import { BattleFX } from "./battle-fx.js";
@@ -393,9 +392,8 @@ export function openLocalBattle({ registry, config, onExit }) {
     wrap.classList.toggle("is-active", s.battle.state.activeId === pub.uid);
     wrap.classList.toggle("is-selectable", canPickUnit(pub));
     wrap.classList.toggle("is-invincible", Boolean(pub.invincible));
-    const active = activeUnit();
-    const targetable =
-      !s.busy && s.pending && active && pub.side !== active.side && pub.state === "alive" && canSelectUnit(pub, active.side);
+    const candidateUids = (s.pending && s.pending.candidates) || [];
+    const targetable = !s.busy && s.pending && pub.state === "alive" && candidateUids.includes(pub.uid);
     wrap.classList.toggle("is-targetable", Boolean(targetable));
     wrap.classList.toggle("is-picked", Boolean(s.pending && (s.pending.picked || []).includes(pub.uid)));
     const pb = s.battle.publicBattle();
@@ -608,7 +606,10 @@ export function openLocalBattle({ registry, config, onExit }) {
         updateCard(wrap, pub);
       }
       for (const slot of grid.querySelectorAll(".lbt-slot")) slot.remove();
-      if (list.length < s.config.maxUnits) grid.append(createDeploySlot(side));
+      // 不占位单位不占名额：占位满员时，手里还有不占位单位也允许继续补牌
+      const occupied = list.filter((u) => u.occupiesSlot).length;
+      const handHasFreeUnit = (pb.hand?.[side] || []).some((id) => s.registry.getUnit(id)?.occupiesSlot === false);
+      if (occupied < s.config.maxUnits || handHasFreeUnit) grid.append(createDeploySlot(side));
       layoutZone(side);
     }
     updateHeader();
@@ -704,7 +705,7 @@ export function openLocalBattle({ registry, config, onExit }) {
       const side = pb.localDeploy.side;
       el.innerHTML = `
         <span class="tbt-act-hint"><b>${sideName(side)}布阵</b> · ${
-          pb.localDeploy.initial ? "至少上场 1 个单位，最多 " + s.config.maxUnits + " 个" : "场上全灭，请从手牌补上场"
+          pb.localDeploy.initial ? "至少上场 1 个单位，占位最多 " + s.config.maxUnits + " 个" : "剩余单位归零，请从手牌补上场"
         }</span>
         ${
           isHumanSide(side)
@@ -779,10 +780,12 @@ export function openLocalBattle({ registry, config, onExit }) {
     const pickMax = s.pending ? Math.max(1, Number(s.pending.max) || 1) : 1;
     const pickRequired = Boolean(s.pending && s.pending.required);
     const pickedUids = (s.pending && s.pending.picked) || [];
-    const foeCount = s.battle
-      .publicBattle()
-      .units.filter((u) => u.side !== active.side && u.state === "alive" && canSelectUnit(u, active.side)).length;
-    const needCount = Math.min(pickMax, foeCount);
+    const candidateCount = s.pending
+      ? s.battle
+          .publicBattle()
+          .units.filter((u) => u.state === "alive" && (s.pending.candidates || []).includes(u.uid)).length
+      : 0;
+    const needCount = Math.min(pickMax, candidateCount);
     const canConfirm = pickedUids.length > 0 && (!pickRequired || pickedUids.length >= needCount);
     const confirmButton =
       s.pending && pickMax > 1
@@ -791,7 +794,9 @@ export function openLocalBattle({ registry, config, onExit }) {
            </button>`
         : "";
     const targetTip = s.pending
-      ? `<div class="tbt-act-hint"><b>选择目标</b> · 点击${sideName(active.side === "ally" ? "enemy" : "ally")}单位${pickMax > 1 ? `（最多 ${pickMax} 个${pickRequired ? "，必须选满" : "，可以少选"}）` : ""}</div>`
+      ? `<div class="tbt-act-hint"><b>选择目标</b> · ${
+          candidateCount ? "点击高亮的候选单位" : "这次没有可选目标，直接释放"
+        }${pickMax > 1 ? `（最多 ${pickMax} 个${pickRequired ? "，必须选满" : "，可以少选"}）` : ""}</div>`
       : `<div class="tbt-act-hint">选择一个技能，或结束行动；剩余可动 ${Number(active.actionsLeft) || 0} 次</div>`;
     el.innerHTML = `
       <div class="tbt-act-head">
@@ -824,17 +829,17 @@ export function openLocalBattle({ registry, config, onExit }) {
   }
 
   /* ---------------- 手牌 / 布阵 ---------------- */
-  const fieldCount = (side) => s.battle.publicBattle().units.filter((u) => u.side === side && u.state === "alive" && u.countsAsUnit).length;
+  const fieldCount = (side) => s.battle.publicBattle().units.filter((u) => u.side === side && u.state === "alive" && u.occupiesSlot).length;
 
   function handCardDisabled(side, index, pub) {
     if (!pub) return true;
     if (pub.phase === "finished") return true;
     if (pub.localDeploy && pub.localDeploy.side !== side) return true;
-    if (!s.battle.canDeploy(side)) return true;
-    if (fieldCount(side) >= s.config.maxUnits) return true;
     const cardId = pub.hand?.[side]?.[index];
     const card = cardId ? s.registry.getUnit(cardId) : null;
     if (!card) return true;
+    // 占位已满时，不占位的手牌仍然可以上场
+    if (!s.battle.canDeploy(side, card.id)) return true;
     if (!s.config.allowSameName) {
       const name = card.name || card.id;
       if (pub.units.some((u) => u.side === side && u.state === "alive" && u.name === name)) return true;
@@ -880,18 +885,19 @@ export function openLocalBattle({ registry, config, onExit }) {
     const hand = pb.hand?.[side] || [];
     if (refs.handTitle) refs.handTitle.textContent = `${sideName(side)}手牌`;
     const fc = fieldCount(side);
+    const living = pb.units.filter((u) => u.side === side && u.state === "alive").length;
     const required = pb.localDeploy?.side === side && pb.phase === "deploy";
     if (refs.handHint) {
       refs.handHint.textContent = required
         ? pb.localDeploy.initial
-          ? `布阵：至少上场 1 个，最多 ${s.config.maxUnits} 个（当前 ${fc}/${s.config.maxUnits}）`
-          : `场上全灭：请补上场（当前 ${fc}/${s.config.maxUnits}）`
-        : `场上 ${fc}/${s.config.maxUnits} · 点击卡牌从手牌上场`;
+          ? `布阵：至少上场 1 个，占位最多 ${s.config.maxUnits} 个（单位占用 ${fc}/${s.config.maxUnits}）`
+          : `剩余单位归零，请补上场（单位占用 ${fc}/${s.config.maxUnits}）`
+        : `单位占用 ${fc}/${s.config.maxUnits} · 点击卡牌从手牌上场`;
     }
     if (refs.handClose) refs.handClose.hidden = required;
     if (refs.handDone) {
       refs.handDone.hidden = !required;
-      refs.handDone.disabled = fc < 1;
+      refs.handDone.disabled = living < 1;
       refs.handDone.textContent = pb.localDeploy?.initial ? "完成布阵" : "完成上场";
     }
     if (!hand.length) {
@@ -1537,7 +1543,8 @@ export function openLocalBattle({ registry, config, onExit }) {
       guard += 1;
       const pb = s.battle.publicBattle();
       if (pb.localDeploy && pb.localDeploy.side !== side) break;
-      if (fieldCount(side) >= s.config.maxUnits) break;
+      // 占位满员时，手里如果还有不占位单位，canDeploy 仍为 true，可继续补
+      if (!s.battle.canDeploy(side)) break;
       const index = chooseBestDeployCard(s.battle, s.registry, side);
       if (index < 0) break;
       const events = take(() => s.battle.deployFromHand(side, index));
@@ -1625,14 +1632,14 @@ export function openLocalBattle({ registry, config, onExit }) {
     const pb = s.battle.publicBattle();
     const title = pb.winner === "ally" ? "红方胜利" : pb.winner === "enemy" ? "蓝方胜利" : "平局";
     const cls = pb.winner === "ally" ? "is-red" : pb.winner === "enemy" ? "is-blue" : "is-draw";
-    const aliveRed = pb.units.filter((u) => u.side === "ally" && u.state === "alive").length;
-    const aliveBlue = pb.units.filter((u) => u.side === "enemy" && u.state === "alive").length;
+    const aliveRed = pb.units.filter((u) => u.side === "ally" && u.state === "alive" && u.countsAsUnit).length;
+    const aliveBlue = pb.units.filter((u) => u.side === "enemy" && u.state === "alive" && u.countsAsUnit).length;
     const reason =
       pb.endReason === "max-cycles"
         ? `达到回合上限（第 ${pb.turn} 回合）`
         : pb.endReason === "draw"
-          ? "双方同时全灭"
-          : "一方场上单位全部退场且没有手牌";
+          ? "双方剩余单位同时归零"
+          : "一方剩余单位归零且没有手牌";
     battleLog.finish({
       winner: pb.winner,
       winnerText: title,
@@ -1648,8 +1655,8 @@ export function openLocalBattle({ registry, config, onExit }) {
           <p class="tbt-result-sub">${reason}</p>
           <div class="tbt-result-stats">
             <span>回合<b>${pb.turn}</b></span>
-            <span>红方场上<b>${aliveRed}</b></span>
-            <span>蓝方场上<b>${aliveBlue}</b></span>
+            <span>红方剩余单位<b>${aliveRed}</b></span>
+            <span>蓝方剩余单位<b>${aliveBlue}</b></span>
           </div>
           <div class="tbt-result-actions">
             <button class="btn" type="button" data-view-log>查看战报</button>
@@ -1685,8 +1692,9 @@ export function openLocalBattle({ registry, config, onExit }) {
     const pb = s.battle.publicBattle();
     const pub = pb.units.find((u) => u.uid === uid);
     if (s.pending && !s.busy) {
-      const active = activeUnit();
-      if (pub && active && pub.side !== active.side && pub.state === "alive" && canSelectUnit(pub, active.side)) {
+      // 只认「选择单位」积木给出的候选集：可能是敌方，也可能是我方 / 自己
+      const candidates = s.pending.candidates || [];
+      if (pub && pub.state === "alive" && candidates.includes(uid)) {
         if (Math.max(1, Number(s.pending.max) || 1) <= 1) {
           executeSkill(s.pending.index, uid);
           return;
@@ -1697,7 +1705,7 @@ export function openLocalBattle({ registry, config, onExit }) {
         else if (picked.length < s.pending.max) picked.push(uid);
         refreshAll();
       } else {
-        // 不在本次行动可选范围（例如友方 / 已行动）→ 点开详情
+        // 不在本次候选集里的单位 → 点开详情
         detail.openUnit(uid);
       }
       return;
@@ -1761,14 +1769,24 @@ export function openLocalBattle({ registry, config, onExit }) {
       executeSkill(index, null);
       return;
     }
-    const enemies = s.battle
-      .publicBattle()
-      .units.filter((u) => u.side !== active.side && u.state === "alive" && canSelectUnit(u, active.side));
-    if (!enemies.length) {
+    // 候选集来自流程里「选择单位」积木接到的目标集，而不是固定「敌方全体」
+    let candidates = [];
+    try {
+      candidates = s.battle.skillTargetCandidates(active.uid, skill) || [];
+    } catch {
+      candidates = [];
+    }
+    if (!candidates.length) {
       executeSkill(index, null);
       return;
     }
-    s.pending = { index, max: Math.max(1, info.max), required: Boolean(info.required), picked: [] };
+    s.pending = {
+      index,
+      max: Math.max(1, info.max),
+      required: Boolean(info.required),
+      picked: [],
+      candidates: candidates.map((u) => u.uid),
+    };
     refreshAll();
   }
 
