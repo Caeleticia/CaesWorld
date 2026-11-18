@@ -543,8 +543,18 @@ export function runFlow(prepared, env, opts = {}) {
         // 最多可选多少个（默认 1）；mustFill = 必须选满，否则可以少选几个直接放
         const pick = () => {
           const raw = valueOf(node, "targets", local);
+          const list = raw ? toList(raw) : null;
           const max = Math.max(1, Math.floor(num(o.count) || 1));
-          return env.pickForPlayer(raw ? toList(raw) : null, { max, required: Boolean(o.mustFill) });
+          // 预览（战斗界面在玩家点选前求候选集）：只收集候选，不真的问玩家
+          if (typeof opts.pickCollector === "function") {
+            opts.pickCollector(list ? list.slice() : [], {
+              max,
+              required: Boolean(o.mustFill),
+              nodeId: node.id,
+            });
+            return [];
+          }
+          return env.pickForPlayer(list, { max, required: Boolean(o.mustFill) });
         };
         // eachTime = 每次执行到这个积木都重新选（不再「一次流程只问一次」）
         return o.eachTime ? pick() : evalSticky(node, local, pick);

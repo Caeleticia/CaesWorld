@@ -141,14 +141,14 @@ const nextUid = () => `battle:${++seq}`;
  * @param {number} [setup.seed]
  * @param {number} [setup.maxCycles]
  * @param {number} [setup.slotsPerSide]
- * @param {number} [setup.summonLimit] 每侧计数单位上限（不勾「无视单位上限」时生效）
+ * @param {number} [setup.summonLimit] 每侧占位单位上限（占位单位计入数量上限；不勾「无视单位上限」时生效）
  * @param {function} [setup.chooseTargets] 玩家选人回调（返回单位或单位数组），传了才允许「选择单位」积木
  * @param {function} [setup.onEvent]
  *
  * —— side 模式（训练场）/ local 模式（同屏）专用 ——
  * @param {"speed"|"side"|"local"} [setup.mode]
  * @param {{ally?: string[], enemy?: string[]}} [setup.decks] 双方牌组（单位卡 id，按入场顺序）
- * @param {number} [setup.maxUnits] 每侧场上最多单位数（默认取 summonLimit / slotsPerSide）
+ * @param {number} [setup.maxUnits] 每侧最多占位单位数（默认取 summonLimit / slotsPerSide）
  * @param {"ally"|"enemy"} [setup.firstSide] 先手方（默认 ally = 红方）
  * @param {string[]} [setup.invincibleSides] 整方无敌（训练场「红方无敌 / 蓝方无敌」）
  *
@@ -189,7 +189,7 @@ export function createBattle(setup) {
     1,
     Math.min(24, Math.round(Number(maxUnits) || Number(summonLimit) || Number(slotsPerSide) || DEFAULT_SLOTS))
   );
-  /** side 模式下格子数与场上单位上限都等于「场上最多单位数」 */
+  /** side 模式下格子数与占位单位上限都等于「场上最多单位数」 */
   const slots = sideMode ? fieldSize : slotsPerSide;
   const limit = sideMode ? fieldSize : summonLimit;
   const first = sideOf(firstSide || "ally");
@@ -409,7 +409,7 @@ export function createBattle(setup) {
   const livingOf = (side) => livingUnits().filter((u) => u.side === side);
   /**
    * 「目标集」：某侧所有当前选择者能选中的存活单位。
-   * 计数只影响「阵营单位数量上限」，不再影响目标集；选中限制按 fromSide 判断。
+   * 计数只影响「剩余单位判定」，占位只影响「数量上限」；两者都不影响目标集，选中限制按 fromSide 判断。
    */
   const listSide = (side, opts = {}) => livingOf(side).filter((u) => canSelectUnit(u, opts.fromSide));
   /** 单位所属阵营：没写 faction 的旧数据回落到 side */
@@ -418,7 +418,7 @@ export function createBattle(setup) {
     const f = u.faction;
     return f === undefined || f === null || f === "" ? u.side : String(f);
   };
-  /** 某阵营的存活单位；默认包含不计数单位（不计数只影响数量上限） */
+  /** 某阵营的存活单位；默认包含不计数单位（计数只影响剩余单位判定） */
   const listFaction = (faction, opts = {}) => {
     if (!faction) return [];
     const includeUncounted = opts.includeUncounted !== false;
@@ -1245,6 +1245,91 @@ export function createBattle(setup) {
     return out;
   }
 
+  /**
+   * 「这个技能会让玩家从哪些单位里选？」——给战斗界面在点选前锁定候选集。
+   * 用流程预览求值「选择单位」积木的 targets 输入；预览里所有会改变战斗状态的
+   * env 动作都被替换成空操作，也不会消耗战斗随机序列。
+   * @param {object|string} unitRef 施放者
+   * @param {object} skill 技能（需要带 flow）
+   * @returns {object[]} publicUnit 数组
+   */
+  function skillTargetCandidates(unitRef, skill) {
+    const owner = getUnit(unitRef);
+    if (!owner || !isAlive(owner) || !skill || typeof skill !== "object") return [];
+    const found = [];
+    const add = (u) => {
+      if (!u || !isAlive(u) || !canSelectUnit(u, owner.side)) return;
+      if (!found.some((x) => x.key === u.key)) found.push(u);
+    };
+    const nodes = skill.flow && Array.isArray(skill.flow.nodes) ? skill.flow.nodes : [];
+    const hasChoose = nodes.some((n) => n && n.type === "chooseUnit");
+    if (!hasChoose) {
+      // 旧数据式技能：只给了 requiresTarget，没有「选择单位」积木 → 默认敌方
+      if (skill.requiresTarget) for (const u of listSide(otherSide(owner.side))) add(u);
+      return found.map(publicUnit);
+    }
+    const prepared = preparedFlowOf(skill.flow);
+    if (!prepared || !prepared.ok) return [];
+    let sawPick = false;
+    const allTriggers = [...prepared.nodes.values()].filter((n) => n && n.type === "trigger");
+    const castTriggers = allTriggers.filter(
+      (n) => n.options && (n.options.event === "skillCastSelf" || n.options.event === "skillCast")
+    );
+    for (const trigger of castTriggers.length ? castTriggers : allTriggers) {
+      const env = flowEnv(owner, null);
+      const noop = () => {};
+      // 预览：不询问玩家、不消耗战斗 RNG、不产生任何状态变化 / 事件 / 日志
+      // 用一个独立的确定性随机序列，让「随机数驱动的循环」能正常收敛（而不是恒定 0.5 死循环）
+      let previewSeed = 0x9e3779b9;
+      const previewRng = () => {
+        previewSeed = (Math.imul(previewSeed, 1664525) + 1013904223) >>> 0;
+        return previewSeed / 4294967296;
+      };
+      env.pickForPlayer = () => [];
+      env.rng = previewRng;
+      // 「当前目标」不读上一次行动的残留；旧数据式技能按释放时的自动索敌模拟
+      const previewAutoTarget = skill.requiresTarget
+        ? selectTarget(state.units, otherSide(owner.side), { fromSide: owner.side })
+        : null;
+      env.currentTarget = () => (previewAutoTarget ? [previewAutoTarget] : []);
+      env.damage = () => null;
+      env.noteAttack = noop;
+      env.healUnit = noop;
+      env.setHp = noop;
+      env.attachEffect = noop;
+      env.removeEffectByMode = noop;
+      env.summon = noop;
+      env.skipTurn = noop;
+      env.grantImmune = noop;
+      env.forceExit = noop;
+      env.refuseExit = noop;
+      env.transferAttack = noop;
+      env.giveSkill = noop;
+      env.addActions = noop;
+      env.broadcast = noop;
+      env.onTriggerRun = noop;
+      env.newAttackGroup = () => 0;
+      try {
+        runFlow(prepared, env, {
+          triggerNode: trigger.id,
+          pickCollector: (list) => {
+            sawPick = true;
+            for (const u of list) add(u);
+          },
+        });
+      } catch {
+        // 预览失败不影响实际释放：界面退化为不限制候选，由实际流程的 playerChoose 再过滤
+      }
+    }
+    if (!sawPick) {
+      // 预览没能走到「选择单位」（循环里依赖伤害等无法预览的状态）：
+      // 退化成「所有当前可选中单位」，至少不会让玩家完全点不了我方单位。
+      // 真正的候选过滤仍由释放时的 playerChoose 完成。
+      for (const u of livingUnits()) add(u);
+    }
+    return found.map(publicUnit);
+  }
+
   function unitDataOf(u, field, opts = {}) {
     if (!u) return field === "name" || field === "label" || field === "id" || field === "faction" ? "" : 0;
     switch (field) {
@@ -1701,12 +1786,12 @@ export function createBattle(setup) {
       log(BATTLE_EVENT.FLOW_ERROR, { reason: `未知单位卡：${unitId}` });
       return null;
     }
-    // 不计数单位本身不占「场上单位上限」的名额，不该被现有计数单位卡住
-    const countsTowardLimit = card.countsAsUnit !== false;
+    // 占位单位计入「场上单位数量上限」；不占位单位（occupiesSlot:false）不占名额。
+    const countsTowardLimit = card.occupiesSlot !== false;
     if (
       !ignoreLimit &&
       countsTowardLimit &&
-      livingOf(side).filter((u) => u.countsAsUnit && !u.exiting).length >= state.summonLimit
+      livingOf(side).filter((u) => u.occupiesSlot && !u.exiting).length >= state.summonLimit
     ) {
       return null;
     }
@@ -1888,12 +1973,26 @@ export function createBattle(setup) {
     return drawn;
   }
 
-  /** 手牌是否可以上场（数量 / 同名限制 / 场上上限） */
-  function canDeploy(side) {
+  /**
+   * 手牌是否可以上场（数量 / 同名限制 / 场上上限）。
+   * 不占位单位不占数量上限：传入 cardId 时按这张卡单独判断；
+   * 不传 cardId 时回答「手里还有没有能上场的牌」。
+   */
+  function canDeploy(side, cardId = null) {
     if (!localMode || state.status !== "running") return false;
     if (!["ally", "enemy"].includes(side)) return false;
-    if (!handOf(side).length) return false;
-    if (livingOf(side).filter((u) => u.countsAsUnit).length >= state.maxUnits) return false;
+    const hand = handOf(side);
+    if (!hand.length) return false;
+    const occupied = livingOf(side).filter((u) => u.occupiesSlot).length;
+    const overLimit = occupied >= state.maxUnits;
+    if (cardId !== null && cardId !== undefined) {
+      const card = registry.getUnit(cardId);
+      if (!card) return false;
+      if (card.occupiesSlot !== false && overLimit) return false;
+    } else if (overLimit) {
+      // 占位已满：只有「不占位」的手牌还能继续上
+      if (!hand.some((id) => registry.getUnit(id)?.occupiesSlot === false)) return false;
+    }
     if (state.localDeploy && state.localDeploy.side !== side) return false;
     return true;
   }
@@ -1905,11 +2004,12 @@ export function createBattle(setup) {
    * @returns {object|null} 上场的单位
    */
   function deployFromHand(side, handIndex) {
-    if (!canDeploy(side)) return null;
     const hand = state.hand[side];
+    if (!hand) return null;
     const idx = Math.floor(Number(handIndex));
     if (!Number.isInteger(idx) || idx < 0 || idx >= hand.length) return null;
     const cardId = hand[idx];
+    if (!canDeploy(side, cardId)) return null;
     const card = registry.getUnit(cardId);
     if (!card) return null;
     if (!state.allowSameName && livingOf(side).some((u) => u.name === (card.name || card.id))) return null;
@@ -1998,14 +2098,14 @@ export function createBattle(setup) {
     return any;
   }
 
-  /** local 模式：场上全灭但有手牌时，暂停回合推进，先补上场 */
+  /** local 模式：剩余单位归零但有手牌时，暂停回合推进，先补上场 */
   function pauseForReinforce(previous) {
     if (!localMode || state.status !== "running" || state.localDeploy) return false;
     const ordered = previous
       ? [otherSide(previous.side), previous.side]
       : [state.firstSide, otherSide(state.firstSide)];
     const side = ordered.find(
-      (s) => livingOf(s).length === 0 && handOf(s).length > 0
+      (s) => livingOf(s).filter((u) => u.countsAsUnit).length === 0 && handOf(s).length > 0
     );
     if (!side) return false;
     state.phase = BATTLE_PHASE.DEPLOY;
@@ -2023,12 +2123,13 @@ export function createBattle(setup) {
 
   function checkEnd() {
     if (state.status !== "running") return true;
-    // 计数只影响「阵营单位数量上限」，胜负判定按场上所有存活单位
-    const allies = livingOf("ally");
-    const enemies = livingOf("enemy");
+    // 胜负按「剩余单位」判定：只有计数单位（countsAsUnit）算数；
+    // 占位（occupiesSlot）只影响场上单位数量上限，不参与胜负判定。
+    const allies = livingOf("ally").filter((u) => u.countsAsUnit);
+    const enemies = livingOf("enemy").filter((u) => u.countsAsUnit);
     // side 模式：牌组里还有单位 = 还没输，下回合会补上场
     const deckLeft = (side) => (state.decks[side] || []).length;
-    // local 模式：场上全灭但手里还有牌 = 还能补上场，不算输；
+    // local 模式：剩余单位归零但手里还有牌 = 还能补上场，不算输；
     // 开了补牌时牌组也算资源（被击败回流的卡还在牌组里，等补牌抽回手牌）。
     const handLeft = (side) => (state.hand[side] || []).length;
     const localRefill = localMode && state.local && state.local.refillEnabled && state.local.refillCount > 0;
@@ -2806,6 +2907,8 @@ export function createBattle(setup) {
     allSkillsOf,
     /** 技能可用状态：释放条件 / 本回合剩余次数 / 总剩余次数 */
     skillStateOf,
+    /** 「选择单位」积木的候选集预览：战斗界面据此只让点击给定集合里的单位 */
+    skillTargetCandidates,
     /** 增加 / 扣减单位本回合剩余可动次数（额外行动） */
     addActions,
     resetActions,
