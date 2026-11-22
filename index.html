@@ -104,6 +104,16 @@
       <button class="ed-tab" data-tab="packs" type="button">卡包</button>
     </nav>
 
+    <!-- 设计选择栏下方的全校验面板：红色 = 错误，黄色 = 提示 -->
+    <section class="ed-diagnostics" id="ed-diagnostics" hidden aria-live="polite">
+      <div class="ed-diag-head">
+        <b>校验</b>
+        <span class="ed-diag-counts" id="ed-diag-counts"></span>
+        <span class="ed-diag-summary" id="ed-diag-summary"></span>
+      </div>
+      <div class="ed-diag-list" id="ed-diag-list"></div>
+    </section>
+
     <!-- 角色：桌面/横屏左数据、中挂载、右卡面；移动/竖屏按 1→2→3 纵向堆叠 -->
     <section class="ed-panel" data-panel="character">
       <div class="ed-columns ed-columns-character">
@@ -142,6 +152,32 @@
               </select>
             </label>
           </div>
+          <fieldset class="energy-box">
+            <legend>能量</legend>
+            <label class="form-check" title="默认关闭。开启后战斗卡牌右上角显示能量环，并启用能量消耗 / 修改能量"><input id="f-energy-enabled" type="checkbox" /> 启用能量</label>
+            <div class="energy-settings" id="f-energy-settings" hidden>
+              <div class="form-grid">
+                <label class="form-field"><span>能量上限</span><input id="f-energy-max" type="number" min="1" max="999999" step="1" value="100" /></label>
+                <label class="form-field"><span>每环表示（% 上限）</span><input id="f-energy-ring" type="number" min="10" max="100" step="1" value="100" /><em id="f-energy-ring-hint">每环 = 100</em></label>
+                <label class="form-field"><span>能量颜色</span><input id="f-energy-color" type="color" value="#47A982" /></label>
+                <label class="form-field"><span>能量条粗细</span><input id="f-energy-bar-width" type="number" min="1" max="100" step="1" value="20" /></label>
+                <label class="form-field"><span>能量描边颜色</span><input id="f-energy-outline" type="color" value="#ffffff" /><em>默认白色</em></label>
+                <label class="form-field"><span>描边粗细</span><input id="f-energy-outline-width" type="number" min="0" max="100" step="1" value="20" /></label>
+                <label class="form-check"><input id="f-energy-shadow" type="checkbox" checked /> 开启能量阴影</label>
+                <label class="form-field"><span>能量底色</span><input id="f-energy-bg" type="color" value="#000000" /></label>
+                <label class="form-field"><span>显示方法</span>
+                  <select id="f-energy-display">
+                    <option value="ring">环形</option>
+                    <option value="ringText">环形 + 数字</option>
+                    <option value="ringPercent">环形 + 百分比</option>
+                    <option value="text">数字</option>
+                    <option value="hidden">不显示</option>
+                  </select>
+                </label>
+              </div>
+              <p class="muted">每环默认 100% 能量上限；设为 50% 时，25% 显示半圈，满能量显示两圈。能量环固定在卡牌右上角，不占用血条位置；能量条加粗时只向内扩展。描边默认白色，可调粗细 / 阴影 / 底色。</p>
+            </div>
+          </fieldset>
           <div class="form-row">
             <label class="form-check" title="勾选 = 占用一个格子，并计入「场上单位数量上限」；不勾选 = 可叠格、不占数量名额"><input id="f-occupy" type="checkbox" /> 占位（计入数量上限）</label>
             <label class="form-check" title="勾选 = 计入「剩余单位判定」（胜负按计数单位结算）；不勾选 = 在场也不算剩余单位，仍可被选中、仍参与索敌"><input id="f-count" type="checkbox" /> 计入剩余单位</label>
@@ -151,7 +187,7 @@
           </div>
           <label class="form-field"><span>选中限制</span>
             <select id="f-unselectable">
-              <option value="none">可被选中（默认）</option>
+              <option value="none">可被选中</option>
               <option value="enemy">不可被敌方选中</option>
               <option value="ally">不可被我方选中</option>
               <option value="all">不可选中</option>
