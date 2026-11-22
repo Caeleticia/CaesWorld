@@ -42,6 +42,7 @@ import {
 } from "../engine/index.js";
 import { buildModZip, isZipBytes, stemOf, unpackModZip } from "./mod-zip.js";
 import { makePackZip } from "./pack-export.js";
+import { hydrateProject } from "./editor-media.js";
 import {
   MOD_STORES,
   artKeyOf,
@@ -822,7 +823,7 @@ export function takeEditorPackRequest() {
  * 这些不是模组文件：内容存在 localStorage 的工程里，名称 / 版本 / 简介取自工程内的卡包清单。
  * @returns {{packs: object[], errors: string[]}}
  */
-export function loadEditorPacks() {
+export async function loadEditorPacks() {
   const errors = [];
   let project = null;
   try {
@@ -832,6 +833,8 @@ export function loadEditorPacks() {
       localStorage.getItem(EDITOR_PROJECT_KEY);
     if (!raw) return { packs: [], errors };
     project = normalizeProject(JSON.parse(raw));
+    // 草稿里的卡面是 `idbimg:` 引用（图片在 IndexedDB），先换回 data URL
+    await hydrateProject(project);
   } catch (err) {
     return { packs: [], errors: [`编辑器工程读取失败：${errText(err)}`] };
   }
@@ -854,7 +857,7 @@ export function loadEditorPacks() {
 }
 
 /** 编辑器本地工程内容 */
-export function loadEditorPackContent() {
+export async function loadEditorPackContent() {
   const errors = [];
   const packName = (() => {
     try {
@@ -880,6 +883,8 @@ export function loadEditorPackContent() {
       };
     }
     const project = normalizeProject(JSON.parse(raw));
+    // 同上：把 IndexedDB 里的卡面接回来，牌库 / 战斗才看得到图
+    await hydrateProject(project);
     const content = projectToRegistryInput(project);
     const packId = packName;
     const packLabel = packName === DEFAULT_PACK ? DEFAULT_PACK_NAME : packName;
@@ -1009,7 +1014,7 @@ export async function loadContentPacks({ includeEditor = true, force = false, in
   const packs = modsRes.mods.filter((m) => includeDisabledMods || !packOff(m.packId || m.id));
 
   if (includeEditor) {
-    const editor = loadEditorPackContent();
+    const editor = await loadEditorPackContent();
     errors.push(...(editor.errors || []));
     packs.push(editor);
   }

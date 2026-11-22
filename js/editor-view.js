@@ -63,10 +63,33 @@ import {
 import { isZipBytes, unpackModZip } from "./mod-zip.js";
 import { applyPackImagesToCards, applyPackImagesToUnits, makePackZip } from "./pack-export.js";
 import { onDataCleared } from "./data-events.js";
+import {
+  dropExportBackups,
+  hydrateProject,
+  mediaRefOf,
+  persistMedia,
+  tokenizeProject,
+  writeProjectJson,
+} from "./editor-media.js";
 
-/** 卡组：编辑器工程按卡组存 localStorage；内容来自单文件模组（mods/） */
+/**
+ * 卡组：编辑器工程按卡组存 localStorage；内容来自单文件模组（mods/）。
+ * 工程里的卡面不在这条键里 —— 大 data URL 保存时会换成 `idbimg:` 引用，
+ * 图片本身在 IndexedDB（见 editor-media.js），因为 iOS 的 localStorage 只有约 5MB。
+ */
 let PACK = localStorage.getItem("caeworld:editor-pack") || DEFAULT_PACK;
 let STORAGE_KEY = `caeworld:editor-project:${PACK}`;
+/** 多卡组之前的老键：只读一次做迁移，迁移成功后删掉，能腾出最多空间 */
+const LEGACY_PROJECT_KEY = "caeworld:editor-project";
+
+/** localStorage 按 UTF-16 记账：字符数 × 2 才是实际占用 */
+const draftBytes = (chars) => Math.max(0, Number(chars) || 0) * 2;
+function formatDraftSize(chars) {
+  const bytes = draftBytes(chars);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
 
 /** 「当前卡组」也存在浏览器里；设置里清掉后要跟着换回默认卡组 */
 function refreshPackContext() {
@@ -143,7 +166,8 @@ function stripLegacyFields(p) {
 function loadProject() {
   try {
     // 新格式：按卡组存；旧版本只有不带卡组后缀的 key，读一次当迁移
-    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem("caeworld:editor-project");
+    // 卡面在这里只是 `idbimg:` 引用，initEditor() 里再异步换回 data URL
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_PROJECT_KEY);
     if (raw) {
       const p = JSON.parse(raw);
       if (p && p.kind === "caeworld-editor-project") {
@@ -289,6 +313,7 @@ async function reloadEditorFromStorage() {
   cancelPendingSave();
   refreshPackContext();
   project = loadProject();
+  await hydrateProject(project);
   normalizeProject(project);
   project.pack = PACK;
   if (!project.characters.length) project.characters.push(createCharacter());
@@ -320,27 +345,100 @@ function markDirty() {
   saveTimer = setTimeout(flushSave, 400);
 }
 
+/**
+ * 把当前工程写进 localStorage：卡面换成 `idbimg:` 引用，图片异步写进 IndexedDB。
+ * 这样草稿体积只跟卡的数量 / 流程有关（几百 KB），不会再被 base64 卡面撑爆。
+ * @returns {{ok: boolean, bytes: number, freed: number, error?: Error}}
+ */
+function writeProject() {
+  const { json, pending } = tokenizeProject(project);
+  const res = writeProjectJson(localStorage, STORAGE_KEY, json, {
+    dropKeys: [LEGACY_PROJECT_KEY],
+  });
+  if (res.ok && pending.length) {
+    void persistMedia(pending)
+      .then(({ failed }) => {
+        if (failed) {
+          setStatus(
+            `${failed} 张卡面没能存进图片库（浏览器可能禁止了 IndexedDB），` +
+              `刷新后会丢；请先用「导出」下载 ZIP 备份`,
+            "bad"
+          );
+        }
+      })
+      .catch(() => {
+        /* 图片库彻底不可用：文字草稿已经保存，界面继续用内存里的图 */
+      });
+  }
+  return res;
+}
+
+/**
+ * 刚上传的卡面：立刻写进图片库，别等 400ms 的自动保存。
+ * 否则「选完图马上关页面」会留下一个指向空图片库的引用。
+ * @param {string} url 刚读出来的 data URL
+ */
+function stashUploadedImage(url) {
+  if (typeof url !== "string" || !url.startsWith("data:")) return;
+  void persistMedia([{ ref: mediaRefOf(url), url }]).catch(() => {
+    /* 图片库不可用：下一次 flushSave 会提示，内存里的图仍然能导出 */
+  });
+}
+
+/**
+ * 申请「持久化存储」：iOS 的 ITP 在 7 天没有访问后可能清掉脚本可写存储，
+ * 首页添加到主屏幕（PWA）或申请过持久化的源会被排除在外。
+ * 浏览器可以不答应，失败就算了，不影响草稿。
+ */
+function requestPersistentStorage() {
+  try {
+    const storage = navigator.storage;
+    if (!storage || typeof storage.persist !== "function") return;
+    const ask = () => {
+      storage.persist().catch(() => {});
+    };
+    if (typeof storage.persisted === "function") {
+      storage.persisted().then((yes) => (yes ? null : ask())).catch(ask);
+    } else {
+      ask();
+    }
+  } catch {
+    /* 老浏览器不支持 Storage API */
+  }
+}
+
+/** 配额耗尽时给用户的下一步：不是「再点一次保存」，而是先把工程导出去 */
+function quotaMessage(chars, error) {
+  // 隐私模式下有些浏览器对 localStorage 直接抛 QuotaExceededError（配额为 0），
+  // 那种情况「清空间」没用，得换个窗口 / 关掉无痕模式。
+  const name = error && error.name && error.name !== "QuotaExceededError" ? `（${error.name}）` : "";
+  return (
+    `本地草稿空间已满${name}（当前约 ${formatDraftSize(chars)}）：` +
+    `请点右上「导出」保存 ZIP，再到设置里清除其他草稿 / 本地模组后重试`
+  );
+}
+
 function flushSave() {
   if (savesSuppressed) return false;
   project.updatedAt = new Date().toISOString();
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(project));
-    dirty = false;
-    const skills = (project.skills || []).length;
-    const effects = (project.effects || []).length;
-    const ch = currentCharacter() || {};
-    const characters = (project.characters || []).length;
-    const flowOk = currentFlow() ? validateFlow() : true;
-    setStatus(
-      `已自动保存 · 角色「${ch.name || "未命名"}」· 角色 ${characters} · 技能 ${skills} · 效果 ${effects}` +
-        (currentFlow() && !flowOk ? " · 流程有问题" : ""),
-      "ok"
-    );
-    return true;
-  } catch (err) {
-    setStatus("保存失败：" + err.message, "bad");
+  const res = writeProject();
+  if (!res.ok) {
+    setStatus(quotaMessage(res.bytes, res.error), "bad");
     return false;
   }
+  dirty = false;
+  const skills = (project.skills || []).length;
+  const effects = (project.effects || []).length;
+  const ch = currentCharacter() || {};
+  const characters = (project.characters || []).length;
+  const flowOk = currentFlow() ? validateFlow() : true;
+  setStatus(
+    `已自动保存 · 角色「${ch.name || "未命名"}」· 角色 ${characters} · 技能 ${skills} · 效果 ${effects}` +
+      ` · 草稿 ${formatDraftSize(res.bytes)}` +
+      (currentFlow() && !flowOk ? " · 流程有问题" : ""),
+    "ok"
+  );
+  return true;
 }
 
 function setStatus(text, kind = "") {
@@ -1061,11 +1159,9 @@ async function exportPack(packId) {
     return null;
   }
   const file = packFileOf(project, id);
-  try {
-    localStorage.setItem("caeworld:export:" + id, JSON.stringify(file));
-  } catch {
-    /* 文件太大就只下载 */
-  }
+  // 以前这里会把整包 JSON（含 base64 卡面）再备份一份到 localStorage，
+  // 一份就能吃掉 1~4MB —— 它只写不读，在 iOS 上是压垮草稿配额的元凶之一。
+  // 现在导出直接下载 ZIP，不再往 localStorage 里塞副本（旧键由启动时的搬家逻辑清掉）。
 
   let zip;
   try {
@@ -3241,6 +3337,7 @@ function onBlockOptionChange(e) {
     reader.onload = () => {
       node.options = node.options || {};
       node.options[key] = String(reader.result || "");
+      stashUploadedImage(node.options[key]);
       markDirty();
       renderJson();
       renderFlow();
@@ -3334,6 +3431,7 @@ function onSkillFormInput(e) {
     const reader = new FileReader();
     reader.onload = () => {
       s.image = String(reader.result || "");
+      stashUploadedImage(s.image);
       renderSkillPanel();
       renderCardsList();
       markDirty();
@@ -3376,6 +3474,7 @@ function onEffectFormInput(e) {
     const reader = new FileReader();
     reader.onload = () => {
       card.image = String(reader.result || "");
+      stashUploadedImage(card.image);
       renderEffectPanel();
       renderCardsList();
       markDirty();
@@ -4268,6 +4367,20 @@ export function applyEditorPackRequest() {
 }
 
 export async function initEditor() {
+  // 卡面存在 IndexedDB 里：先把引用换回 data URL，后面的代码看到的还是普通工程。
+  // 图片库不可用（隐私模式 / 被禁用）时只少图，文字草稿照常工作。
+  try {
+    const media = await hydrateProject(project);
+    if (media.missing) {
+      setStatus(
+        `${media.missing} 张卡面读取失败（图片库被清空或不可用），重新导入对应卡包可恢复；文字草稿不受影响`,
+        "bad"
+      );
+    }
+  } catch {
+    /* 图片库不可用：界面退回占位图 */
+  }
+  requestPersistentStorage();
   normalizeProject(project);
   if (!project.characters.length) project.characters.push(createCharacter());
   if (!project.pack) project.pack = PACK;
@@ -4313,6 +4426,65 @@ export async function initEditor() {
     applyEditorPackRequest();
     if (res.changed) markDirty();
   }
+  // 旧版草稿把卡面内嵌在 JSON 里，iOS 上一份就能顶满 5MB：打开时自动搬家
+  await compactLegacyStorage();
+}
+
+/**
+ * 把「卡面内嵌在 JSON 里」的旧草稿搬到 IndexedDB，并把 localStorage 写回瘦身版。
+ * 只有在新旧体积确实变小、且图片全部写进图片库之后才会删旧值；
+ * 任何一步失败都保留原样，下次打开再试。
+ * @returns {Promise<boolean>} 是否真的搬了家
+ */
+async function compactLegacyStorage() {
+  if (savesSuppressed) return false;
+  const current = localStorage.getItem(STORAGE_KEY);
+  const legacy = localStorage.getItem(LEGACY_PROJECT_KEY);
+  if (!current && !legacy) return false;
+  const before = (current || legacy || "").length;
+
+  const { json, pending, refs } = tokenizeProject(project);
+  if (pending.length) {
+    try {
+      const { failed } = await persistMedia(pending);
+      if (failed) return false; // 有图没搬完：旧值不能删
+    } catch {
+      return false;
+    }
+  }
+
+  // 已经瘦身过：只清掉多卡组之前的老键和只写不读的导出备份
+  if (!refs) {
+    let dropped = dropExportBackups(localStorage);
+    if (legacy && current) {
+      try {
+        localStorage.removeItem(LEGACY_PROJECT_KEY);
+        dropped += 1;
+      } catch {
+        /* 忽略 */
+      }
+    }
+    if (dropped) setStatus(`已清理 ${dropped} 项旧草稿备份`, "ok");
+    return false;
+  }
+
+  const res = writeProjectJson(localStorage, STORAGE_KEY, json, {
+    dropKeys: [LEGACY_PROJECT_KEY],
+  });
+  if (!res.ok) {
+    setStatus(
+      `草稿瘦身失败（本地空间仍然不足）：请先导出 ZIP 备份，再清除其他草稿 / 本地模组`,
+      "bad"
+    );
+    return false;
+  }
+  const freed = res.freed || 0;
+  setStatus(
+    `已把 ${refs} 张卡面移出草稿：本地占用 ${formatDraftSize(before)} → ${formatDraftSize(res.bytes)}` +
+      (freed ? ` · 顺带清理 ${freed} 项旧备份` : ""),
+    "ok"
+  );
+  return true;
 }
 
 /* ================================================================== */
@@ -4837,11 +5009,8 @@ function renderJson() {
 /* ================================================================== */
 function flushSaveSync() {
   if (savesSuppressed) return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(project));
-  } catch {
-    /* 忽略 */
-  }
+  const res = writeProject();
+  if (!res.ok) setStatus(quotaMessage(res.bytes, res.error), "bad");
 }
 
 function setupMountCollapse() {
@@ -4978,6 +5147,7 @@ function setupForms() {
     const reader = new FileReader();
     reader.onload = () => {
       ch().image = String(reader.result);
+      stashUploadedImage(ch().image);
       const input = $("#f-image");
       if (input) input.value = ch().image;
       renderCharacter();

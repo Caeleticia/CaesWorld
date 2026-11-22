@@ -160,7 +160,7 @@ async function refresh({ force = false } = {}) {
     } catch {
       serverRes = { mods: [], errors: [] };
     }
-    const editor = loadEditorPacks();
+    const editor = await loadEditorPacks();
     rows = buildRows(modsRes.mods, serverRes.mods, editor.packs);
     errors = [...(modsRes.errors || []), ...(editor.errors || [])];
     render();

@@ -15,6 +15,7 @@ import {
 } from "./browser-cache.js";
 import { clearModCache, restoreServerMods } from "./mods.js";
 import { notifyDataCleared } from "./data-events.js";
+import { clearEditorMedia, editorMediaStats } from "./editor-media.js";
 import { AI_LEVEL_LABELS, getAILevel, setAILevel } from "./battle-ai.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -47,7 +48,7 @@ const ACTIONS = {
   },
   editor: {
     title: "清除编辑器草稿",
-    desc: "删除编辑器工程、当前卡包、导出临时备份与折叠状态。导出的 ZIP 文件已经下载到设备上，不会被删除。",
+    desc: "删除编辑器工程、当前卡包、导出临时备份与折叠状态，以及存在 IndexedDB 里的卡面图片。导出的 ZIP 文件已经下载到设备上，不会被删除。",
     ok: "清除编辑器草稿",
   },
   all: {
@@ -210,16 +211,39 @@ async function refreshUsage() {
   );
 
   const editor = readLocalBytes(EDITOR_KEYS, EDITOR_PREFIXES);
-  setUsage("#settings-usage-editor", editor.count ? `${editor.count} 项 · 约 ${formatBytes(editor.bytes)}` : "暂无");
+  const media = await editorMediaStats();
+  const editorText = editor.count
+    ? `${editor.count} 项 · 文字约 ${formatBytes(editor.bytes)}`
+    : "暂无文字草稿";
+  const editorMedia = media.count ? `${media.count} 张卡面 · 约 ${formatBytes(media.bytes * 2)}` : "";
+  setUsage("#settings-usage-editor", [editorText, editorMedia].filter(Boolean).join(" · "));
 
   try {
     const count = localStorage.length;
+    const quota = await storageQuotaText();
     setUsage(
       "#settings-usage",
-      `本地存储：${count} 项，约 ${formatBytes(usedLocalStorageBytes())}。各项可单独清除；清除后已打开的页面会同步重置。`
+      `本地存储：${count} 项，约 ${formatBytes(usedLocalStorageBytes())}。${quota}各项可单独清除；清除后已打开的页面会同步重置。`
     );
   } catch (err) {
     setUsage("本地存储：当前浏览器不允许读取（" + String((err && err.message) || err) + "）");
+  }
+}
+
+/**
+ * 浏览器给出的配额概览（Safari 17+ / Chrome 都支持 storage.estimate）。
+ * 老浏览器没有这个 API 时返回空串，界面保持原样。
+ */
+async function storageQuotaText() {
+  try {
+    if (!navigator.storage || !navigator.storage.estimate) return "";
+    const est = await navigator.storage.estimate();
+    if (!est || !Number.isFinite(est.quota) || !Number.isFinite(est.usage)) return "";
+    const pct = est.quota ? Math.round((est.usage / est.quota) * 100) : 0;
+    const persistent = navigator.storage.persisted ? await navigator.storage.persisted() : false;
+    return `本次页面已用 ${formatBytes(est.usage)} / ${formatBytes(est.quota)}（${pct}%）${persistent ? " · 已申请持久化" : ""}。`;
+  } catch {
+    return "";
   }
 }
 
@@ -325,6 +349,9 @@ async function clearAllBrowserData() {
     result.errors.push("IndexedDB: " + String((err && err.message) || err));
   }
 
+  // 不支持 indexedDB.databases() 的浏览器上面那圈删不到编辑器图片库，单独补一次
+  await clearEditorMedia();
+
   // 通知已载入页面取消待写入的自动保存，避免 beforeunload 把旧数据写回来
   notifyDataCleared("all");
 
@@ -369,7 +396,11 @@ async function clearCategory(kind) {
     }
     case "editor": {
       const n = removeLocalKeys(EDITOR_KEYS, EDITOR_PREFIXES);
-      return { text: `已清除编辑器草稿（${n} 项），编辑器工程已重置。` };
+      // 卡面在独立的 IndexedDB 里，不清掉的话草稿删了图还占着空间
+      const media = await clearEditorMedia();
+      return {
+        text: `已清除编辑器草稿（${n} 项${media ? " · 卡面图片库" : ""}），编辑器工程已重置。`,
+      };
     }
     default:
       return { text: "没有可清除的数据。" };
