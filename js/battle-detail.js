@@ -59,6 +59,8 @@ function buffDesc(buff) {
     atkPct: "攻击力",
     defPct: "防御力",
     hpPct: "生命值",
+    energyMaxPct: "能量上限",
+    energyMaxFlat: "能量上限",
     atkFlat: "攻击力",
     defFlat: "防御力",
     hpFlat: "生命值",
@@ -233,6 +235,14 @@ export function createBattleDetail({ container, battle, registry, onOpenChange }
               ${statRow("攻击力", card.baseAtk, stats.atk)}
               ${statRow("防御力", card.baseDef, stats.def)}
               ${statRow("生命值", card.baseHp, stats.hp, { wide: true, extra: `当前 ${Math.ceil(unit.hp)}` })}
+              ${
+                pub?.energyEnabled
+                  ? statRow("能量", card.energyMax, stats.energyMax, {
+                      wide: true,
+                      extra: `当前 ${Math.ceil(pub.energy)} / ${Math.ceil(pub.energyMax)}`,
+                    })
+                  : ""
+              }
               ${statRow("暴击率", card.critRate, stats.critRate, { percent: true })}
               ${statRow("暴击伤害", card.critDamage, stats.critDamage, { percent: true })}
               ${statRow("行动顺序", card.speed, stats.speed)}
@@ -379,7 +389,7 @@ export function createBattleDetail({ container, battle, registry, onOpenChange }
       body: `<section class="tbd-section">
         <h4>技能介绍</h4>
         <p class="tbd-entry-desc">${escapeHtml(skill.description || "这个技能还没有填写介绍。")}</p>
-        <p class="tbd-entry-desc">每回合 ${skill.usesPerTurn ? `${skill.usesPerTurn} 次` : "不限"} · 整场 ${skill.usesTotal ? `${skill.usesTotal} 次` : "不限"}</p>
+        <p class="tbd-entry-desc">每回合 ${skill.usesPerTurn ? `${skill.usesPerTurn} 次` : "不限"} · 整场 ${skill.usesTotal ? `${skill.usesTotal} 次` : "不限"}${skill.energyCost ? ` · 消耗 ${skill.energyCost} 能量` : ""}${skill.keepAction ? " · 释放后不结束行动" : ""}</p>
       </section>`,
     });
   }

@@ -26,12 +26,13 @@ import {
   INVINCIBLE_LABEL,
   normalizeInvincible,
 } from "../engine/index.js";
-import { createStageScaler, STAGE_DESIGN } from "./training-stage.js";
+import { createStageScaler, computeBattleGrid, STAGE_DESIGN } from "./training-stage.js";
 import { BattleFX } from "./battle-fx.js";
 import { chooseAISkill, chooseAIUnit, chooseBestDeployCard } from "./battle-ai.js";
 import { createBattleDetail } from "./battle-detail.js";
 import { createBattleLog } from "./battle-log.js";
 import { createBattleLogFormatter } from "./battle-log-format.js";
+import { updateEnergyRing } from "./energy-ring.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const escapeHtml = (s) =>
@@ -86,6 +87,8 @@ export function openLocalBattle({ registry, config, onExit }) {
     aiStalled: false,
     /** 已经结算但还没播完退场动画的单位：刷新时先留在场上，避免「附加伤害击杀时角色突然消失」 */
     deathPending: new Set(),
+    /** 每个单位最近一次伤害表现的时间：退场动画缺失时补一个冲击 */
+    lastFxAt: new Map(),
     handSide: null,
     handRequired: false,
     refillBusy: false,
@@ -266,6 +269,7 @@ export function openLocalBattle({ registry, config, onExit }) {
     clearTimers();
     detail?.close();
     s.deathPending.clear();
+    s.lastFxAt.clear();
     battleLog.destroy();
     s.fx?.destroy();
     s.scaler?.destroy();
@@ -358,6 +362,7 @@ export function openLocalBattle({ registry, config, onExit }) {
         <span class="tbt-card-effectbars" hidden></span>
         <span class="tbt-card-hpbar"><i></i></span>
         <span class="tbt-card-hptext"></span>
+        <span class="tbt-card-energy" hidden></span>
       </button>
       <div class="tbt-statuses"></div>`;
     return wrap;
@@ -387,6 +392,10 @@ export function openLocalBattle({ registry, config, onExit }) {
     }
     const hpText = wrap.querySelector(".tbt-card-hptext");
     if (hpText) hpText.textContent = `${Math.ceil(cur)} / ${Math.ceil(max)}`;
+    const energyBox = wrap.querySelector(".tbt-card-energy");
+    updateEnergyRing(energyBox, pub);
+    const cardEl = wrap.querySelector(".tbt-card");
+    if (cardEl) cardEl.classList.toggle("has-energy", Boolean(pub.energyEnabled && pub.energyMax > 0));
 
     wrap.classList.toggle("is-acted", Boolean(pub.acted) && (Number(pub.actionsPerTurn) || 0) > 0);
     wrap.classList.toggle("is-active", s.battle.state.activeId === pub.uid);
@@ -537,24 +546,11 @@ export function openLocalBattle({ registry, config, onExit }) {
     const W = grid.clientWidth;
     const H = grid.clientHeight;
     if (!W || !H) return;
-    const gap = 20;
-    const extra = 18;
-    const sizeFor = (count) => {
-      let best = { cols: 1, w: 60 };
-      for (let cols = 1; cols <= count; cols += 1) {
-        const rows = Math.ceil(count / cols);
-        const cellW = (W - gap * (cols - 1)) / cols;
-        const cardH = (H - gap * (rows - 1)) / rows;
-        const w = Math.min(cellW - extra, cardH * 0.75, 168);
-        if (w > best.w) best = { cols, w };
-      }
-      return best;
-    };
-    const layout = sizeFor(n);
-    const cap = sizeFor(4);
-    const cardW = Math.min(layout.w, cap.w);
+    const layout = computeBattleGrid({ count: n, width: W, height: H });
     grid.style.setProperty("--cols", String(layout.cols));
-    grid.style.setProperty("--card-w", `${Math.max(46, Math.floor(cardW))}px`);
+    grid.style.setProperty("--card-w", `${layout.cardW}px`);
+    grid.style.setProperty("--grid-gap", `${layout.gap}px`);
+    grid.classList.toggle("is-overflow", layout.overflow);
   };
 
   const createDeploySlot = (side) => {
@@ -759,7 +755,8 @@ export function openLocalBattle({ registry, config, onExit }) {
             : info.max > 1
               ? `选择至多 ${info.max} 个目标`
               : "手动选择目标";
-        const label = st.available ? `${pickText}${useText}` : st.reason;
+        const costText = st.energyCost ? ` · ${st.energyCost} 能量` : "";
+        const label = st.available ? `${pickText}${useText}${costText}` : st.reason;
         return `<button class="tbt-skill ${s.pending?.index === i ? "is-targeting" : ""}" type="button" data-skill="${i}" ${st.available ? "" : "disabled"}>
                <div class="tbt-skill-main">${
                  icon ? `<img class="tbt-skill-icon" src="${escapeHtml(icon)}" alt="" draggable="false" />` : ""
@@ -807,7 +804,11 @@ export function openLocalBattle({ registry, config, onExit }) {
              onerror="this.onerror=null;this.src='${PLACEHOLDER_IMAGE}'" />
         <span class="tbt-act-name">
           <b>${escapeHtml(active.name)}</b>
-          <span>HP ${Math.ceil(active.hp)} / ${Math.ceil(s.battle.statsOf(active).hp)}</span>
+          <span>HP ${Math.ceil(active.hp)} / ${Math.ceil(s.battle.statsOf(active).hp)}${
+            active.card?.energyEnabled
+              ? ` · 能量 ${Math.ceil(s.battle.energyOf(active))} / ${Math.ceil(s.battle.energyMaxOf(active))}`
+              : ""
+          }</span>
         </span>
         <button class="btn tiny" type="button" data-info="${escapeHtml(active.uid)}">详情</button>
       </div>
@@ -1005,9 +1006,10 @@ export function openLocalBattle({ registry, config, onExit }) {
     };
     if (additional) s.fx.impact(hitRect, fxStyle);
     else s.fx.explode(hitRect, fxStyle);
+    s.lastFxAt.set(ev.target, performance.now());
     s.fx.floatText(hitRect, immune ? "免疫" : fmt(ev.finalDamage), {
       attribute: ev.attribute,
-      color: ev.color || undefined,
+      color: ev.textColor || ev.color || undefined,
       crit: Boolean(ev.crit),
       kind: immune ? "mute" : "damage",
       size: additional ? 20 : undefined,
@@ -1192,7 +1194,14 @@ export function openLocalBattle({ registry, config, onExit }) {
     // 引擎已经同步结算完，但 UI 还没播到退场事件：先别在刷新时把卡删掉，
     // 否则附加伤害（DOT）击杀会看起来「角色莫名其妙地消失」，跳字也无处可落。
     for (const ev of events) {
-      if (ev && ev.type === "death" && ev.unit) s.deathPending.add(ev.unit);
+      if (!ev) continue;
+      // 死亡事件 / 致命伤害都先把卡留在场上，保证附加伤害击杀也有落点播动画
+      if (ev.type === "death" && ev.unit) s.deathPending.add(ev.unit);
+      else if ((ev.type === "damage" || ev.type === "hp:lost") && ev.unit && Number(ev.hpAfter) <= 0) {
+        s.deathPending.add(ev.unit);
+      } else if (ev.type === "damage" && ev.target && Number(ev.hpAfter) <= 0) {
+        s.deathPending.add(ev.target);
+      }
     }
     const attackGroups = new Map();
     for (let i = 0; i < events.length; i += 1) {
@@ -1290,6 +1299,29 @@ export function openLocalBattle({ registry, config, onExit }) {
           await sleep(150);
           break;
         }
+        case "energy": {
+          const unit = unitOf(ev.unit);
+          if (unit) {
+            const sign = Number(ev.delta) >= 0 ? "+" : "-";
+            addLog(
+              `${unit.name} 能量 ${sign}${Math.abs(Number(ev.delta) || 0)}（${ev.energy}/${ev.max}）`,
+              sideKey(unit.side) === "red" ? "is-red" : "is-blue"
+            );
+            const rect = rectOf(ev.unit);
+            if (rect && ev.delta) {
+              s.fx.floatText(rect, `${sign}${Math.abs(Number(ev.delta) || 0)} 能量`, {
+                kind: "energy",
+                size: 13,
+                life: 0.7,
+                color: unit.card?.energyColor || "#47A982",
+              });
+            }
+          }
+          syncUnits();
+          renderActions();
+          await sleep(60);
+          break;
+        }
         case "target": {
           const owner = unitOf(ev.owner);
           addLog(logFmt.target(ev), owner && sideKey(owner.side) === "red" ? "is-red" : "is-blue");
@@ -1363,6 +1395,16 @@ export function openLocalBattle({ registry, config, onExit }) {
         case "death": {
           s.deathPending.delete(ev.unit);
           const unit = unitOf(ev.unit);
+          // 保底：如果这次死亡没有紧接着的伤害表现（例如 DOT / 附加伤害事件被跳过），
+          // 退场前补一次冲击 + 「退场」跳字，避免角色凭空消失。
+          {
+            const rect = rectOf(ev.unit);
+            const last = s.lastFxAt.get(ev.unit) || 0;
+            if (rect && performance.now() - last > 600) {
+              s.fx.impact(rect, { attribute: "physical" });
+              s.fx.floatText(rect, "退场", { kind: "mute", size: 15 });
+            }
+          }
           const wrap = s.cardEls.get(ev.unit);
           if (wrap) {
             wrap.classList.add("is-dead");

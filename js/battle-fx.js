@@ -763,7 +763,7 @@ export class BattleFX {
       upper: kind === "heal" ? "#8CF0B4" : kind === "mute" ? "#A9C2C3" : pair.upper,
       lower: kind === "heal" ? "#2E9E5B" : kind === "mute" ? "#7D9FA1" : pair.lower,
       stops:
-        kind === "damage" && Array.isArray(pair.stops) && pair.stops.length > 1
+        (kind === "damage" || kind === "energy") && Array.isArray(pair.stops) && pair.stops.length > 1
           ? pair.stops
           : null,
       crit: Boolean(opts.crit),

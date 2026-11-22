@@ -39,6 +39,8 @@ const ATTR_BONUS_LABEL = {
   defFlat: "防御力提升值",
   hpPct: "生命值提升 %",
   hpFlat: "生命值提升值",
+  energyMaxPct: "能量上限提升 %",
+  energyMaxFlat: "能量上限提升值",
   critRate: "暴击率",
   critDamage: "暴击伤害",
   speed: "速度（行动顺序）",
@@ -497,6 +499,7 @@ function unitDetail(card, ctx) {
       <h3>数值</h3>
       <ul class="lib-detail-stats">
         ${statItem("生命值", fmt(card.baseHp))}
+        ${card.energyEnabled ? statItem("能量上限", fmt(card.energyMax)) : ""}
         ${statItem("攻击力", fmt(card.baseAtk))}
         ${statItem("防御力", fmt(card.baseDef))}
         ${statItem("行动顺序", fmt(card.speed))}
@@ -641,7 +644,7 @@ function effectDetail(card, ctx) {
     : "不叠层";
   const unremovable = (card.flags || []).includes("unremovable") ? "不可解除" : "可解除";
   const consume = card.autoConsume ? "每次执行完效果流程后消耗 1 层（无视不可解除）" : "不会自动消耗";
-  const inherit = card.inherit === false ? "不继承（父单位召唤时跳过）" : "可被召唤物继承";
+  const inherit = card.inherit === true ? "可被召唤物继承" : "不继承（父单位召唤时跳过）";
   const display = card.bar
     ? `血条上方进度条${card.barInvert ? "（反转：显示 (上限-当前)/上限）" : "（当前/上限）"}`
     : "角色旁图标";

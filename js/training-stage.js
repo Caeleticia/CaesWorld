@@ -83,3 +83,70 @@ export function createStageScaler(page, stage, onChange) {
     },
   };
 }
+
+/**
+ * 计算战斗区卡牌的网格布局。
+ *
+ * 规则：
+ *  - 先按正常间距 20 尝试所有列数，取「卡牌最大」的排法；
+ *  - 尽量不要小于「6 个单位时」的卡牌尺寸；装不下时依次缩小间距（20 → 8）；
+ *  - 间距缩到最小仍装不下，就保持 6 单位尺寸并让战斗区内部纵向滚动。
+ *
+ * @param {{count:number,width:number,height:number,maxCardW?:number}} opts
+ * @returns {{cols:number,rows:number,cardW:number,gap:number,overflow:boolean}}
+ */
+export function computeBattleGrid({ count, width, height, maxCardW = 168 }) {
+  const n = Math.max(1, Math.floor(Number(count) || 1));
+  const W = Math.max(1, Number(width) || 1);
+  const H = Math.max(1, Number(height) || 1);
+  const extra = 18; // 卡面外侧状态图标预留
+  const GAPS = [20, 16, 12, 8];
+
+  const fitAt = (gap, count = n) => {
+    let best = null;
+    for (let cols = 1; cols <= count; cols += 1) {
+      const rows = Math.ceil(count / cols);
+      const cellW = (W - gap * (cols - 1)) / cols;
+      const cardH = (H - gap * (rows - 1)) / rows;
+      if (cellW <= 0 || cardH <= 0) continue;
+      const w = Math.min(cellW - extra, cardH * 0.75, maxCardW);
+      if (w < 1) continue;
+      if (!best || w > best.w) best = { cols, rows, w, gap };
+    }
+    return best || { cols: 1, rows: count, w: 46, gap };
+  };
+
+  // 「6 个单位时」的卡牌尺寸作为下限（同一块战斗区、正常间距）
+  const minW = Math.min(maxCardW, fitAt(GAPS[0], 6).w);
+
+  // 优先保留正常间距；只有卡牌会小于 6 单位尺寸时才缩间距
+  let chosen = null;
+  for (const gap of GAPS) {
+    const fit = fitAt(gap);
+    if (fit.w >= minW - 0.01) {
+      chosen = fit;
+      break;
+    }
+  }
+
+  if (chosen) {
+    const cardW = Math.max(46, Math.floor(chosen.w));
+    const contentH = chosen.rows * (cardW * 4 / 3) + chosen.gap * (chosen.rows - 1);
+    return {
+      cols: chosen.cols,
+      rows: chosen.rows,
+      cardW,
+      gap: chosen.gap,
+      overflow: contentH > H + 1,
+    };
+  }
+
+  // 最小间距也放不下：保持 6 单位尺寸，按宽度尽量多塞列，剩余交给滚动
+  const gap = GAPS[GAPS.length - 1];
+  const minCardW = Math.max(46, Math.floor(minW));
+  const cols = Math.max(1, Math.min(n, Math.floor((W + gap) / (minCardW + gap))));
+  const rows = Math.ceil(n / cols);
+  const cardW = Math.max(1, Math.min(minCardW, Math.floor(W - extra)));
+  const contentH = rows * (cardW * 4 / 3) + gap * (rows - 1);
+  return { cols, rows, cardW, gap, overflow: contentH > H + 1 };
+}

@@ -33,6 +33,7 @@ import {
   RESISTANCE_ATTRIBUTES,
   INVINCIBLE_LEVELS,
   INVINCIBLE_LABEL,
+  ENERGY_DISPLAYS,
   normalizeInvincible,
   normalizeUnselectable,
   EFFECT_ATTR_BONUS_KEYS,
@@ -192,6 +193,8 @@ async function hydrateFromPacks({ force = false } = {}) {
         packName: card.packName || (card.pack === DEFAULT_PACK_ID ? DEFAULT_PACK_NAME : card.pack),
         usesPerTurn: Math.max(0, Math.floor(Number(card.usesPerTurn) || 0)),
         usesTotal: Math.max(0, Math.floor(Number(card.usesTotal) || 0)),
+        energyCost: Math.max(0, Math.floor(Number(card.energyCost) || 0)),
+        keepAction: Boolean(card.keepAction),
       });
       s.flow = flowFromContent(card.flow);
       project.skills.push(s);
@@ -212,7 +215,7 @@ async function hydrateFromPacks({ force = false } = {}) {
       e.packName = card.packName || (card.pack === DEFAULT_PACK_ID ? DEFAULT_PACK_NAME : card.pack);
       e.attrBonus = normalizeEffectAttrBonus(card.attrBonus);
       e.autoConsume = Boolean(card.autoConsume);
-      e.inherit = card.inherit !== false;
+      e.inherit = card.inherit === true;
       e.skillIds = Array.isArray(card.skillIds) ? [...new Set(card.skillIds.filter((x) => typeof x === "string" && x))] : [];
       if (card.ui) e.ui = clone(card.ui);
       e.triggers = (card.triggers || []).map((t) => ({
@@ -1223,6 +1226,14 @@ function renderCharacter() {
     "f-actions": ch.actionsPerTurn ?? 1,
     "f-label": ch.label,
     "f-intro": ch.description,
+    "f-energy-max": ch.energyMax ?? 100,
+    "f-energy-ring": Math.round((Number(ch.energyPerRing) || 1) * 100),
+    "f-energy-color": parseEffectColor(ch.energyColor) || "#47A982",
+    "f-energy-bar-width": Number.isFinite(Number(ch.energyBarWidth)) ? ch.energyBarWidth : 20,
+    "f-energy-outline": parseEffectColor(ch.energyOutlineColor) || "#ffffff",
+    "f-energy-outline-width": Number.isFinite(Number(ch.energyOutlineWidth)) ? ch.energyOutlineWidth : 20,
+    "f-energy-bg": parseEffectColor(ch.energyBgColor) || "#000000",
+    "f-energy-display": ch.energyDisplay || "ring",
   };
   for (const [id, value] of Object.entries(map)) {
     const el = $("#" + id);
@@ -1241,11 +1252,17 @@ function renderCharacter() {
     obtainable: "f-obtainable",
     immuneNegative: "f-immune-neg",
     immuneControl: "f-immune-control",
+    energyEnabled: "f-energy-enabled",
+    energyShadow: "f-energy-shadow",
   };
   for (const [key, id] of Object.entries(SWITCH_IDS)) {
     const el = $("#" + id);
     // 旧工程没有 obtainable：没填过就按默认勾选
-    const value = key === "obtainable" && ch.obtainable === undefined ? true : Boolean(ch[key]);
+    const value =
+      (key === "obtainable" && ch.obtainable === undefined) ||
+      (key === "energyShadow" && ch.energyShadow === undefined)
+        ? true
+        : Boolean(ch[key]);
     if (el) el.checked = value;
   }
   const unselectableSel = $("#f-unselectable");
@@ -1258,12 +1275,22 @@ function renderCharacter() {
     invSel.value = level;
     invSel.dataset.level = level;
   }
+  const energySettings = $("#f-energy-settings");
+  if (energySettings) energySettings.hidden = !ch.energyEnabled;
+  const energyHint = $("#f-energy-ring-hint");
+  if (energyHint) {
+    const max = Math.max(1, Math.floor(Number(ch.energyMax) || 100));
+    const pct = Math.max(10, Math.min(100, Math.round((Number(ch.energyPerRing) || 1) * 100)));
+    energyHint.textContent = `每环 = ${Math.max(1, Math.round((max * pct) / 100))}（${pct}%）`;
+  }
   const packSel = $("#f-pack");
   if (packSel && document.activeElement !== packSel) packSel.innerHTML = packOptionsHtml(ch.pack);
   const unit = characterToUnit(ch);
   const stats = $("#ed-unit-stats");
   if (stats) {
-    stats.textContent = `Lv.${unit.level} · HP ${unit.baseHp} · ATK ${unit.baseAtk} · DEF ${unit.baseDef} · 行动顺序 ${unit.speed} · 每回合 ${unit.actionsPerTurn} 次 · 暴击 ${(
+    stats.textContent = `Lv.${unit.level} · HP ${unit.baseHp} · ATK ${unit.baseAtk} · DEF ${unit.baseDef} · 行动顺序 ${unit.speed} · 每回合 ${unit.actionsPerTurn} 次${
+      unit.energyEnabled ? ` · 能量 ${unit.energyMax}` : ""
+    } · 暴击 ${(
       unit.critRate * 100
     ).toFixed(0)}% / ${(unit.critDamage * 100).toFixed(0)}%`;
   }
@@ -1306,6 +1333,12 @@ function renderSkillPanel() {
       "0 = 不限；整场对局每个单位独立计数，新上场的同名单位重新计数"
     )}
     ${field(
+      "能量消耗",
+      `<input data-skill="energyCost" type="number" min="0" max="999999" step="1" value="${Number(s.energyCost) || 0}" />`,
+      "0 = 不消耗；角色必须开启能量，且当前能量达到该值才能释放"
+    )}
+    <label class="form-check" title="不扣本回合可动次数，但仍不能换人"><input data-skill="keepAction" type="checkbox" ${s.keepAction ? "checked" : ""} /> 释放后不结束本次行动</label>
+    ${field(
       "技能图标",
       `<input data-skill="image" value="${escapeHtml(cardIconPath(s))}" placeholder="${escapeHtml(
         defaultCardImageName(s)
@@ -1343,7 +1376,7 @@ function renderEffectPanel() {
   e.maxStacks = Number.isFinite(maxStacks) ? Math.max(0, Math.floor(maxStacks)) : 1;
   e.bar = Boolean(e.bar);
   e.barInvert = Boolean(e.barInvert) && e.bar;
-  if (e.inherit === undefined || e.inherit === null) e.inherit = true;
+  if (e.inherit === undefined || e.inherit === null) e.inherit = false;
   e.attrBonus = Array.isArray(e.attrBonus) ? e.attrBonus : [];
   e.skillIds = Array.isArray(e.skillIds) ? [...new Set(e.skillIds.filter((x) => typeof x === "string" && x))] : [];
   e.triggers = e.triggers || [];
@@ -1367,7 +1400,7 @@ function renderEffectPanel() {
       <label><input type="checkbox" data-effect-flag="unremovable" ${(e.flags || []).includes("unremovable") ? "checked" : ""} /> 不可解除（需勾选「强制移除」）</label>
       <label><input type="checkbox" data-effect-flag="control" ${(e.flags || []).includes("control") ? "checked" : ""} /> 控制类效果（可被「免疫控制」挡下）</label>
       <label><input type="checkbox" data-effect-auto="1" ${e.autoConsume ? "checked" : ""} /> 自动消耗（每次执行完该效果的流程后消耗 1 层）</label>
-      <label><input type="checkbox" data-effect-inherit="1" ${e.inherit !== false ? "checked" : ""} /> 召唤物继承（取消后父单位召唤时不复制该效果）</label>
+      <label><input type="checkbox" data-effect-inherit="1" ${e.inherit === true ? "checked" : ""} /> 召唤物继承（默认关闭；勾选后父单位召唤时复制该效果）</label>
     </div>
     ${
       e.autoConsume
@@ -1580,6 +1613,8 @@ const ATTR_BONUS_LABEL = {
   defFlat: "防御力提升值",
   hpPct: "生命值提升 %",
   hpFlat: "生命值提升值",
+  energyMaxPct: "能量上限提升 %",
+  energyMaxFlat: "能量上限提升值",
   critRate: "暴击率",
   critDamage: "暴击伤害",
   speed: "速度（行动顺序）",
@@ -3282,8 +3317,10 @@ function applySkillField(card, key, value) {
     active.skill = card;
   } else if (key === "image") {
     card.image = String(value ?? "").trim();
-  } else if (key === "usesPerTurn" || key === "usesTotal") {
+  } else if (key === "usesPerTurn" || key === "usesTotal" || key === "energyCost") {
     card[key] = Math.max(0, Math.floor(Number(value) || 0));
+  } else if (key === "keepAction") {
+    card.keepAction = Boolean(value);
   } else card[key] = String(value ?? "");
 }
 
@@ -3317,7 +3354,7 @@ function onSkillFormInput(e) {
   }
   const key = e.target.dataset.skill;
   if (!key) return;
-  applySkillField(s, key, e.target.value);
+  applySkillField(s, key, key === "keepAction" ? e.target.checked : e.target.value);
   if (key === "image") {
     const img = $('[data-icon-preview="skill"]');
     if (img) img.src = resolveCardImage(s);
@@ -4407,6 +4444,18 @@ function unitCardToCharacter(card) {
     immuneNegative: Boolean(card.immuneNegative),
     immuneControl: Boolean(card.immuneControl),
     invincible: normalizeInvincible(card.invincible),
+    energyEnabled: Boolean(card.energyEnabled),
+    energyMax: Number.isFinite(Number(card.energyMax)) ? Math.max(1, Math.min(999999, Math.floor(Number(card.energyMax)))) : 100,
+    energyPerRing: Number.isFinite(Number(card.energyPerRing))
+      ? Math.max(0.1, Math.min(1, Number(card.energyPerRing)))
+      : 1,
+    energyColor: parseEffectColor(card.energyColor) || "#47A982",
+    energyBarWidth: Number.isFinite(Number(card.energyBarWidth)) ? Math.max(1, Math.min(100, Number(card.energyBarWidth))) : 20,
+    energyOutlineColor: parseEffectColor(card.energyOutlineColor) || "#ffffff",
+    energyOutlineWidth: Number.isFinite(Number(card.energyOutlineWidth)) ? Math.max(0, Math.min(100, Number(card.energyOutlineWidth))) : 20,
+    energyShadow: card.energyShadow !== false,
+    energyBgColor: parseEffectColor(card.energyBgColor) || "#000000",
+    energyDisplay: ENERGY_DISPLAYS.includes(card.energyDisplay) ? card.energyDisplay : "ring",
     // 旧卡包没有这个字段：undefined 时保持 createCharacter() 的默认（true）
     obtainable: card.obtainable === undefined ? ch.obtainable : Boolean(card.obtainable),
     image: card.image === null ? null : card.image || "",
@@ -4468,6 +4517,8 @@ function importPackDoc(doc, file) {
     card.packName = name;
     card.usesPerTurn = Math.max(0, Math.floor(Number(s.usesPerTurn) || 0));
     card.usesTotal = Math.max(0, Math.floor(Number(s.usesTotal) || 0));
+    card.energyCost = Math.max(0, Math.floor(Number(s.energyCost) || 0));
+    card.keepAction = Boolean(s.keepAction);
     card.flow = flowFromContent(s.flow);
     if (s.ui) card.ui = clone(s.ui);
     upsertCard(project.skills || (project.skills = []), card);
@@ -4490,7 +4541,7 @@ function importPackDoc(doc, file) {
     def.packName = name;
     def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
     def.autoConsume = Boolean(e.autoConsume);
-    def.inherit = e.inherit !== false;
+    def.inherit = e.inherit === true;
     def.skillIds = Array.isArray(e.skillIds) ? [...new Set(e.skillIds.filter((x) => typeof x === "string" && x))] : [];
     def.triggers = (e.triggers || [])
       .map((t) => ({
@@ -4586,7 +4637,7 @@ function importContent(doc, file) {
     def.packName = packName;
     def.attrBonus = normalizeEffectAttrBonus(e.attrBonus);
     def.autoConsume = Boolean(e.autoConsume);
-    def.inherit = e.inherit !== false;
+    def.inherit = e.inherit === true;
     def.skillIds = Array.isArray(e.skillIds) ? [...new Set(e.skillIds.filter((x) => typeof x === "string" && x))] : [];
     def.triggers = (e.triggers || []).map((t) => ({ block: { id: t.id, event: t.event, unitScope: t.unitScope || "self" } }));
     def.flows = {};
@@ -4685,6 +4736,86 @@ function validateFlow() {
   return r.ok;
 }
 
+/** 编辑器的非阻断提示：暴击率封顶、草稿包、空流程等 */
+function collectEditorTips() {
+  const tips = [];
+  const characters = charactersOf(project);
+  for (const ch of characters) {
+    const name = ch.name || ch.id || "未命名角色";
+    const rate = Number(ch.critRate) || 0;
+    if (rate > 1 + 1e-9) {
+      const pct = Math.round(rate * 1000) / 10;
+      tips.push(`角色「${name}」暴击率 ${pct}% 超过 100%，战斗按 100% 计`);
+    }
+    if (!Array.isArray(ch.skillIds) || ch.skillIds.length === 0) {
+      tips.push(`角色「${name}」没有挂载技能，战斗中无法主动出牌`);
+    }
+  }
+  for (const sk of project.skills || []) {
+    const nodes = sk && sk.flow && Array.isArray(sk.flow.nodes) ? sk.flow.nodes : [];
+    if (!nodes.length) tips.push(`技能「${sk.name || sk.id || "未命名"}」没有流程积木`);
+  }
+  const draftCount = [
+    ...characters.filter((c) => packOf(c) === DRAFT_PACK_ID),
+    ...(project.skills || []).filter((s) => packOf(s) === DRAFT_PACK_ID),
+    ...(project.effects || []).filter((e) => packOf(e) === DRAFT_PACK_ID),
+  ].length;
+  if (draftCount) {
+    tips.push(`草稿包 ${DRAFT_PACK_ID} 里还有 ${draftCount} 张卡；导出正式卡包前请确认是否需要合并`);
+  }
+  return tips;
+}
+
+/**
+ * 设计选择栏下方的全校验面板：
+ *  - 红色：工程校验错误（所有卡 / 流程 / 卡包）
+ *  - 黄色：不阻断编辑的提示（暴击率封顶、草稿包、空流程等）
+ */
+function renderDiagnostics() {
+  const box = $("#ed-diagnostics");
+  if (!box) return;
+  let errors = [];
+  try {
+    const result = validateProject(project);
+    errors = Array.isArray(result.errors) ? result.errors : [];
+  } catch (err) {
+    errors = [`校验失败：${String((err && err.message) || err)}`];
+  }
+  let tips = [];
+  try {
+    tips = collectEditorTips();
+  } catch {
+    tips = [];
+  }
+  const list = $("#ed-diag-list");
+  const counts = $("#ed-diag-counts");
+  const summary = $("#ed-diag-summary");
+  if (!errors.length && !tips.length) {
+    box.hidden = true;
+    if (list) list.innerHTML = "";
+    return;
+  }
+  box.hidden = false;
+  box.classList.toggle("is-warn-only", errors.length === 0);
+  if (counts) {
+    counts.innerHTML = [
+      errors.length ? `<span class="is-error">错误 ${errors.length}</span>` : "",
+      tips.length ? `<span class="is-warn">提示 ${tips.length}</span>` : "",
+    ].join("");
+  }
+  if (summary) {
+    summary.textContent = errors.length
+      ? "红色条目会阻止导出 / 运行，请逐条处理"
+      : "黄色条目不阻止保存，但建议确认";
+  }
+  if (list) {
+    const esc = (text) => escapeHtml(String(text));
+    list.innerHTML =
+      errors.map((e) => `<div class="ed-diag-item is-error"><span class="ed-diag-tag">错误</span>${esc(e)}</div>`).join("") +
+      tips.map((t) => `<div class="ed-diag-item is-warn"><span class="ed-diag-tag">提示</span>${esc(t)}</div>`).join("");
+  }
+}
+
 /** 下方两个 JSON：执行流程（当前流程）+ 存档（当前卡包的卡包文件） */
 function renderJson() {
   const flowBox = $("#json-flow");
@@ -4698,6 +4829,7 @@ function renderJson() {
     saveBox.textContent = JSON.stringify(packFileOf(project, packId), null, 2);
   }
   validateFlow();
+  renderDiagnostics();
 }
 
 /* ================================================================== */
@@ -4792,6 +4924,41 @@ function setupForms() {
   bind("f-obtainable", (el) => (ch().obtainable = el.checked));
   bind("f-immune-neg", (el) => (ch().immuneNegative = el.checked));
   bind("f-immune-control", (el) => (ch().immuneControl = el.checked));
+  bind("f-energy-enabled", (el) => {
+    ch().energyEnabled = el.checked;
+    renderCharacter();
+  });
+  bind("f-energy-max", (el) => {
+    const n = Math.floor(Number(el.value) || 0);
+    ch().energyMax = Math.max(1, Math.min(999999, n || 100));
+    renderCharacter();
+  });
+  bind("f-energy-ring", (el) => {
+    const pct = Math.max(10, Math.min(100, Math.floor(Number(el.value) || 0)));
+    ch().energyPerRing = pct / 100;
+    renderCharacter();
+  });
+  bind("f-energy-color", (el) => {
+    ch().energyColor = parseEffectColor(el.value) || "#47A982";
+  });
+  bind("f-energy-bar-width", (el) => {
+    const n = Number(el.value);
+    ch().energyBarWidth = Number.isFinite(n) ? Math.max(1, Math.min(100, n)) : 20;
+  });
+  bind("f-energy-outline", (el) => {
+    ch().energyOutlineColor = parseEffectColor(el.value) || "#ffffff";
+  });
+  bind("f-energy-outline-width", (el) => {
+    const n = Number(el.value);
+    ch().energyOutlineWidth = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 20;
+  });
+  bind("f-energy-shadow", (el) => (ch().energyShadow = el.checked));
+  bind("f-energy-bg", (el) => {
+    ch().energyBgColor = parseEffectColor(el.value) || "#000000";
+  });
+  bind("f-energy-display", (el) => {
+    ch().energyDisplay = ENERGY_DISPLAYS.includes(el.value) ? el.value : "ring";
+  });
   bind("f-invincible", (el) => (ch().invincible = normalizeInvincible(el.value)));
   $("#f-pack")?.addEventListener("change", (e) => {
     const card = currentCharacter();
