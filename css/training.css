@@ -771,9 +771,25 @@
   inset: 3px 21px;
   display: grid;
   grid-template-columns: repeat(var(--cols, 2), var(--card-w, 110px));
-  gap: 20px;
+  gap: var(--grid-gap, 20px);
   justify-content: center;
   align-content: center;
+  overflow-x: hidden;
+  overflow-y: visible;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+/* 单位多到最小尺寸也放不下时：区内纵向滚动，不再把卡牌挤出视野 */
+.tbt-grid.is-overflow {
+  align-content: start;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong, #9ed6d6) transparent;
+}
+.tbt-grid.is-overflow::-webkit-scrollbar { width: 5px; }
+.tbt-grid.is-overflow::-webkit-scrollbar-thumb {
+  background: var(--line-strong, #9ed6d6);
+  border-radius: 99px;
 }
 
 /* ---------------- 卡牌 ---------------- */
@@ -887,6 +903,67 @@
   color: #fff;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
   font-variant-numeric: tabular-nums;
+}
+
+/* 能量环：卡牌右上角，不占用血条 / 效果条位置 */
+.tbt-card-energy {
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  bottom: auto;
+  z-index: 5;
+  width: clamp(20px, 32%, 34px);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.tbt-card-energy.has-shadow {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.65));
+}
+.tbt-card-energy[hidden] { display: none; }
+.tbt-energy-svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.tbt-energy-outline {
+  stroke: var(--energy-outline-color, #fff);
+}
+.tbt-energy-track { stroke: var(--energy-bg-color, #000000); }
+.tbt-energy-arc {
+  stroke: var(--energy-color, #47A982);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 220ms var(--ease-out);
+}
+.tbt-energy-text {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: clamp(7px, 8%, 10px);
+  font-weight: 800;
+  color: var(--energy-color, #47A982);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.tbt-card-energy[data-display="text"] {
+  width: auto;
+  min-width: 24px;
+  height: 14px;
+  aspect-ratio: auto;
+  padding: 0 3px;
+  border-radius: 5px;
+  background: var(--energy-bg-color, #000000);
+  box-shadow: inset 0 0 0 1px var(--energy-outline-color, #fff);
+}
+.tbt-card-energy[data-display="text"] .tbt-energy-text {
+  position: static;
+  font-size: 8px;
+}
+/* 右上角能量环会压住名字 / ATK：名字让出右侧，ATK 下移一行 */
+.tbt-card.has-energy .tbt-card-name {
+  right: calc(32% + 8px);
+}
+.tbt-card.has-energy .tbt-card-atk {
+  top: 40px;
 }
 
 /* 没有卡面时的战斗卡牌：平涂浅青底 + 首字水印，不要露出编辑器的占位图 */
