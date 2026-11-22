@@ -15,6 +15,15 @@ import {
   UNSELECTABLE_MODES,
   normalizeUnselectable,
   parseId,
+  parseEffectColor,
+  ENERGY_DISPLAYS,
+  ENERGY_DISPLAY_LABEL,
+  ENERGY_PER_RING_MIN,
+  ENERGY_PER_RING_MAX,
+  ENERGY_OUTLINE_WIDTH_MIN,
+  ENERGY_OUTLINE_WIDTH_MAX,
+  ENERGY_BAR_WIDTH_MIN,
+  ENERGY_BAR_WIDTH_MAX,
 } from "./constants.js";
 
 /** 只保留三系抗性：本源是真实伤害，不存抗性字段 */
@@ -58,6 +67,26 @@ export function createUnitDefaults() {
     /** 免疫负面效果 / 免疫控制类效果 */
     immuneNegative: UNIT_DEFAULTS.immuneNegative,
     immuneControl: UNIT_DEFAULTS.immuneControl,
+    /** 能量：默认不启用；启用后按卡面配置显示与结算 */
+    energyEnabled: UNIT_DEFAULTS.energyEnabled,
+    /** 能量上限基础值 */
+    energyMax: UNIT_DEFAULTS.energyMax,
+    /** 每环占能量上限的比例：1 = 100%，0.5 = 50% */
+    energyPerRing: UNIT_DEFAULTS.energyPerRing,
+    /** 能量颜色 */
+    energyColor: UNIT_DEFAULTS.energyColor,
+    /** 能量条粗细 */
+    energyBarWidth: UNIT_DEFAULTS.energyBarWidth,
+    /** 能量环描边颜色；默认白色 */
+    energyOutlineColor: UNIT_DEFAULTS.energyOutlineColor,
+    /** 能量环描边外扩粗细 */
+    energyOutlineWidth: UNIT_DEFAULTS.energyOutlineWidth,
+    /** 能量环阴影开关 */
+    energyShadow: UNIT_DEFAULTS.energyShadow,
+    /** 能量环轨道底色 */
+    energyBgColor: UNIT_DEFAULTS.energyBgColor,
+    /** 显示方法：ring / ringText / ringPercent / text / hidden */
+    energyDisplay: UNIT_DEFAULTS.energyDisplay,
     /** 技能：按顺序存放技能 id（战斗内每次使用技能时按索引取） */
     skills: [],
     /** 可选：条件加成（常驻 buff），格式见 modifiers.js → fromBonusOverrides */
@@ -68,7 +97,15 @@ export function createUnitDefaults() {
 }
 
 /** 单位卡上的布尔开关（编辑器里是勾选框）；「无敌」是三档下拉，不在这里 */
-export const UNIT_SWITCH_KEYS = Object.freeze(["occupiesSlot", "countsAsUnit", "obtainable", "immuneNegative", "immuneControl"]);
+export const UNIT_SWITCH_KEYS = Object.freeze([
+  "occupiesSlot",
+  "countsAsUnit",
+  "obtainable",
+  "immuneNegative",
+  "immuneControl",
+  "energyEnabled",
+  "energyShadow",
+]);
 
 /** 把外部输入补全成完整单位卡（不改原对象）。缺失字段一律取默认值。 */
 export function createUnitCard(input = {}) {
@@ -88,6 +125,28 @@ export function createUnitCard(input = {}) {
   const rawPerTurn = card.actionsPerTurn;
   const perTurn = rawPerTurn === undefined || rawPerTurn === null || rawPerTurn === "" ? NaN : Number(rawPerTurn);
   card.actionsPerTurn = Number.isFinite(perTurn) ? Math.max(0, Math.min(99, Math.floor(perTurn))) : 1;
+  const rawEnergyMax = card.energyMax;
+  const energyMax = rawEnergyMax === undefined || rawEnergyMax === null || rawEnergyMax === "" ? NaN : Number(rawEnergyMax);
+  card.energyMax = Number.isFinite(energyMax) ? Math.max(1, Math.min(999999, Math.floor(energyMax))) : base.energyMax;
+  const rawPerRing = card.energyPerRing;
+  const perRing = rawPerRing === undefined || rawPerRing === null || rawPerRing === "" ? NaN : Number(rawPerRing);
+  card.energyPerRing = Number.isFinite(perRing)
+    ? Math.max(ENERGY_PER_RING_MIN, Math.min(ENERGY_PER_RING_MAX, perRing))
+    : base.energyPerRing;
+  card.energyColor = parseEffectColor(card.energyColor) || base.energyColor;
+  const rawBarWidth = card.energyBarWidth;
+  const barWidth = rawBarWidth === undefined || rawBarWidth === null || rawBarWidth === "" ? NaN : Number(rawBarWidth);
+  card.energyBarWidth = Number.isFinite(barWidth)
+    ? Math.max(ENERGY_BAR_WIDTH_MIN, Math.min(ENERGY_BAR_WIDTH_MAX, barWidth))
+    : base.energyBarWidth;
+  card.energyOutlineColor = parseEffectColor(card.energyOutlineColor) || base.energyOutlineColor;
+  const rawOutlineWidth = card.energyOutlineWidth;
+  const outlineWidth = rawOutlineWidth === undefined || rawOutlineWidth === null || rawOutlineWidth === "" ? NaN : Number(rawOutlineWidth);
+  card.energyOutlineWidth = Number.isFinite(outlineWidth)
+    ? Math.max(ENERGY_OUTLINE_WIDTH_MIN, Math.min(ENERGY_OUTLINE_WIDTH_MAX, outlineWidth))
+    : base.energyOutlineWidth;
+  card.energyBgColor = parseEffectColor(card.energyBgColor) || base.energyBgColor;
+  card.energyDisplay = ENERGY_DISPLAYS.includes(card.energyDisplay) ? card.energyDisplay : base.energyDisplay;
   card.skills = Array.isArray(input.skills) ? input.skills.slice() : [];
   card.bonuses = Array.isArray(input.bonuses) ? input.bonuses.map((b) => ({ ...b })) : [];
   // 旧数据里可能残留 effects（角色初始挂载效果）：这个能力已移除，读入时直接丢弃
@@ -160,7 +219,8 @@ export function validateUnitCard(card) {
   checkNumber(errors, "baseHp", card.baseHp, { min: 0 });
   checkNumber(errors, "baseAtk", card.baseAtk, { min: 0 });
   checkNumber(errors, "baseDef", card.baseDef, { min: 0 });
-  checkNumber(errors, "critRate", card.critRate, { min: 0, max: 1 });
+  // 暴击率允许超过 1；战斗面板会按 1（100%）封顶，不再作为校验错误
+  checkNumber(errors, "critRate", card.critRate, { min: 0 });
   checkNumber(errors, "critDamage", card.critDamage, { min: 0 });
   checkNumber(errors, "speed", card.speed, { min: 0 });
   checkNumber(errors, "actionsPerTurn", card.actionsPerTurn, { min: 0, max: 99, integer: true });
@@ -182,6 +242,39 @@ export function validateUnitCard(card) {
 
   for (const key of UNIT_SWITCH_KEYS) {
     if (typeof card[key] !== "boolean") errors.push(`${key} 必须是布尔值`);
+  }
+  if (typeof card.energyMax !== "number" || !Number.isInteger(card.energyMax) || card.energyMax < 1 || card.energyMax > 999999) {
+    errors.push(`energyMax 必须是 1~999999 的整数：${card.energyMax}`);
+  }
+  if (
+    typeof card.energyPerRing !== "number" ||
+    !Number.isFinite(card.energyPerRing) ||
+    card.energyPerRing < ENERGY_PER_RING_MIN ||
+    card.energyPerRing > ENERGY_PER_RING_MAX
+  ) {
+    errors.push(`energyPerRing 必须是 ${ENERGY_PER_RING_MIN}~${ENERGY_PER_RING_MAX} 的比例：${card.energyPerRing}`);
+  }
+  if (!parseEffectColor(card.energyColor)) errors.push(`energyColor 不是有效颜色：${card.energyColor}`);
+  if (
+    typeof card.energyBarWidth !== "number" ||
+    !Number.isFinite(card.energyBarWidth) ||
+    card.energyBarWidth < ENERGY_BAR_WIDTH_MIN ||
+    card.energyBarWidth > ENERGY_BAR_WIDTH_MAX
+  ) {
+    errors.push(`energyBarWidth 必须是 ${ENERGY_BAR_WIDTH_MIN}~${ENERGY_BAR_WIDTH_MAX} 的数字：${card.energyBarWidth}`);
+  }
+  if (!parseEffectColor(card.energyOutlineColor)) errors.push(`energyOutlineColor 不是有效颜色：${card.energyOutlineColor}`);
+  if (
+    typeof card.energyOutlineWidth !== "number" ||
+    !Number.isFinite(card.energyOutlineWidth) ||
+    card.energyOutlineWidth < ENERGY_OUTLINE_WIDTH_MIN ||
+    card.energyOutlineWidth > ENERGY_OUTLINE_WIDTH_MAX
+  ) {
+    errors.push(`energyOutlineWidth 必须是 ${ENERGY_OUTLINE_WIDTH_MIN}~${ENERGY_OUTLINE_WIDTH_MAX} 的数字：${card.energyOutlineWidth}`);
+  }
+  if (!parseEffectColor(card.energyBgColor)) errors.push(`energyBgColor 不是有效颜色：${card.energyBgColor}`);
+  if (!ENERGY_DISPLAYS.includes(card.energyDisplay)) {
+    errors.push(`energyDisplay 必须是 ${ENERGY_DISPLAYS.map((v) => `${v}(${ENERGY_DISPLAY_LABEL[v]})`).join(" / ")}：${card.energyDisplay}`);
   }
   if (!UNSELECTABLE_MODES.includes(card.unselectable)) {
     errors.push(`unselectable 必须是 ${UNSELECTABLE_MODES.join("/")}：${card.unselectable}`);

@@ -32,6 +32,10 @@ export function computeStats(card, acc = emptyAccum()) {
   const atk = (card.baseAtk * (1 + a.atkPct) + a.atkFlat) * atkMul;
   const def = (card.baseDef * (1 + a.defPct) + a.defFlat) * defMul;
   const hp = (card.baseHp * (1 + a.hpPct) + a.hpFlat) * hpMul;
+  // 能量上限：只有开启能量的角色才有意义；可被 energyMaxPct / energyMaxFlat 修正。
+  const energyMax = card.energyEnabled
+    ? Math.max(0, (Number(card.energyMax) || 0) * (1 + a.energyMaxPct) + a.energyMaxFlat)
+    : 0;
 
   const resistances = {};
   for (const attr of RESISTANCE_ATTRIBUTES) {
@@ -43,7 +47,10 @@ export function computeStats(card, acc = emptyAccum()) {
     atk: Math.max(0, atk),
     def: Math.max(0, def),
     hp: Math.max(0, hp),
-    critRate: card.critRate + a.critRate,
+    /** 能量上限（未开启能量为 0） */
+    energyMax,
+    // 暴击率按 100% 封顶：卡面 / 加成超过 1 时以 1 计
+    critRate: Math.min(1, Math.max(0, card.critRate + a.critRate)),
     critDamage: card.critDamage + a.critDamage,
     /** 速度：卡面速度 ×（1 + speedPct）+ speed 数值加成；只决定行动顺序 */
     speed: (card.speed || 0) * (1 + (a.speedPct || 0)) + a.speed,

@@ -123,7 +123,7 @@ export class ContentRegistry {
       /** 自动消耗：每次该效果的触发流程执行完后消耗 1 层 */
       autoConsume: Boolean(def.autoConsume),
       /** 召唤物是否继承该效果（false = 父单位召唤时跳过这一层） */
-      inherit: def.inherit !== false,
+      inherit: def.inherit === true,
       description: def.description || "",
       ...(def.image === null ? { image: null } : def.image ? { image: String(def.image) } : {}),
       ...(def.color ? { color: parseEffectColor(def.color) || "" } : {}),

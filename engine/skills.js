@@ -48,6 +48,10 @@ export function createSkillDefaults() {
     usesPerTurn: 0,
     /** 整场对局可用次数；0 = 不限。每个单位独立计数，新上场的同名单位重新计数。 */
     usesTotal: 0,
+    /** 释放需要消耗的能量；0 = 不消耗。角色需开启能量。 */
+    energyCost: 0,
+    /** 释放后不结束本次行动：不扣本回合可动次数，但不能换人 */
+    keepAction: false,
     /** 技能图标路径；空 = 取模组 icons/skill/<短 id>.*，null = 强制不用图标 */
     image: "",
   };
@@ -58,6 +62,8 @@ export function createSkillCard(input = {}) {
   skill.effects = Array.isArray(input.effects) ? input.effects.map((e) => ({ ...e })) : [];
   skill.usesPerTurn = Math.max(0, Math.floor(Number(skill.usesPerTurn) || 0));
   skill.usesTotal = Math.max(0, Math.floor(Number(skill.usesTotal) || 0));
+  skill.energyCost = Math.max(0, Math.min(999999, Math.floor(Number(skill.energyCost) || 0)));
+  skill.keepAction = Boolean(skill.keepAction);
   return skill;
 }
 
@@ -102,6 +108,12 @@ export function validateSkillCard(skill) {
   checkNumber(errors, "targets", skill.targets, { min: -1, max: 99, integer: true });
   checkNumber(errors, "usesPerTurn", skill.usesPerTurn, { min: 0, max: 999, integer: true });
   checkNumber(errors, "usesTotal", skill.usesTotal, { min: 0, max: 9999, integer: true });
+  if (skill.energyCost !== undefined) {
+    checkNumber(errors, "energyCost", skill.energyCost, { min: 0, max: 999999, integer: true });
+  }
+  if (skill.keepAction !== undefined && typeof skill.keepAction !== "boolean") {
+    errors.push("keepAction 必须是布尔值");
+  }
   if (!SKILL_FORMATS.includes(skill.format)) {
     errors.push(`format 必须是 ${SKILL_FORMATS.join("/")}：${skill.format}`);
   }

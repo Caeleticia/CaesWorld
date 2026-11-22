@@ -98,6 +98,17 @@ export function createCharacter() {
     /** 免疫负面 / 控制类效果 */
     immuneNegative: false,
     immuneControl: false,
+    /** 能量：默认关闭；开启后展开颜色 / 上限 / 每环 / 显示方法 */
+    energyEnabled: false,
+    energyMax: 100,
+    energyPerRing: 1,
+    energyColor: "#47A982",
+    energyBarWidth: 20,
+    energyOutlineColor: "#ffffff",
+    energyOutlineWidth: 20,
+    energyShadow: true,
+    energyBgColor: "#000000",
+    energyDisplay: "ring",
     image: "",
     skillIds: [],
   };
@@ -173,7 +184,7 @@ export function normalizeProject(project) {
     if (!effect) continue;
     effect.attrBonus = normalizeEffectAttrBonus(effect.attrBonus);
     effect.autoConsume = Boolean(effect.autoConsume);
-    if (effect.inherit === undefined || effect.inherit === null) effect.inherit = true;
+    if (effect.inherit === undefined || effect.inherit === null) effect.inherit = false;
     else effect.inherit = Boolean(effect.inherit);
     // 效果挂载技能：持有该效果时临时获得，效果移除后失去
     effect.skillIds = Array.isArray(effect.skillIds)
@@ -204,6 +215,10 @@ export function createSkill(id = "custom_skill_new", name = "新技能") {
     usesPerTurn: 0,
     /** 整场对局可用次数；0 = 不限 */
     usesTotal: 0,
+    /** 释放需要消耗的能量；0 = 不消耗 */
+    energyCost: 0,
+    /** 释放后不结束本次行动 */
+    keepAction: false,
     pack: "default",
     packName: "默认包",
     flow: emptyFlow(),
@@ -240,7 +255,7 @@ export function createEffect(id = "custom_effect_new", name = "新效果") {
     /** 自动消耗：每次该效果的触发流程执行完后消耗 1 层（未开启层数计数时直接移除） */
     autoConsume: false,
     /** 召唤物是否继承该效果：false = 父单位召唤时跳过这一层 */
-    inherit: true,
+    inherit: false,
     triggers: [],
     flows: {},
     ui: defaultUi(),
@@ -653,6 +668,16 @@ export function characterToUnit(ch) {
     obtainable: ch.obtainable,
     immuneNegative: ch.immuneNegative,
     immuneControl: ch.immuneControl,
+    energyEnabled: ch.energyEnabled,
+    energyMax: ch.energyMax,
+    energyPerRing: ch.energyPerRing,
+    energyColor: ch.energyColor,
+    energyBarWidth: ch.energyBarWidth,
+    energyOutlineColor: ch.energyOutlineColor,
+    energyOutlineWidth: ch.energyOutlineWidth,
+    energyShadow: ch.energyShadow,
+    energyBgColor: ch.energyBgColor,
+    energyDisplay: ch.energyDisplay,
     skills: (ch.skillIds || []).slice(),
   });
   if (ch.pack) base.pack = String(ch.pack);
@@ -673,6 +698,8 @@ export function skillToContent(skill) {
     effects: [],
     usesPerTurn: Math.max(0, Math.floor(Number(skill.usesPerTurn) || 0)),
     usesTotal: Math.max(0, Math.floor(Number(skill.usesTotal) || 0)),
+    energyCost: Math.max(0, Math.floor(Number(skill.energyCost) || 0)),
+    keepAction: Boolean(skill.keepAction),
     format: "flow",
     flow: skill.flow ? normalizeFlow(skill.flow) : emptyFlow(),
   });
@@ -713,7 +740,7 @@ export function effectToContent(effect) {
       ? { skillIds: [...new Set(effect.skillIds.filter((sid) => typeof sid === "string" && sid))] }
       : {}),
     autoConsume: Boolean(effect.autoConsume),
-    ...(effect.inherit === false ? { inherit: false } : {}),
+    ...(effect.inherit === true ? { inherit: true } : {}),
   };
 }
 

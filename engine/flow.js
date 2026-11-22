@@ -745,6 +745,22 @@ export function runFlow(prepared, env, opts = {}) {
               : /^#[0-9a-f]{6}$/.test(singleColor)
                 ? singleColor
                 : "";
+        // 跳字颜色独立设置；没开启时留空，表现层回落到特效色 / 属性色
+        const textStops = str(o.textColorStops)
+          .split(/[\s,，]+/)
+          .map((x) => x.trim().toLowerCase())
+          .filter((x) => /^#[0-9a-f]{6}$/.test(x))
+          .slice(0, 8);
+        const textSingle = str(o.textColor).toLowerCase();
+        const textColor = !o.customTextColor
+          ? ""
+          : textStops.length > 1
+            ? textStops
+            : textStops.length === 1
+              ? textStops[0]
+              : /^#[0-9a-f]{6}$/.test(textSingle)
+                ? textSingle
+                : "";
         // 底图：fixedTexture = 图片固定在画面坐标，不随特效移动
         const texture = str(o.effectImage).trim();
         const fixedTexture = Boolean(o.fixedTexture);
@@ -769,6 +785,7 @@ export function runFlow(prepared, env, opts = {}) {
             ignoreReduction,
             attackGroup,
             color,
+            textColor,
             texture,
             fixedTexture,
           });
@@ -876,6 +893,15 @@ export function runFlow(prepared, env, opts = {}) {
           const scope = { ...local, acting: t };
           const amount = Math.trunc(num(valueOf(node, "value", scope)));
           if (amount) env.addActions?.(t, amount);
+        }
+        go(nextId("next"));
+        return;
+      }
+      case "modifyEnergy": {
+        for (const t of unitList(valueOf(node, "targets", local))) {
+          const scope = { ...local, acting: t };
+          const amount = Math.trunc(num(valueOf(node, "value", scope)));
+          env.modifyEnergy?.(t, node.options.mode || "add", amount);
         }
         go(nextId("next"));
         return;

@@ -199,6 +199,8 @@ export const EFFECT_ATTR_BONUS_KEYS = Object.freeze([
   "defFlat",
   "hpPct",
   "hpFlat",
+  "energyMaxPct",
+  "energyMaxFlat",
   "critRate",
   "critDamage",
   "speed",
@@ -319,7 +321,45 @@ export const UNIT_DEFAULTS = Object.freeze({
   immuneNegative: false,
   /** 免疫控制类效果：附加带 control 标记的效果时直接拒绝 */
   immuneControl: false,
+  /** 能量：默认不启用；启用后 energyMax 为基础上限，energyPerRing 为每环占上限的比例 */
+  energyEnabled: false,
+  energyMax: 100,
+  energyPerRing: 1,
+  energyColor: "#47A982",
+  /** 能量条粗细（20 = 当前默认视觉粗细） */
+  energyBarWidth: 20,
+  /** 能量环描边颜色；默认白色 */
+  energyOutlineColor: "#ffffff",
+  /** 能量环描边外扩粗细（SVG 单位） */
+  energyOutlineWidth: 20,
+  /** 能量环是否开启阴影 */
+  energyShadow: true,
+  /** 能量环轨道底色 */
+  energyBgColor: "#000000",
+  energyDisplay: "ring",
 });
+
+/** 能量显示方法：环形 / 环形+数字 / 数字 / 不显示 */
+export const ENERGY_DISPLAYS = Object.freeze(["ring", "ringText", "ringPercent", "text", "hidden"]);
+export const ENERGY_DISPLAY_LABEL = Object.freeze({
+  ring: "环形",
+  ringText: "环形 + 数字",
+  ringPercent: "环形 + 百分比",
+  text: "数字",
+  hidden: "不显示",
+});
+
+/** 每环占能量上限的比例范围：10% ~ 100% */
+export const ENERGY_PER_RING_MIN = 0.1;
+export const ENERGY_PER_RING_MAX = 1;
+
+/** 能量条粗细范围（20 = 当前默认视觉粗细） */
+export const ENERGY_BAR_WIDTH_MIN = 1;
+export const ENERGY_BAR_WIDTH_MAX = 100;
+
+/** 能量描边外扩粗细范围（SVG 单位） */
+export const ENERGY_OUTLINE_WIDTH_MIN = 0;
+export const ENERGY_OUTLINE_WIDTH_MAX = 100;
 
 /** 选中限制：不可选中类型的枚举与显示名 */
 export const UNSELECTABLE_MODES = Object.freeze(["none", "enemy", "ally", "all"]);

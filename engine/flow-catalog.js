@@ -162,6 +162,9 @@ const UNIT_DATA_FIELDS = Object.freeze([
   { value: "def", label: "防御力", type: "number" },
   { value: "hp", label: "生命值", type: "number" },
   { value: "hpMax", label: "生命值上限", type: "number" },
+  { value: "energy", label: "能量", type: "number" },
+  { value: "energyMax", label: "能量上限", type: "number" },
+  { value: "summonOrdinal", label: "被召唤序号（0=非召唤）", type: "number" },
   { value: "lastAttackDamage", label: "上一次攻击的伤害", type: "number" },
   { value: "lastAttackHits", label: "上一次攻击命中的目标数", type: "number" },
   { value: "lastHeal", label: "上一次回复的生命值", type: "number" },
@@ -304,14 +307,14 @@ export function buildFlowCatalog(ctx = {}) {
       },
       {
         key: "customColor",
-        label: "自定义特效颜色（含跳字）",
+        label: "自定义特效颜色（飞弹 / 爆炸 / 粒子）",
         control: "checkbox",
         default: false,
         advanced: true,
       },
       {
         key: "damageColor",
-        label: "单色（默认按属性）",
+        label: "特效单色（默认按属性）",
         control: "color",
         default: "#d6d6d6",
         advanced: true,
@@ -319,11 +322,34 @@ export function buildFlowCatalog(ctx = {}) {
       },
       {
         key: "colorStops",
-        label: "多级渐变（逗号分隔，覆盖单色）",
+        label: "特效多级渐变（逗号分隔，覆盖单色）",
         control: "gradient",
         default: "",
         advanced: true,
         showIf: { customColor: true },
+      },
+      {
+        key: "customTextColor",
+        label: "自定义跳字颜色",
+        control: "checkbox",
+        default: false,
+        advanced: true,
+      },
+      {
+        key: "textColor",
+        label: "跳字单色（默认跟随特效 / 属性）",
+        control: "color",
+        default: "#d6d6d6",
+        advanced: true,
+        showIf: { customTextColor: true },
+      },
+      {
+        key: "textColorStops",
+        label: "跳字多级渐变（逗号分隔，覆盖单色）",
+        control: "gradient",
+        default: "",
+        advanced: true,
+        showIf: { customTextColor: true },
       },
       {
         key: "effectImage",
@@ -340,7 +366,7 @@ export function buildFlowCatalog(ctx = {}) {
         advanced: true,
       },
     ],
-    note: "「无视减免」只跳过目标侧的防御 / 抗性 / 易伤，攻击方加成与暴击照常；「附加伤害」不吃任何加成、不看任何减免、不暴击，也不触发「单位攻击时」。目标集里有多个单位时，它们属于同一次攻击动作，命中同时结算；要依次攻击请把「攻击」放进遍历 / 次数 / 条件循环。「伤害来源」留空就是流程拥有者自己；持续伤害可以接到「效果的施加者」，让击杀归属 / 日志记到施加者头上。属性选「本源」时伤害无视一切减免与「免疫伤害」，但仍算一次受击（会触发「单位受击时」）。「高级」里的自定义颜色会同时影响飞弹 / 爆炸 / 冲击 / 粒子 / 跳字：单色用「单色」，填了「多级渐变」时按颜色顺序插值（逗号分隔，如 #ff6b8b, #ffb020, #3aa5f0）；不勾自定义颜色时按伤害属性默认色。「底图」会让特效改用图片纹理；勾「固定底图」时图片固定在画面坐标上不随特效移动，特效在不同位置会显示底图对应位置的像素，并按特效透明度叠加（相当于把原特效色的渲染部分替换成底图）。",
+    note: "「无视减免」只跳过目标侧的防御 / 抗性 / 易伤，攻击方加成与暴击照常；「附加伤害」不吃任何加成、不看任何减免、不暴击，也不触发「单位攻击时」。目标集里有多个单位时，它们属于同一次攻击动作，命中同时结算；要依次攻击请把「攻击」放进遍历 / 次数 / 条件循环。「伤害来源」留空就是流程拥有者自己；持续伤害可以接到「效果的施加者」，让击杀归属 / 日志记到施加者头上。属性选「本源」时伤害无视一切减免与「免疫伤害」，但仍算一次受击（会触发「单位受击时」）。「高级」里可以分别设置「特效颜色」（飞弹 / 爆炸 / 冲击 / 粒子）和「跳字颜色」：单色用颜色选择器，填了「多级渐变」时按颜色顺序插值（逗号分隔，如 #ff6b8b, #ffb020, #3aa5f0）；跳字没单独开启时跟随特效色，特效没开启时按伤害属性默认色。「底图」会让特效改用图片纹理；勾「固定底图」时图片固定在画面坐标上不随特效移动，特效在不同位置会显示底图对应位置的像素，并按特效透明度叠加（相当于把原特效色的渲染部分替换成底图）。",
   });
   def({
     kind: "heal",
@@ -485,6 +511,33 @@ export function buildFlowCatalog(ctx = {}) {
       { id: "next", direction: "out" },
     ],
     outflows: ["next"],
+  });
+  def({
+    kind: "modifyEnergy",
+    group: "action",
+    title: "修改能量",
+    subtitle: "增加 / 减少 / 设置目标单位的当前能量",
+    note: "目标必须开启能量，否则无效；结果会 clamp 在 0 ~ 能量上限。能量上限可被效果属性修正影响。",
+    ports: [
+      { id: "in", direction: "in" },
+      { id: "targets", label: "目标集", direction: "in", type: "targetset" },
+      { id: "value", label: "数值", direction: "in", type: "number" },
+      { id: "next", direction: "out" },
+    ],
+    outflows: ["next"],
+    options: [
+      {
+        key: "mode",
+        label: "方式",
+        control: "select",
+        default: "add",
+        options: [
+          { value: "add", label: "增加" },
+          { value: "sub", label: "减少" },
+          { value: "set", label: "设为" },
+        ],
+      },
+    ],
   });
   def({
     kind: "immuneDamage",

@@ -47,6 +47,8 @@ export const BATTLE_EVENT = Object.freeze({
   ACTION_START: "action:start",
   ACTION_SKIP: "action:skip",
   ACTION_POINTS: "action:points",
+  /** 能量变化（当前值 / 上限） */
+  ENERGY: "energy",
   SKILL: "skill",
   /** 「选择单位」积木 / 技能自动索敌最终指定的目标 */
   TARGET: "target",
@@ -370,6 +372,10 @@ export function createBattle(setup) {
       parentKey: null,
       inheritedFrom: null,
       hp: Math.max(1, Math.min(card.baseHp, startHp)),
+      /** 当前能量；只有 card.energyEnabled 为 true 时才有效 */
+      energy: 0,
+      /** 被父单位召唤的序号：同一个父单位 + 同一个卡 id 从 1 开始 */
+      summonOrdinal: 0,
       state: UNIT_STATES[0],
       permanentBonuses: (card.bonuses || []).map((b) => ({ ...b })),
       extraBonuses: [],
@@ -478,6 +484,54 @@ export function createBattle(setup) {
     const aura = auraBonus.get(unit.key);
     if (aura && aura.mods) addBonus(acc, aura.mods);
     return computeStats(card, acc);
+  }
+
+  /** 能量上限：未开启能量返回 0；四舍五入成整数 */
+  function energyMaxOf(u) {
+    if (!u || !u.card || u.card.energyEnabled !== true) return 0;
+    return Math.max(0, Math.round(Number(statsOf(u).energyMax) || 0));
+  }
+
+  /** 当前能量：读的时候顺带 clamp，避免上限被效果调低后残留超上限值 */
+  function energyOf(u) {
+    if (!u) return 0;
+    const max = energyMaxOf(u);
+    const cur = Math.max(0, Math.min(max, Math.floor(Number(u.energy) || 0)));
+    u.energy = cur;
+    return cur;
+  }
+
+  /**
+   * 修改能量。
+   * @param {object|string} unitRef 单位或 uid/key
+   * @param {"add"|"sub"|"set"} mode
+   * @param {number} amount
+   * @param {string} reason 日志用途：flow / skill-cost / entry / hit ...
+   * @returns {number} 实际变化量（0 = 未变化 / 未开启能量）
+   */
+  function modifyEnergy(unitRef, mode = "add", amount = 0, reason = "flow") {
+    const u = getUnit(unitRef);
+    if (!u || !isAlive(u)) return 0;
+    const max = energyMaxOf(u);
+    if (!max) return 0;
+    const before = energyOf(u);
+    const n = Math.trunc(Number(amount) || 0);
+    let next;
+    if (mode === "set") next = n;
+    else if (mode === "sub") next = before - n;
+    else next = before + n;
+    next = Math.max(0, Math.min(max, Math.trunc(next)));
+    if (next === before) return 0;
+    u.energy = next;
+    log(BATTLE_EVENT.ENERGY, {
+      unit: u.uid,
+      delta: next - before,
+      before,
+      energy: next,
+      max,
+      reason,
+    });
+    return next - before;
   }
 
   function resistancesOf(u) {
@@ -1091,6 +1145,8 @@ export function createBattle(setup) {
       newAttackGroup: () => ++attackGroupSeq,
       /** 「额外行动」积木：增加目标本回合剩余可动次数 */
       addActions,
+      /** 「修改能量」积木：增加 / 减少 / 设为目标当前能量 */
+      modifyEnergy: (target, mode, amount) => modifyEnergy(target, mode, amount, "flow"),
       unitData: (u, field, opts) => unitDataOf(u, field, opts),
       damage: (target, value, attribute, extra) => {
         const t = getUnit(target);
@@ -1102,6 +1158,7 @@ export function createBattle(setup) {
           attribute,
           cause: "flow",
           color: extra && extra.color ? extra.color : null,
+          textColor: extra && extra.textColor ? extra.textColor : null,
           texture: extra && extra.texture ? String(extra.texture) : "",
           fixedTexture: Boolean(extra && extra.fixedTexture),
           ignoreReduction: Boolean(extra && extra.ignoreReduction),
@@ -1362,6 +1419,9 @@ export function createBattle(setup) {
       case "def": return statsOf(u).def;
       case "hp": return u.hp;
       case "hpMax": return statsOf(u).hp;
+      case "energy": return energyOf(u);
+      case "energyMax": return energyMaxOf(u);
+      case "summonOrdinal": return Math.max(0, Number(u.summonOrdinal) || 0);
       case "lastAttackDamage": return u.stats.lastAttackDamage || 0;
       case "lastAttackHits": return u.stats.lastAttackHits || 0;
       case "lastHeal": return u.stats.lastHeal || 0;
@@ -1523,6 +1583,7 @@ export function createBattle(setup) {
         skillId: p.skillId || null,
         cause: p.cause || "direct",
         color: p.color || null,
+        textColor: p.textColor || null,
         texture: p.texture || "",
         fixedTexture: Boolean(p.fixedTexture),
         ...result,
@@ -1557,6 +1618,7 @@ export function createBattle(setup) {
       skillId: p.skillId || null,
       cause: p.cause || "direct",
       color: p.color || null,
+      textColor: p.textColor || null,
       texture: p.texture || "",
       fixedTexture: Boolean(p.fixedTexture),
       ...result,
@@ -1849,6 +1911,10 @@ export function createBattle(setup) {
     unit.faction = parent ? factionOf(parent) : side;
     unit.parentKey = parent ? parent.key : null;
     if (parent) {
+      // 同一个父单位 + 同一个卡 id 的召唤序号；「首次召唤」按这个序号判断
+      parent.summonCounts = parent.summonCounts || Object.create(null);
+      unit.summonOrdinal = (Number(parent.summonCounts[card.id]) || 0) + 1;
+      parent.summonCounts[card.id] = unit.summonOrdinal;
       const inherited = parent.attrBonus || {};
       unit.attrBonus = {
         mods: structuredClone(inherited.mods || {}),
@@ -1857,7 +1923,7 @@ export function createBattle(setup) {
       for (const layer of parent.effects) {
         const def = registry.getEffect(layer.id);
         // 「不继承」的效果不复制给召唤物（黑名单式的持有控制仍由流程条件负责）
-        if (def && def.inherit === false) continue;
+        if (!def || def.inherit !== true) continue;
         unit.effects.push({
           id: layer.id,
           stacks: layer.stacks,
@@ -2513,12 +2579,16 @@ export function createBattle(setup) {
     const totalUsed = rec ? Math.max(0, Number(rec.total) || 0) : 0;
     const turnLeft = perTurn === 0 ? null : Math.max(0, perTurn - turnUsed);
     const totalLeft = total === 0 ? null : Math.max(0, total - totalUsed);
+    const energyCost = Math.max(0, Math.floor(Number(skill?.energyCost) || 0));
+    const energyNow = energyOf(u);
+    const energyOk = energyCost === 0 || (Boolean(u && u.card.energyEnabled) && energyNow >= energyCost);
     const conditionOk = skillConditionOk(u, skill);
     let reason = "";
     if (!isAlive(u)) reason = "单位已不在场";
     else if (skill?.type !== "active") reason = "被动技能";
     else if (turnLeft === 0) reason = "本回合次数已用完";
     else if (totalLeft === 0) reason = "总次数已用完";
+    else if (!energyOk) reason = `能量不足（${energyNow}/${energyCost}）`;
     else if (!conditionOk) reason = "释放条件未满足";
     return {
       perTurn,
@@ -2527,6 +2597,9 @@ export function createBattle(setup) {
       totalUsed,
       turnLeft,
       totalLeft,
+      energyCost,
+      energyNow,
+      energyOk,
       conditionOk,
       available: !reason,
       reason,
@@ -2571,9 +2644,11 @@ export function createBattle(setup) {
       skillName: skill.name,
       target: primary ? primary.uid : null,
     });
-    // 一次技能 = 消耗 1 次可动次数 + 1 次技能次数
+    // 一次技能 = 消耗 1 次技能次数；可动次数默认消耗 1 次。
+    // 「不结束本次行动」的技能不扣可动次数，但仍标记 actionUsed，不能换人。
     spendSkillUse(A, skill);
-    spendAction(A, 1);
+    if (Number(skill.energyCost) > 0) modifyEnergy(A, "sub", Number(skill.energyCost), "skill-cost");
+    if (!skill.keepAction) spendAction(A, 1);
     // 本次行动已经使用过技能：不能再换人；还有剩余次数时留在本单位继续用技能
     state.actionUsed = true;
 
@@ -2732,6 +2807,18 @@ export function createBattle(setup) {
       hpMax: s.hp,
       atk: s.atk,
       def: s.def,
+      /** 能量：只有在 card.energyEnabled 为 true 时才会显示/变化 */
+      energyEnabled: Boolean(u.card.energyEnabled),
+      energy: energyOf(u),
+      energyMax: energyMaxOf(u),
+      energyPerRing: Number(u.card.energyPerRing) || 1,
+      energyColor: u.card.energyColor || "#47A982",
+      energyBarWidth: Number.isFinite(Number(u.card.energyBarWidth)) ? Number(u.card.energyBarWidth) : 20,
+      energyOutlineColor: u.card.energyOutlineColor || "#ffffff",
+      energyOutlineWidth: Number.isFinite(Number(u.card.energyOutlineWidth)) ? Number(u.card.energyOutlineWidth) : 20,
+      energyShadow: u.card.energyShadow !== false,
+      energyBgColor: u.card.energyBgColor || "#000000",
+      energyDisplay: u.card.energyDisplay || "ring",
       /** 每回合默认可动次数 / 本回合剩余可动次数 */
       actionsPerTurn: u.actionsPerTurn,
       actionsLeft: u.actionsLeft,
@@ -2944,6 +3031,16 @@ export function createBattle(setup) {
     skillTargetPlan,
     /** 增加 / 扣减单位本回合剩余可动次数（额外行动） */
     addActions,
+    /** 当前能量 / 能量上限 / 修改能量（脚本与测试入口） */
+    energyOf(unitRef) {
+      return energyOf(getUnit(unitRef));
+    },
+    energyMaxOf(unitRef) {
+      return energyMaxOf(getUnit(unitRef));
+    },
+    modifyEnergy(unitRef, mode = "add", amount = 0, reason = "api") {
+      return modifyEnergy(getUnit(unitRef), mode, amount, reason);
+    },
     resetActions,
     canAct,
     isAlive,
